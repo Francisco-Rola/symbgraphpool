@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "contracts/conflictlab",
+    "contracts/miniwarehouse",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+authors = ["Adaptive Conflict Graph contributors"]
+
+[workspace.dependencies]
+# Pin RustCrypto transitive dependencies to releases compatible with Rust 1.75.
+# Newer 1.x releases of these crates require Rust 1.85 / Edition 2024.
+base64ct = { version = "=1.6.0", default-features = false }
+zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+cosmwasm-std = "=1.5.11"
+cw-storage-plus = "=1.2.0"
+schemars = "=0.8.21"
+serde = { version = "=1.0.210", features = ["derive"] }
+thiserror = "=1.0.63"

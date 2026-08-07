@@ -1,0 +1,1066 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "conflictlab",
+  "source": "benchmarks/contracts/conflictlab/src/lib.rs",
+  "storage_resources": {
+    "CONFIG": {
+      "key_semantic_name": "logical configuration field (ADMIN, FEE_BPS, or EPOCH)"
+    },
+    "BALANCES": {
+      "key_semantic_name": "account"
+    },
+    "ALLOWANCES": {
+      "key_semantic_name": "owner_spender"
+    },
+    "COUNTERS": {
+      "key_semantic_name": "shard_id"
+    },
+    "ORDERS": {
+      "key_semantic_name": "order_id"
+    }
+  },
+  "dependency_kinds": {
+    "input": "The access or path condition depends only on transaction/query input.",
+    "state": "The access or path condition depends only on previously stored contract state.",
+    "input_and_state": "The access or path condition depends on both input and stored state.",
+    "none": "Unconditional or not input/state dependent.",
+    "unknown": "The analyzer cannot precisely classify the dependency."
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "info.sender",
+        "msg.admin",
+        "msg.fee_bps",
+        "msg.epoch"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin",
+              "fee_bps",
+              "epoch"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 141,
+            "end_line": 159,
+            "code": "ADMIN.save(...); FEE_BPS.save(...); EPOCH.save(...);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Credit",
+      "input_parameters": [
+        "account",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "account"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 203,
+            "end_line": 220,
+            "code": "BALANCES.may_load(account); BALANCES.save(account, balance + amount);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "account"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 203,
+            "end_line": 220,
+            "code": "BALANCES.may_load(account); BALANCES.save(account, balance + amount);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Transfer",
+      "input_parameters": [
+        "info.sender",
+        "from",
+        "to",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "from"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == from",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 222,
+            "end_line": 425,
+            "code": "debit_balance(from, amount); credit_balance(to, amount);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "from"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == from && BALANCES[from] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 222,
+            "end_line": 425,
+            "code": "debit_balance(from, amount); credit_balance(to, amount);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "to"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == from",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 222,
+            "end_line": 425,
+            "code": "debit_balance(from, amount); credit_balance(to, amount);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "to"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == from",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 222,
+            "end_line": 425,
+            "code": "debit_balance(from, amount); credit_balance(to, amount);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Approve",
+      "input_parameters": [
+        "info.sender",
+        "owner",
+        "spender",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, spender)"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == owner",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 242,
+            "end_line": 257,
+            "code": "ALLOWANCES.save(allowance_key(owner, spender), amount);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::TransferFrom",
+      "input_parameters": [
+        "info.sender",
+        "owner",
+        "spender",
+        "to",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, spender)"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == spender",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 259,
+            "end_line": 425,
+            "code": "load/update ALLOWANCES(owner, spender); debit owner; credit recipient;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, spender)"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == spender && ALLOWANCES[(owner, spender)] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 259,
+            "end_line": 425,
+            "code": "load/update ALLOWANCES(owner, spender); debit owner; credit recipient;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == spender && ALLOWANCES[(owner, spender)] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 259,
+            "end_line": 425,
+            "code": "load/update ALLOWANCES(owner, spender); debit owner; credit recipient;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == spender && ALLOWANCES[(owner, spender)] >= amount && BALANCES[owner] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 259,
+            "end_line": 425,
+            "code": "load/update ALLOWANCES(owner, spender); debit owner; credit recipient;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "to"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == spender && ALLOWANCES[(owner, spender)] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 259,
+            "end_line": 425,
+            "code": "load/update ALLOWANCES(owner, spender); debit owner; credit recipient;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "to"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == spender && ALLOWANCES[(owner, spender)] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 259,
+            "end_line": 425,
+            "code": "load/update ALLOWANCES(owner, spender); debit owner; credit recipient;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::IncrementCounter",
+      "input_parameters": [
+        "shard_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "COUNTERS",
+          "key": {
+            "semantic_name": "shard_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "shard_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 288,
+            "end_line": 296,
+            "code": "COUNTERS.may_load(shard_id); COUNTERS.save(shard_id, value + 1);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "COUNTERS",
+          "key": {
+            "semantic_name": "shard_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "shard_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 288,
+            "end_line": 296,
+            "code": "COUNTERS.may_load(shard_id); COUNTERS.save(shard_id, value + 1);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ConditionalCredit",
+      "input_parameters": [
+        "account",
+        "expected_epoch",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "epoch"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 298,
+            "end_line": 318,
+            "code": "EPOCH.load(); conditionally load/update BALANCES(account);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "account"
+            }
+          },
+          "guard": {
+            "expression": "expected_epoch == CONFIG.epoch",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 298,
+            "end_line": 318,
+            "code": "EPOCH.load(); conditionally load/update BALANCES(account);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "account"
+            }
+          },
+          "guard": {
+            "expression": "expected_epoch == CONFIG.epoch",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 298,
+            "end_line": 318,
+            "code": "EPOCH.load(); conditionally load/update BALANCES(account);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SetFee",
+      "input_parameters": [
+        "info.sender",
+        "new_fee_bps"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 320,
+            "end_line": 331,
+            "code": "ADMIN.load() through ensure_admin; FEE_BPS.save(new_fee_bps);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "fee_bps"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin && new_fee_bps <= MAX_FEE_BPS",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 320,
+            "end_line": 331,
+            "code": "ADMIN.load() through ensure_admin; FEE_BPS.save(new_fee_bps);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SetEpoch",
+      "input_parameters": [
+        "info.sender",
+        "new_epoch"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 333,
+            "end_line": 341,
+            "code": "ADMIN.load() through ensure_admin; EPOCH.save(new_epoch);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "epoch"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 333,
+            "end_line": 341,
+            "code": "ADMIN.load() through ensure_admin; EPOCH.save(new_epoch);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ReceiveTransfer",
+      "input_parameters": [
+        "account",
+        "amount"
+      ],
+      "accesses": [],
+      "delegates_to": {
+        "entrypoint": "execute::Credit",
+        "input_mapping": {
+          "account": "account",
+          "amount": "amount"
+        }
+      },
+      "notes": [
+        "The wrapper delegates all storage effects to execute::Credit."
+      ]
+    },
+    {
+      "entrypoint": "execute::CreateOrder",
+      "input_parameters": [
+        "order_id",
+        "owner",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "order_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "order_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 352,
+            "end_line": 425,
+            "code": "check ORDERS(order_id); debit BALANCES(owner); save ORDERS(order_id);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "ORDERS[order_id] is absent",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 352,
+            "end_line": 425,
+            "code": "check ORDERS(order_id); debit BALANCES(owner); save ORDERS(order_id);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "ORDERS[order_id] is absent && BALANCES[owner] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 352,
+            "end_line": 425,
+            "code": "check ORDERS(order_id); debit BALANCES(owner); save ORDERS(order_id);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "order_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "order_id"
+            }
+          },
+          "guard": {
+            "expression": "ORDERS[order_id] is absent && BALANCES[owner] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 352,
+            "end_line": 425,
+            "code": "check ORDERS(order_id); debit BALANCES(owner); save ORDERS(order_id);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::CancelOrder",
+      "input_parameters": [
+        "info.sender",
+        "order_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "order_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "order_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 367,
+            "end_line": 425,
+            "code": "load/remove ORDERS(order_id); credit BALANCES(order.owner);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "order_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "order_id"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == ORDERS[order_id].owner",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 367,
+            "end_line": 425,
+            "code": "load/remove ORDERS(order_id); credit BALANCES(order.owner);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "state"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == ORDERS[order_id].owner",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 367,
+            "end_line": 425,
+            "code": "load/remove ORDERS(order_id); credit BALANCES(order.owner);"
+          },
+          "notes": [
+            "The balance key comes from the stored order owner, not directly from transaction input."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "state"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == ORDERS[order_id].owner",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 367,
+            "end_line": 425,
+            "code": "load/remove ORDERS(order_id); credit BALANCES(order.owner);"
+          },
+          "notes": [
+            "The balance key comes from the stored order owner, so key equality remains unresolved."
+          ]
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ResetAllBalances",
+      "input_parameters": [
+        "info.sender"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 383,
+            "end_line": 436,
+            "code": "ADMIN.load() through ensure_admin; scan and remove all BALANCES keys;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 383,
+            "end_line": 436,
+            "code": "ADMIN.load() through ensure_admin; scan and remove all BALANCES keys;"
+          },
+          "notes": [
+            "Range scan covers every logical BALANCES key."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 383,
+            "end_line": 436,
+            "code": "ADMIN.load() through ensure_admin; scan and remove all BALANCES keys;"
+          },
+          "notes": [
+            "Wildcard delete over all BALANCES keys; no concrete input key is available."
+          ]
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Config",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin",
+              "fee_bps",
+              "epoch"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 451,
+            "end_line": 457,
+            "code": "load ADMIN, FEE_BPS, and EPOCH to construct ConfigResponse;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Balance",
+      "input_parameters": [
+        "account"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "account",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "account"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 459,
+            "end_line": 466,
+            "code": "BALANCES.may_load(account);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Allowance",
+      "input_parameters": [
+        "owner",
+        "spender"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, spender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 468,
+            "end_line": 475,
+            "code": "ALLOWANCES.may_load(allowance_key(owner, spender));"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Counter",
+      "input_parameters": [
+        "shard_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "COUNTERS",
+          "key": {
+            "semantic_name": "shard_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "shard_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 477,
+            "end_line": 483,
+            "code": "COUNTERS.may_load(shard_id);"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Order",
+      "input_parameters": [
+        "order_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "order_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "order_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 485,
+            "end_line": 489,
+            "code": "ORDERS.may_load(order_id);"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ],
+  "semantic_key_rules": {
+    "CONFIG": "key.semantic_name identifies logical configuration fields stored as independent ADMIN, FEE_BPS, and EPOCH items.",
+    "BALANCES": "key.semantic_name is account; input origin is present for direct account keys and absent for wildcard/state-derived keys.",
+    "ALLOWANCES": "owner_spender denotes the composite (owner, spender) key.",
+    "COUNTERS": "shard_id is directly input-derived.",
+    "ORDERS": "order_id is directly input-derived."
+  }
+}

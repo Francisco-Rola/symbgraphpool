@@ -1,0 +1,152 @@
+# Adaptive Conflict Graph
+
+A modular Rust implementation of profile-guided smart-contract conflict graphs.
+
+This first brick implements:
+
+- parsing and validating symbolic-analyzer JSON documents;
+- normalization into runtime-independent symbolic profiles, including delegated-entrypoint access
+  composition and binding provenance;
+- deterministic stable profile keys;
+- dense validator-local `ProfileId` assignment at graph load time;
+- indexed derivation of offline profile edges from read/write resource overlap;
+- a serializable graph artifact and an immutable in-memory CSR graph;
+- a small compiler/inspection CLI;
+- tests using Astroport and the source-controlled ConflictLab and MiniWarehouse workloads;
+- a separate benchmark-contract workspace with analyzer-compatible symbolic profiles;
+- a minimal CosmWasm execution runtime with compiled-module caching, atomic storage, native transfers, nested calls, and access tracing;
+- a deterministic single-validator harness with rate-controlled ingress, an all-accepting FIFO mempool, two-second block windows, and scheduler/executor extension points.
+
+## Repository layout
+
+```text
+crates/acg-core            Domain types, profile identities, symbolic profiles, edge types
+crates/acg-symbolic-json   Analyzer JSON schema and normalization
+crates/acg-profile-graph   Edge derivation, artifact format, dense-ID graph loader
+crates/acg-cli             `acg-profilec` compiler and inspector
+benchmarks/contracts       Single-file CosmWasm benchmark contracts
+benchmarks/symbolic        Analyzer-compatible symbolic profile JSON
+benchmarks/README.md       Benchmark build, inspection, and debugging guide
+runtime/                   CosmWasm engine and single-validator simulation workspace
+docs/audits/               Audit records for imported or replaced prototypes
+```
+
+The crates deliberately separate untrusted analyzer input from graph-runtime data. The online
+path consumes a precompiled `ProfileGraphArtifact`; it does not parse source code or run symbolic
+analysis.
+
+## Build
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+## Benchmark resources
+
+The repository includes two first-party workloads:
+
+- **ConflictLab**: a compact debugging contract for exact key equality, conditional guards,
+  delegation, state-derived keys, and wildcard accesses.
+- **MiniWarehouse**: a non-compliant TPC-C-inspired integration workload with multi-record
+  transactions and variable-size order lines.
+
+The contracts use a separate Cargo workspace so CosmWasm dependencies do not enter the core graph
+crates. Build and test them with:
+
+```bash
+cargo test --manifest-path benchmarks/Cargo.toml --workspace
+```
+
+Compile their symbolic profiles through the same CLI used for Astroport. Complete commands and
+expected graph counts are in [`benchmarks/README.md`](benchmarks/README.md).
+
+## Execution runtime
+
+The `runtime/` workspace executes real CosmWasm bytecode and provides the host-side state model that
+will later feed concrete read/write observations into the adaptive graph. It also contains a
+deterministic single-validator simulation of transaction ingress, an all-accepting FIFO mempool,
+configurable block windows, scheduling plans, and serial block execution. It deliberately excludes
+real peer-to-peer networking, consensus voting/finality, staking, governance, and IBC.
+
+```bash
+cargo test --manifest-path runtime/Cargo.toml --workspace --all-targets
+```
+
+See [`runtime/README.md`](runtime/README.md) for usage and
+[`docs/audits/cosmosse-vm-audit.md`](docs/audits/cosmosse-vm-audit.md) for the audit of the uploaded
+experimental fork.
+
+## Compile analyzer output
+
+The analyzer JSON does not contain the runtime identifier or contract code hash. They must be
+provided by the caller because they are part of profile identity.
+
+```bash
+cargo run -p acg-cli -- compile \
+  --input crates/acg-symbolic-json/tests/fixtures/astroport_pair_compact_config_fields.json \
+  --output /tmp/astroport.profile-graph.json \
+  --runtime cosmwasm \
+  --code-hash 0000000000000000000000000000000000000000000000000000000000000001
+```
+
+For runtimes with native numeric selectors, pass a JSON object such as:
+
+```json
+{
+  "execute::Swap": 42,
+  "query::Pair": 7
+}
+```
+
+with `--selector-map selectors.json`. Unknown entries and same-kind selector collisions are rejected.
+
+Inspect the compiled artifact:
+
+```bash
+cargo run -p acg-cli -- inspect --input /tmp/astroport.profile-graph.json
+```
+
+## Identity policy
+
+`StableProfileKey` is BLAKE3 over a domain-separated canonical binary encoding of:
+
+```text
+(runtime_id, contract_code_hash, entrypoint_kind, numeric_entrypoint_selector,
+ profile_schema_version)
+```
+
+Analyzer entrypoint names are converted to numeric selectors using a domain-separated 64-bit
+BLAKE3 digest. A chain-native numeric selector can override that fallback through
+`IngestionContext::selector_overrides`.
+
+`ProfileId` is a dense `u32`. It is never persisted as identity. At graph load, profile records are
+sorted by `StableProfileKey` and assigned IDs `0..N`, making loading deterministic and enabling
+array-based adjacency.
+
+## Current edge semantics
+
+The compiler indexes each normalized access by `(contract code hash, resource family, semantic
+key component)` and materializes write-read, read-write, and write-write profile pairs. Read-read
+pairs are excluded.
+
+Delegated entrypoints inherit their target's effective accesses recursively. Exact input-key
+origins are remapped through the analyzer's `input_mapping`, while a delegation-frame path is
+retained on keys and guards for later predicate compilation. Missing targets and cycles are rejected.
+
+Each edge stores one or more predicate clauses. In this phase the clauses are declarative rather
+than executable bytecode:
+
+- same contract instance;
+- optional equality between two input-derived resource keys;
+- unresolved key matching when the analyzer cannot expose both key origins;
+- original path guards for later predicate compilation.
+
+The next brick should compile these clauses into the online predicate representation and build
+transaction-level edges from concrete `InstanceId` and input bindings.
+
+## Publication checklist
+
+Before publishing, add the repository URL to workspace metadata, select project governance, add a
+code of conduct, generate and commit `Cargo.lock`, and document the analyzer JSON compatibility
+policy.

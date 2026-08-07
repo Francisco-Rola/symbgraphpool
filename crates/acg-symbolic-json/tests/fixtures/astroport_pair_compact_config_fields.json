@@ -1,0 +1,932 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "astroport-pair",
+  "source": "contracts/pair/src/contract.rs",
+  "storage_resources": {
+    "CONFIG": {
+      "key_semantic_name": "list of accessed Config level-1 fields"
+    },
+    "BALANCES": {
+      "key_semantic_name": "asset_info"
+    }
+  },
+  "dependency_kinds": {
+    "input": "The access or path condition depends only on transaction/query input.",
+    "state": "The access or path condition depends only on previously stored contract state.",
+    "input_and_state": "The access or path condition depends on both input and stored state.",
+    "none": "Unconditional or not input/state dependent."
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "env",
+        "msg.asset_infos",
+        "msg.pair_type",
+        "msg.factory_addr",
+        "msg.init_params"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "asset_info",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "msg.asset_infos[i]"
+            }
+          },
+          "guard": {
+            "expression": "msg.init_params.track_asset_balances == true",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 93,
+            "end_line": 96,
+            "code": "for asset in &config.pair_info.asset_infos { BALANCES.save(..., asset, 0, env.block.height)?; }"
+          },
+          "notes": [
+            "One BALANCES write is performed for each element of msg.asset_infos."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info",
+              "factory_addr",
+              "block_time_last",
+              "price0_cumulative_last",
+              "price1_cumulative_last",
+              "track_asset_balances",
+              "fee_share",
+              "tracker_addr"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 77,
+            "end_line": 99,
+            "code": "let config = Config { ... }; CONFIG.save(deps.storage, &config)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "reply::CreateDenom",
+      "input_parameters": [
+        "msg.id",
+        "msg.result"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "track_asset_balances",
+              "factory_addr",
+              "pair_info"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "msg.id == CREATE_DENOM_REPLY_ID && msg.result is successful",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 121,
+            "end_line": 156,
+            "code": "let config = CONFIG.load(deps.storage)?; ... parse_reply_create_denom(msg)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "msg.id == CREATE_DENOM_REPLY_ID && msg.result is successful && CONFIG.pair_info.liquidity_token.is_empty()",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 157,
+            "end_line": 166,
+            "code": "CONFIG.update(... config.pair_info.liquidity_token = new_token_denom ...)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "reply::InstantiateTrackingContract",
+      "input_parameters": [
+        "msg.id",
+        "msg.result"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "tracker_addr"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "msg.id == INSTANTIATE_TRACKER_REPLY_ID && msg.result is successful",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 175,
+            "end_line": 183,
+            "code": "CONFIG.update(... config.tracker_addr = Some(validated_reply_address) ...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "msg.id == INSTANTIATE_TRACKER_REPLY_ID && msg.result is successful",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 180,
+            "end_line": 188,
+            "code": "let config = CONFIG.update(...)?; use config.pair_info.liquidity_token"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Receive(Cw20HookMsg::Swap)",
+      "input_parameters": [
+        "info.sender",
+        "cw20_msg.sender",
+        "cw20_msg.amount",
+        "cw20_msg.msg"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "cw20_msg.msg decodes to Cw20HookMsg::Swap",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 292,
+            "end_line": 309,
+            "code": "let config = CONFIG.load(deps.storage)?; verify info.sender belongs to config.pair_info.asset_infos"
+          },
+          "notes": []
+        }
+      ],
+      "delegates_to": {
+        "entrypoint": "execute::Swap",
+        "input_mapping": {
+          "offer_asset.info": "Token { contract_addr: info.sender }",
+          "offer_asset.amount": "cw20_msg.amount",
+          "sender": "cw20_msg.sender",
+          "belief_price": "cw20_msg.msg.belief_price",
+          "max_spread": "cw20_msg.msg.max_spread",
+          "to": "cw20_msg.msg.to"
+        }
+      }
+    },
+    {
+      "entrypoint": "execute::ProvideLiquidity",
+      "input_parameters": [
+        "assets",
+        "slippage_tolerance",
+        "auto_stake",
+        "receiver",
+        "min_lp_to_receive",
+        "info.sender",
+        "info.funds",
+        "env"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info",
+              "factory_addr",
+              "track_asset_balances",
+              "block_time_last",
+              "price0_cumulative_last",
+              "price1_cumulative_last"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 361,
+            "end_line": 446,
+            "code": "let mut config = CONFIG.load(deps.storage)?; ..."
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "asset_info",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "CONFIG.track_asset_balances == true",
+            "dependency_kind": "state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 428,
+            "end_line": 436,
+            "code": "BALANCES.save(..., &pool.info, pool.amount + deposits[i], env.block.height)?;"
+          },
+          "notes": [
+            "One write is performed for each configured pool asset.",
+            "The written amount depends on the matching assets[i].amount input, but the key is the configured pool asset."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "block_time_last",
+              "price0_cumulative_last",
+              "price1_cumulative_last"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "env.block.time.seconds() > CONFIG.block_time_last",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 439,
+            "end_line": 447,
+            "code": "if let Some(...) = accumulate_prices(env, &config, ...) { CONFIG.save(...)?; }"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::WithdrawLiquidity",
+      "input_parameters": [
+        "info.sender",
+        "info.funds",
+        "assets",
+        "min_assets_to_receive",
+        "env"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info",
+              "track_asset_balances",
+              "block_time_last",
+              "price0_cumulative_last",
+              "price1_cumulative_last"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 514,
+            "end_line": 565,
+            "code": "let mut config = CONFIG.load(deps.storage)?; ..."
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "asset_info",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "assets.is_empty() && CONFIG.track_asset_balances == true",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 535,
+            "end_line": 543,
+            "code": "BALANCES.save(..., &pool.info, pool.amount - refund_assets[i].amount, env.block.height)?;"
+          },
+          "notes": [
+            "One write is performed for each configured pool asset."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "block_time_last",
+              "price0_cumulative_last",
+              "price1_cumulative_last"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "assets.is_empty() && env.block.time.seconds() > CONFIG.block_time_last",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 546,
+            "end_line": 554,
+            "code": "if let Some(...) = accumulate_prices(env, &config, ...) { CONFIG.save(...)?; }"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Swap",
+      "input_parameters": [
+        "info",
+        "sender",
+        "offer_asset",
+        "belief_price",
+        "max_spread",
+        "to",
+        "env"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info",
+              "factory_addr",
+              "fee_share",
+              "track_asset_balances",
+              "block_time_last",
+              "price0_cumulative_last",
+              "price1_cumulative_last"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 626,
+            "end_line": 752,
+            "code": "let mut config = CONFIG.load(deps.storage)?; ..."
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "asset_info",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "offer_asset.info"
+            }
+          },
+          "guard": {
+            "expression": "CONFIG.track_asset_balances == true",
+            "dependency_kind": "state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 730,
+            "end_line": 735,
+            "code": "BALANCES.save(..., &offer_pool.info, offer_pool.amount + offer_asset.amount, env.block.height)?;"
+          },
+          "notes": [
+            "This is the pool entry selected as the offer side by offer_asset.info."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "asset_info",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "offer_asset.info"
+            }
+          },
+          "guard": {
+            "expression": "CONFIG.track_asset_balances == true",
+            "dependency_kind": "state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 736,
+            "end_line": 742,
+            "code": "BALANCES.save(..., &ask_pool.info, ask_pool.amount - return_amount - fees, env.block.height)?;"
+          },
+          "notes": [
+            "This is the complementary configured pool entry selected as the ask side by offer_asset.info."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "block_time_last",
+              "price0_cumulative_last",
+              "price1_cumulative_last"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "env.block.time.seconds() > CONFIG.block_time_last",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 745,
+            "end_line": 753,
+            "code": "if let Some(...) = accumulate_prices(env, &config, ...) { CONFIG.save(...)?; }"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::UpdateConfig::EnableFeeShare",
+      "input_parameters": [
+        "info.sender",
+        "params.fee_share_bps",
+        "params.fee_share_address"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "factory_addr"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 784,
+            "end_line": 789,
+            "code": "let mut config = CONFIG.load(deps.storage)?; query factory owner using config.factory_addr"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "fee_share"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == factory.owner && 0 < params.fee_share_bps <= MAX_FEE_SHARE_BPS",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 793,
+            "end_line": 813,
+            "code": "config.fee_share = Some(FeeShareConfig { bps, recipient }); CONFIG.save(...)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::UpdateConfig::DisableFeeShare",
+      "input_parameters": [
+        "info.sender"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "factory_addr"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 784,
+            "end_line": 789,
+            "code": "let mut config = CONFIG.load(deps.storage)?; query factory owner using config.factory_addr"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "fee_share"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == factory.owner",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 823,
+            "end_line": 827,
+            "code": "config.fee_share = None; CONFIG.save(deps.storage, &config)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Pair",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 931,
+            "end_line": 931,
+            "code": "CONFIG.load(deps.storage)?.pair_info"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Pool",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 957,
+            "end_line": 960,
+            "code": "let config = CONFIG.load(deps.storage)?; pool_info(deps.querier, &config)?"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Share",
+      "input_parameters": [
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 973,
+            "end_line": 976,
+            "code": "let config = CONFIG.load(deps.storage)?; pool_info(...); get_share_in_assets(..., amount, ...)"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::SimulateWithdraw",
+      "input_parameters": [
+        "lp_amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 946,
+            "end_line": 946,
+            "code": "QueryMsg::SimulateWithdraw { lp_amount } => query_share(deps, lp_amount)"
+          },
+          "notes": []
+        }
+      ],
+      "delegates_to": {
+        "entrypoint": "query::Share",
+        "input_mapping": {
+          "amount": "lp_amount"
+        }
+      }
+    },
+    {
+      "entrypoint": "query::Simulation",
+      "input_parameters": [
+        "offer_asset"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info",
+              "factory_addr"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 984,
+            "end_line": 1017,
+            "code": "let config = CONFIG.load(deps.storage)?; orient pools using offer_asset.info; query fee info"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::ReverseSimulation",
+      "input_parameters": [
+        "ask_asset"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info",
+              "factory_addr"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 1030,
+            "end_line": 1066,
+            "code": "let config = CONFIG.load(deps.storage)?; orient pools using ask_asset.info; query fee info"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::CumulativePrices",
+      "input_parameters": [
+        "env"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info",
+              "block_time_last",
+              "price0_cumulative_last",
+              "price1_cumulative_last"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 1076,
+            "end_line": 1088,
+            "code": "let config = CONFIG.load(deps.storage)?; accumulate_prices(env, &config, ...)"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Config",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "factory_addr",
+              "block_time_last",
+              "track_asset_balances",
+              "fee_share",
+              "tracker_addr"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 1113,
+            "end_line": 1127,
+            "code": "let config = CONFIG.load(deps.storage)?; construct ConfigResponse"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::AssetBalanceAt",
+      "input_parameters": [
+        "asset_info",
+        "block_height"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "asset_info",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "asset_info"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 1161,
+            "end_line": 1167,
+            "code": "BALANCES.may_load_at_height(deps.storage, &asset_info, block_height.u64())"
+          },
+          "notes": [
+            "block_height selects the historical snapshot but is not part of the logical resource key."
+          ]
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::SimulateProvide",
+      "input_parameters": [
+        "assets",
+        "slippage_tolerance"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "pair_info"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "contracts/pair/src/contract.rs",
+            "start_line": 1137,
+            "end_line": 1155,
+            "code": "let config = CONFIG.load(deps.storage)?; query pools; calculate shares from assets and slippage_tolerance"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "migrate",
+      "input_parameters": [
+        "env",
+        "msg"
+      ],
+      "accesses": [],
+      "notes": [
+        "The current implementation immediately panics with unimplemented! and performs no storage access."
+      ]
+    }
+  ],
+  "semantic_key_rules": {
+    "CONFIG": "key.semantic_name is a list containing only the top-level Config fields semantically read or written by that access.",
+    "BALANCES": "key.semantic_name is asset_info; depends_on identifies a direct input-derived key when applicable."
+  }
+}

@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/acg-cosmwasm-engine",
+    "crates/acg-validator-sim",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+authors = ["Adaptive Conflict Graph contributors"]
+
+[workspace.dependencies]
+acg-cosmwasm-engine = { path = "crates/acg-cosmwasm-engine" }
+
+# Stable CosmWasm 2.x host interface. The uploaded fork was based on 2.0.0-rc.1.
+cosmwasm-std = { version = "=2.0.9", default-features = false, features = ["std", "iterator"] }
+cosmwasm-vm = { version = "=2.0.9", default-features = false, features = ["iterator", "cranelift"] }
+serde = { version = "=1.0.210", features = ["derive"] }
+serde_json = "=1.0.128"
+thiserror = "=1.0.63"
+sha2 = "=0.10.8"
+hex = "=0.4.3"
+parking_lot = "=0.12.3"
+
+# MSRV guards for Rust 1.75. Newer semver-compatible releases require newer Rust editions.
+base64 = "=0.21.7"
+base64ct = { version = "=1.6.0", default-features = false }
+zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+indexmap = "=2.11.4"
+clru = "=0.6.2"
+uuid = { version = "=1.18.1", default-features = false }
+rayon = "=1.10.0"
+rayon-core = "=1.12.1"
+backtrace = "=0.3.74"

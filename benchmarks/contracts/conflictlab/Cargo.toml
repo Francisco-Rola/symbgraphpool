@@ -1,0 +1,19 @@
+[package]
+name = "acg-benchmark-conflictlab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64ct.workspace = true
+cosmwasm-std.workspace = true
+cw-storage-plus.workspace = true
+schemars.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true

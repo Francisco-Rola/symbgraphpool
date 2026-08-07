@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --all-targets
+
+  benchmark-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path benchmarks/Cargo.toml --all -- --check
+      - run: cargo clippy --manifest-path benchmarks/Cargo.toml --workspace --all-targets -- -D warnings
+      - run: cargo test --manifest-path benchmarks/Cargo.toml --workspace
+
+  execution-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path runtime/Cargo.toml --all -- --check
+      - run: cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets -- -D warnings
+      - run: cargo test --manifest-path runtime/Cargo.toml --workspace --all-targets

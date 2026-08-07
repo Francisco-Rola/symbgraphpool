@@ -1,0 +1,345 @@
+use std::sync::Arc;
+
+use acg_cosmwasm_engine::{
+    Address, BlockContext, CodeId, CosmWasmEngine, ExecutionRequest, NativeCallContext,
+    NativeContract, TransactionId,
+};
+use acg_validator_sim::{
+    BlockExecutionError, BlockProducer, BlockProducerConfig, BlockScheduler, ExecutionPlan,
+    ExecutionWave, FifoScheduler, IngressConfig, Mempool, ProducedBlock, RateControlledIngress,
+    SchedulingError, SerialBlockExecutor, SingleValidatorRuntime, DEFAULT_BENCHMARK_INGRESS_TPS,
+};
+use cosmwasm_std::{to_json_binary, Binary, Empty, Env, MessageInfo, Reply, Response};
+use serde_json::{json, Value};
+
+struct CounterContract;
+
+impl NativeContract for CounterContract {
+    fn instantiate(
+        &self,
+        context: &mut NativeCallContext,
+        _env: Env,
+        _info: MessageInfo,
+        _msg: Binary,
+    ) -> Result<Response<Empty>, String> {
+        context.storage_set(b"count", 0_u64.to_be_bytes());
+        Ok(Response::new())
+    }
+
+    fn execute(
+        &self,
+        context: &mut NativeCallContext,
+        _env: Env,
+        _info: MessageInfo,
+        msg: Binary,
+    ) -> Result<Response<Empty>, String> {
+        let message: Value = serde_json::from_slice(msg.as_slice()).map_err(|e| e.to_string())?;
+        match message.get("action").and_then(Value::as_str) {
+            Some("increment") => {
+                let current = read_u64(context.storage_get(b"count"));
+                context.storage_set(b"count", current.saturating_add(1).to_be_bytes());
+                Ok(Response::new())
+            }
+            Some("set") => {
+                let value = message
+                    .get("value")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "set requires a u64 value".to_owned())?;
+                context.storage_set(b"count", value.to_be_bytes());
+                Ok(Response::new())
+            }
+            Some("fail") => Err("intentional failure".to_owned()),
+            other => Err(format!("unsupported action: {other:?}")),
+        }
+    }
+
+    fn query(
+        &self,
+        context: &mut NativeCallContext,
+        _env: Env,
+        _msg: Binary,
+    ) -> Result<Binary, String> {
+        to_json_binary(&json!({ "count": read_u64(context.storage_get(b"count")) }))
+            .map_err(|e| e.to_string())
+    }
+
+    fn reply(
+        &self,
+        _context: &mut NativeCallContext,
+        _env: Env,
+        _reply: Reply,
+    ) -> Result<Response<Empty>, String> {
+        Err("reply not used".to_owned())
+    }
+}
+
+fn read_u64(value: Option<Vec<u8>>) -> u64 {
+    value
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .map(u64::from_be_bytes)
+        .unwrap_or_default()
+}
+
+fn execute_request(id: u64, contract: &Address, action: &str) -> ExecutionRequest {
+    ExecutionRequest::Execute {
+        transaction_id: TransactionId(id),
+        sender: Address::from("alice"),
+        contract: contract.clone(),
+        funds: Vec::new(),
+        msg: to_json_binary(&json!({ "action": action })).unwrap(),
+    }
+}
+
+fn placeholder_request(id: u64) -> ExecutionRequest {
+    ExecutionRequest::Execute {
+        transaction_id: TransactionId(id),
+        sender: Address::from("sender"),
+        contract: Address::from("contract"),
+        funds: Vec::new(),
+        msg: Binary::default(),
+    }
+}
+
+fn set_request(id: u64, contract: &Address, value: u64) -> ExecutionRequest {
+    ExecutionRequest::Execute {
+        transaction_id: TransactionId(id),
+        sender: Address::from("alice"),
+        contract: contract.clone(),
+        funds: Vec::new(),
+        msg: to_json_binary(&json!({ "action": "set", "value": value })).unwrap(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReverseScheduler;
+
+impl BlockScheduler for ReverseScheduler {
+    fn schedule(&self, block: &ProducedBlock) -> Result<ExecutionPlan, SchedulingError> {
+        Ok(ExecutionPlan {
+            transaction_count: block.transactions.len(),
+            waves: (0..block.transactions.len())
+                .rev()
+                .map(|index| ExecutionWave {
+                    transaction_indices: vec![index],
+                })
+                .collect(),
+        })
+    }
+}
+
+fn instantiate_counter(engine: &CosmWasmEngine) -> (CodeId, Address) {
+    let code_id = engine
+        .register_native("validator-counter", Arc::new(CounterContract))
+        .unwrap();
+    let contract = engine
+        .instantiate(
+            TransactionId(1),
+            BlockContext::default(),
+            Address::from("alice"),
+            code_id,
+            None,
+            "counter".to_owned(),
+            Vec::new(),
+            Binary::default(),
+        )
+        .unwrap()
+        .contract;
+    (code_id, contract)
+}
+
+#[test]
+fn mempool_accepts_everything_and_preserves_fifo_order() {
+    let mempool = Mempool::default();
+    let first = mempool.admit(placeholder_request(7), 100);
+    let second = mempool.admit(placeholder_request(7), 101);
+
+    assert_eq!(first.admission_sequence, 0);
+    assert_eq!(second.admission_sequence, 1);
+    assert_eq!(mempool.len(), 2);
+    let snapshot = mempool.snapshot();
+    assert_eq!(snapshot[0].transaction_id(), TransactionId(7));
+    assert_eq!(snapshot[1].transaction_id(), TransactionId(7));
+}
+
+#[test]
+fn rate_controlled_ingress_uses_virtual_time() {
+    let mempool = Mempool::default();
+    let mut ingress = RateControlledIngress::new(IngressConfig::default(), 1_000).unwrap();
+    assert_eq!(IngressConfig::default().transactions_per_second, 25_000);
+    assert_eq!(DEFAULT_BENCHMARK_INGRESS_TPS, 25_000);
+    ingress.enqueue_all([
+        placeholder_request(1),
+        placeholder_request(2),
+        placeholder_request(3),
+    ]);
+
+    assert_eq!(ingress.pump_until(40_999, &mempool), 0);
+    assert_eq!(ingress.pump_until(41_000, &mempool), 1);
+    assert_eq!(ingress.pump_until(80_999, &mempool), 0);
+    assert_eq!(ingress.pump_until(81_000, &mempool), 1);
+    assert_eq!(ingress.pump_until(121_000, &mempool), 1);
+    assert_eq!(mempool.len(), 3);
+}
+
+#[test]
+fn block_producer_defaults_to_two_seconds_and_fifo() {
+    let mempool = Mempool::default();
+    mempool.admit(placeholder_request(1), 0);
+    mempool.admit(placeholder_request(2), 0);
+    mempool.admit(placeholder_request(3), 0);
+
+    let config = BlockProducerConfig {
+        max_transactions_per_block: Some(2),
+        ..BlockProducerConfig::default()
+    };
+    let mut producer = BlockProducer::fifo(config).unwrap();
+
+    let first = producer.produce_next(&mempool);
+    assert_eq!(first.context.height, 1);
+    assert_eq!(first.context.time_nanos, 2_000_000_000);
+    assert_eq!(first.transactions.len(), 2);
+    assert_eq!(first.transactions[0].transaction_id(), TransactionId(1));
+    assert_eq!(first.transactions[1].transaction_id(), TransactionId(2));
+
+    let second = producer.produce_next(&mempool);
+    assert_eq!(second.context.height, 2);
+    assert_eq!(second.context.time_nanos, 4_000_000_000);
+    assert_eq!(second.transactions[0].transaction_id(), TransactionId(3));
+}
+
+#[test]
+fn fifo_scheduler_creates_one_serial_wave_per_transaction() {
+    let mempool = Mempool::default();
+    mempool.admit(placeholder_request(1), 0);
+    mempool.admit(placeholder_request(2), 0);
+    let block = BlockProducer::fifo(BlockProducerConfig::default())
+        .unwrap()
+        .produce_next(&mempool);
+    let plan = FifoScheduler.schedule(&block).unwrap();
+
+    assert_eq!(plan.transaction_count, 2);
+    assert_eq!(plan.waves[0].transaction_indices, vec![0]);
+    assert_eq!(plan.waves[1].transaction_indices, vec![1]);
+    plan.validate().unwrap();
+}
+
+#[test]
+fn serial_executor_commits_in_block_order_and_keeps_failed_transactions() {
+    let engine = CosmWasmEngine::default();
+    let (_, contract) = instantiate_counter(&engine);
+    let mempool = Mempool::default();
+    mempool.admit(execute_request(2, &contract, "increment"), 0);
+    mempool.admit(execute_request(3, &contract, "fail"), 0);
+    mempool.admit(execute_request(4, &contract, "increment"), 0);
+    let block = BlockProducer::fifo(BlockProducerConfig::default())
+        .unwrap()
+        .produce_next(&mempool);
+    let plan = FifoScheduler.schedule(&block).unwrap();
+    let report = SerialBlockExecutor::new(engine.clone())
+        .execute(&block, &plan)
+        .unwrap();
+
+    assert_eq!(report.successful(), 2);
+    assert_eq!(report.failed(), 1);
+    assert_eq!(report.transactions[1].transaction_id, TransactionId(3));
+    let query = engine
+        .query(BlockContext::default(), contract, Binary::default())
+        .unwrap();
+    let value: Value = serde_json::from_slice(query.data.as_slice()).unwrap();
+    assert_eq!(value["count"], 2);
+}
+
+#[test]
+fn scheduler_is_a_pluggable_execution_order_boundary() {
+    let engine = CosmWasmEngine::default();
+    let (_, contract) = instantiate_counter(&engine);
+    let mut runtime = SingleValidatorRuntime::new(
+        engine.clone(),
+        BlockProducerConfig::default(),
+        ReverseScheduler,
+    )
+    .unwrap();
+    runtime.submit(set_request(2, &contract, 10), 1_000);
+    runtime.submit(set_request(3, &contract, 20), 2_000);
+
+    let report = runtime.produce_and_execute().unwrap();
+    assert_eq!(report.transactions[0].transaction_id, TransactionId(3));
+    assert_eq!(report.transactions[1].transaction_id, TransactionId(2));
+
+    let query = engine
+        .query(BlockContext::default(), contract, Binary::default())
+        .unwrap();
+    let value: Value = serde_json::from_slice(query.data.as_slice()).unwrap();
+    assert_eq!(value["count"], 10);
+}
+
+#[test]
+fn serial_executor_rejects_parallel_waves_until_validation_exists() {
+    let engine = CosmWasmEngine::default();
+    let mempool = Mempool::default();
+    mempool.admit(placeholder_request(1), 0);
+    mempool.admit(placeholder_request(2), 0);
+    let block = BlockProducer::fifo(BlockProducerConfig::default())
+        .unwrap()
+        .produce_next(&mempool);
+    let plan = ExecutionPlan {
+        transaction_count: 2,
+        waves: vec![ExecutionWave {
+            transaction_indices: vec![0, 1],
+        }],
+    };
+
+    let error = SerialBlockExecutor::new(engine)
+        .execute(&block, &plan)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        BlockExecutionError::ParallelWaveUnsupported {
+            wave_index: 0,
+            width: 2
+        }
+    ));
+}
+
+#[test]
+fn default_pipeline_produces_and_executes_a_block() {
+    let engine = CosmWasmEngine::default();
+    let (_, contract) = instantiate_counter(&engine);
+    let mut runtime =
+        SingleValidatorRuntime::fifo(engine.clone(), BlockProducerConfig::default()).unwrap();
+    runtime.submit(execute_request(2, &contract, "increment"), 1_000);
+    runtime.submit(execute_request(3, &contract, "increment"), 2_000);
+
+    let report = runtime.produce_and_execute().unwrap();
+    assert_eq!(report.block_height, 1);
+    assert_eq!(report.successful(), 2);
+    assert!(runtime.mempool().is_empty());
+}
+
+#[test]
+fn ingress_can_fill_the_mempool_up_to_the_next_block_boundary() {
+    let engine = CosmWasmEngine::default();
+    let (_, contract) = instantiate_counter(&engine);
+    let mut runtime = SingleValidatorRuntime::fifo(engine, BlockProducerConfig::default()).unwrap();
+    let mut ingress = RateControlledIngress::new(
+        IngressConfig {
+            transactions_per_second: 2,
+        },
+        0,
+    )
+    .unwrap();
+    ingress.enqueue_all([
+        execute_request(2, &contract, "increment"),
+        execute_request(3, &contract, "increment"),
+        execute_request(4, &contract, "increment"),
+        execute_request(5, &contract, "increment"),
+        execute_request(6, &contract, "increment"),
+    ]);
+
+    let boundary = runtime.next_block_time_nanos();
+    assert_eq!(boundary, 2_000_000_000);
+    assert_eq!(ingress.pump_until(boundary, runtime.mempool()), 4);
+    let report = runtime.produce_and_execute().unwrap();
+    assert_eq!(report.successful(), 4);
+    assert_eq!(ingress.queued(), 1);
+}

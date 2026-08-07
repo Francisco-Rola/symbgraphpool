@@ -1,0 +1,161 @@
+use std::{collections::BTreeMap, fs, path::PathBuf};
+
+use acg_core::{ContractCodeHash, EntrypointSelector, RuntimeId};
+use acg_profile_graph::{EdgeBuildConfig, GraphLoadConfig, ProfileGraph, ProfileGraphArtifact};
+use acg_symbolic_json::{normalize_document, parse_slice, IngestionContext};
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(name = "acg-profilec")]
+#[command(about = "Compile symbolic analyzer JSON into a persistent profile graph artifact")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Parse, normalize, identify, and derive offline profile edges.
+    Compile {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        runtime: String,
+        /// 32-byte contract code hash encoded as 64 hexadecimal characters.
+        #[arg(long)]
+        code_hash: String,
+        #[arg(long, default_value_t = 1)]
+        profile_schema_version: u16,
+        /// Optional JSON object mapping entrypoint names to runtime-native u64 selectors.
+        #[arg(long)]
+        selector_map: Option<PathBuf>,
+        #[arg(long, default_value_t = 0.75)]
+        conditional_score: f32,
+        #[arg(long, default_value_t = 0.95)]
+        unconditional_score: f32,
+        #[arg(long, default_value_t = 0.50)]
+        unknown_score: f32,
+    },
+    /// Validate and summarize a compiled profile graph artifact.
+    Inspect {
+        #[arg(long)]
+        input: PathBuf,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Compile {
+            input,
+            output,
+            runtime,
+            code_hash,
+            profile_schema_version,
+            selector_map,
+            conditional_score,
+            unconditional_score,
+            unknown_score,
+        } => compile(CompileArgs {
+            input,
+            output,
+            runtime,
+            code_hash,
+            profile_schema_version,
+            selector_map,
+            edge_config: EdgeBuildConfig {
+                conditional_score,
+                unconditional_score,
+                unknown_score,
+            },
+        }),
+        Command::Inspect { input } => inspect(input),
+    }
+}
+
+struct CompileArgs {
+    input: PathBuf,
+    output: PathBuf,
+    runtime: String,
+    code_hash: String,
+    profile_schema_version: u16,
+    selector_map: Option<PathBuf>,
+    edge_config: EdgeBuildConfig,
+}
+
+fn compile(args: CompileArgs) -> Result<()> {
+    let bytes = fs::read(&args.input)
+        .with_context(|| format!("failed to read analyzer JSON {}", args.input.display()))?;
+    let raw = parse_slice(&bytes).context("symbolic analyzer JSON validation failed")?;
+    let runtime_id = RuntimeId::new(args.runtime).context("invalid runtime id")?;
+    let contract_code_hash: ContractCodeHash = args
+        .code_hash
+        .parse()
+        .context("invalid contract code hash")?;
+    let mut context =
+        IngestionContext::new(runtime_id, contract_code_hash, args.profile_schema_version);
+    if let Some(selector_map_path) = args.selector_map {
+        let selector_bytes = fs::read(&selector_map_path).with_context(|| {
+            format!(
+                "failed to read selector map {}",
+                selector_map_path.display()
+            )
+        })?;
+        let raw_selectors: BTreeMap<String, u64> = serde_json::from_slice(&selector_bytes)
+            .with_context(|| format!("invalid selector map JSON {}", selector_map_path.display()))?;
+        context.selector_overrides = raw_selectors
+            .into_iter()
+            .map(|(entrypoint, selector)| (entrypoint, EntrypointSelector(selector)))
+            .collect();
+    }
+    let profiles = normalize_document(raw, &context).context("profile normalization failed")?;
+    let artifact = ProfileGraphArtifact::compile(profiles, &args.edge_config)
+        .context("profile edge derivation failed")?;
+    let output = artifact
+        .to_pretty_json()
+        .context("failed to serialize profile graph artifact")?;
+    fs::write(&args.output, output)
+        .with_context(|| format!("failed to write artifact {}", args.output.display()))?;
+
+    eprintln!(
+        "compiled {} profiles and {} profile edges into {}",
+        artifact.profiles.len(),
+        artifact.edges.len(),
+        args.output.display()
+    );
+    Ok(())
+}
+
+fn inspect(input: PathBuf) -> Result<()> {
+    let bytes = fs::read(&input)
+        .with_context(|| format!("failed to read graph artifact {}", input.display()))?;
+    let artifact = ProfileGraphArtifact::from_json(&bytes).context("invalid graph artifact")?;
+    let graph = ProfileGraph::load(artifact, GraphLoadConfig::default())
+        .context("graph failed deterministic load validation")?;
+
+    let conditional = graph
+        .edges()
+        .iter()
+        .filter(|edge| matches!(edge.relation, acg_core::EdgeRelation::Conditional))
+        .count();
+    let unconditional = graph
+        .edges()
+        .iter()
+        .filter(|edge| matches!(edge.relation, acg_core::EdgeRelation::Unconditional))
+        .count();
+    let unknown = graph
+        .edges()
+        .iter()
+        .filter(|edge| matches!(edge.relation, acg_core::EdgeRelation::Unknown))
+        .count();
+
+    println!("profiles: {}", graph.profiles().len());
+    println!("edges: {}", graph.edges().len());
+    println!("conditional_edges: {conditional}");
+    println!("unconditional_edges: {unconditional}");
+    println!("unknown_edges: {unknown}");
+    Ok(())
+}

@@ -1,0 +1,19 @@
+[package]
+name = "acg-cli"
+description = "Compiler and inspection CLI for adaptive conflict graph artifacts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "acg-profilec"
+path = "src/main.rs"
+
+[dependencies]
+acg-core.workspace = true
+acg-profile-graph.workspace = true
+acg-symbolic-json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,150 @@
+# Adaptive Conflict Graph runtime
+
+This nested workspace contains the execution and single-validator simulation layers used by the
+adaptive conflict-graph project. It is separate from the graph workspace because CosmWasm VM and
+Wasmer dependencies are large and have a different build cadence.
+
+## Crates
+
+### `acg-cosmwasm-engine`
+
+A deterministic CosmWasm execution engine with:
+
+- execution of real CosmWasm Wasm bytecode through `cosmwasm-vm`;
+- native mock contracts for deterministic engine tests;
+- code upload, SHA-256 checksums, contract metadata, and compiled-module caching;
+- per-contract ordered key/value storage and range iteration;
+- one transaction overlay spanning storage, balances, and contract creation;
+- atomic top-level commit or rollback;
+- native bank balances, sends, burns, and funds attached to contract calls;
+- nested `WasmMsg::Execute` and `WasmMsg::Instantiate`;
+- `ReplyOn::{Always, Success, Error, Never}` behavior;
+- bank, raw Wasm, and smart Wasm queries;
+- read-only query enforcement;
+- storage and bank access traces, including reverted child accesses.
+
+Wasm upload uses CosmWasm's `Cache`: bytecode is statically checked, compiled once, written to the
+filesystem cache, and pinned in memory by default. Later instantiate, execute, query, and reply
+calls create fresh instances from the cached compiled module instead of recompiling Wasm.
+
+The default cache uses a process-local temporary directory. For repeatable long-running benchmarks,
+set `EngineConfig::wasm_cache.base_dir` to a persistent validator-local directory. Cache metrics are
+available through `CosmWasmEngine::wasm_cache_metrics()`.
+
+### `acg-validator-sim`
+
+A deterministic, single-validator harness with four independent layers:
+
+1. `RateControlledIngress`: virtual-time transaction injection at a configurable TPS.
+2. `Mempool`: accepts every submitted transaction and stores it in FIFO order.
+3. `BlockProducer`: advances a configurable block window and selects transactions through a
+   `BlockSelectionPolicy`; the current policy is FIFO.
+4. `BlockScheduler` plus `SerialBlockExecutor`: scheduling and execution are separate extension
+   points. The baseline scheduler creates one transaction per wave.
+
+The requested block-window default is two seconds. The default ingress rate is 25,000 transactions
+per second, chosen as a benchmark-oriented reference to Injective's published throughput figure;
+it is only a workload-generator default and not a claim about admission guarantees.
+
+Parallel waves are rejected explicitly by the serial executor. Executing them concurrently without
+MVCC validation could commit incorrect state. A speculative parallel executor will be added after
+the candidate graph and validation/replay boundaries exist.
+
+## Validate
+
+Run from the repository root:
+
+```bash
+cargo fmt --manifest-path runtime/Cargo.toml --all -- --check
+cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets -- -D warnings
+cargo test --manifest-path runtime/Cargo.toml --workspace --all-targets
+```
+
+The tests cover the original execution semantics plus:
+
+- compiled Wasm pinning and repeated pinned-cache hits;
+- all-accepting FIFO mempool admission;
+- deterministic rate-controlled ingress;
+- two-second FIFO block production;
+- serial FIFO scheduling and a custom reverse-order scheduler plug-in;
+- block execution that preserves order and continues after failed transactions;
+- explicit rejection of unsafe parallel waves;
+- the complete submit, produce, schedule, and execute pipeline.
+
+## Engine usage
+
+```rust
+use acg_cosmwasm_engine::{Address, BlockContext, CosmWasmEngine, TransactionId};
+use cosmwasm_std::{to_json_binary, Coin};
+use serde_json::json;
+
+let engine = CosmWasmEngine::default();
+engine.set_balance("alice", &[Coin::new(1_000_u128, "utest")])?;
+let code_id = engine.upload_wasm(wasm_bytes)?;
+
+let instantiated = engine.instantiate(
+    TransactionId(1),
+    BlockContext::default(),
+    Address::from("alice"),
+    code_id,
+    None,
+    "example".to_owned(),
+    vec![Coin::new(100_u128, "utest")],
+    to_json_binary(&json!({ "owner": "alice" }))?,
+)?;
+
+println!("cache: {:?}", engine.wasm_cache_metrics());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+## Validator simulation usage
+
+```rust
+use acg_cosmwasm_engine::{CosmWasmEngine, ExecutionRequest};
+use acg_validator_sim::{BlockProducerConfig, SingleValidatorRuntime};
+
+let engine = CosmWasmEngine::default();
+let mut validator = SingleValidatorRuntime::fifo(engine, BlockProducerConfig::default())?;
+
+let request: ExecutionRequest = todo!("construct an instantiate or execute request");
+validator.submit(request, 0);
+let report = validator.produce_and_execute()?;
+println!("executed {} transactions", report.transactions.len());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+## Dependency policy
+
+The uploaded experimental fork was based on CosmWasm `2.0.0-rc.1`. This runtime uses the published
+CosmWasm `2.0.9` crates instead of vendoring the fork. Exact versions and Rust-1.75-compatible
+transitive guards are declared in `runtime/Cargo.toml`. The guard set pins `base64ct`, `zeroize`,
+`indexmap`, `clru`, `uuid`, `rayon`, `rayon-core`, and `backtrace`; these direct declarations exist
+only to keep CosmWasm/Wasmer's broad transitive requirements compatible with Rust 1.75.
+
+Generate and commit `runtime/Cargo.lock` after successful dependency resolution. The runtime is an
+executable research component, so its complete dependency graph should remain locked.
+
+## Current limitations
+
+- committed world state is in memory;
+- a persistent Wasm cache directory is validator-local and must not be shared concurrently by
+  independent engine processes;
+- block time is virtual and deterministic rather than wall-clock driven;
+- direct `Mempool::admit` means the transaction has already arrived; timestamp filtering is handled
+  by `RateControlledIngress` before admission;
+- `SubMsg.gas_limit` is accepted but not independently metered;
+- reply `gas_used` is currently reported as zero;
+- contract addresses use deterministic transaction-local allocation rather than a chain-specific
+  address derivation;
+- address canonicalization is deterministic UTF-8 rather than Bech32 or chain-specific bytes.
+
+## Deliberately excluded
+
+- actual peer-to-peer networking or mempool gossip;
+- consensus voting, proposer election, finality, or forks;
+- account signatures, staking, governance, and IBC;
+- chain-specific protobuf messages and custom modules;
+- speculative parallel commit, MVCC validation, and replay;
+- durable state-database persistence;
+- independent `SubMsg.gas_limit` enforcement;
+- migration, admin updates, `Instantiate2`, and custom messages.

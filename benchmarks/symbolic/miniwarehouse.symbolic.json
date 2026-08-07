@@ -1,0 +1,1168 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "miniwarehouse",
+  "source": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+  "storage_resources": {
+    "CONFIG": {
+      "key_semantic_name": "list of accessed Config level-1 fields"
+    },
+    "WAREHOUSES": {
+      "key_semantic_name": "warehouse_id"
+    },
+    "DISTRICTS": {
+      "key_semantic_name": "warehouse_district"
+    },
+    "CUSTOMERS": {
+      "key_semantic_name": "warehouse_district_customer"
+    },
+    "STOCK": {
+      "key_semantic_name": "warehouse_item"
+    },
+    "ORDERS": {
+      "key_semantic_name": "warehouse_district_order"
+    },
+    "NEW_ORDERS": {
+      "key_semantic_name": "warehouse_district_order"
+    },
+    "ORDER_LINES": {
+      "key_semantic_name": "order_line"
+    },
+    "HISTORY": {
+      "key_semantic_name": "history_id"
+    }
+  },
+  "dependency_kinds": {
+    "input": "The access or path condition depends only on transaction/query input.",
+    "state": "The access or path condition depends only on previously stored contract state.",
+    "input_and_state": "The access or path condition depends on both input and stored state.",
+    "none": "Unconditional or not input/state dependent.",
+    "unknown": "The analyzer cannot precisely classify the dependency."
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "info.sender",
+        "msg.admin"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 213,
+            "end_line": 225,
+            "code": "CONFIG.save(..., Config { admin })?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SeedWarehouse",
+      "input_parameters": [
+        "info.sender",
+        "warehouse_id",
+        "tax_bps"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 313,
+            "end_line": 614,
+            "code": "ensure_admin loads CONFIG.admin before the seed write;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "WAREHOUSES",
+          "key": {
+            "semantic_name": "warehouse_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "warehouse_id"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 319,
+            "end_line": 328,
+            "code": "WAREHOUSES.save(..., warehouse_key(warehouse_id), Warehouse { ... })?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SeedDistrict",
+      "input_parameters": [
+        "info.sender",
+        "warehouse_id",
+        "district_id",
+        "tax_bps",
+        "next_order_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 332,
+            "end_line": 614,
+            "code": "ensure_admin loads CONFIG.admin before the seed write;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "DISTRICTS",
+          "key": {
+            "semantic_name": "warehouse_district",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id)"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 340,
+            "end_line": 350,
+            "code": "DISTRICTS.save(..., district_key(warehouse_id, district_id), District { ... })?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SeedCustomer",
+      "input_parameters": [
+        "info.sender",
+        "warehouse_id",
+        "district_id",
+        "customer_id",
+        "discount_bps"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 354,
+            "end_line": 614,
+            "code": "ensure_admin loads CONFIG.admin before the seed write;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CUSTOMERS",
+          "key": {
+            "semantic_name": "warehouse_district_customer",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, customer_id)"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 362,
+            "end_line": 373,
+            "code": "CUSTOMERS.save(..., customer_key(warehouse_id, district_id, customer_id), Customer { ... })?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SeedStock",
+      "input_parameters": [
+        "info.sender",
+        "warehouse_id",
+        "item_id",
+        "quantity"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": [
+              "admin"
+            ],
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 377,
+            "end_line": 614,
+            "code": "ensure_admin loads CONFIG.admin before the seed write;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "STOCK",
+          "key": {
+            "semantic_name": "warehouse_item",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, item_id)"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 384,
+            "end_line": 395,
+            "code": "STOCK.save(..., stock_key(warehouse_id, item_id), Stock { ... })?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Restock",
+      "input_parameters": [
+        "warehouse_id",
+        "item_id",
+        "quantity"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "STOCK",
+          "key": {
+            "semantic_name": "warehouse_item",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, item_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 399,
+            "end_line": 410,
+            "code": "let mut stock = STOCK.may_load(..., stock_key(warehouse_id, item_id))?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "STOCK",
+          "key": {
+            "semantic_name": "warehouse_item",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, item_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 405,
+            "end_line": 410,
+            "code": "stock.quantity += quantity; STOCK.save(..., key, stock)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::NewOrder",
+      "input_parameters": [
+        "warehouse_id",
+        "district_id",
+        "customer_id",
+        "order_id",
+        "lines"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "WAREHOUSES",
+          "key": {
+            "semantic_name": "warehouse_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "warehouse_id"
+            }
+          },
+          "guard": {
+            "expression": "lines is non-empty",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 414,
+            "end_line": 427,
+            "code": "WAREHOUSES.may_load(..., warehouse_key(warehouse_id))?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "DISTRICTS",
+          "key": {
+            "semantic_name": "warehouse_district",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id)"
+            }
+          },
+          "guard": {
+            "expression": "lines is non-empty",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 522,
+            "end_line": 530,
+            "code": "let mut district = DISTRICTS.may_load(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "DISTRICTS",
+          "key": {
+            "semantic_name": "warehouse_district",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id)"
+            }
+          },
+          "guard": {
+            "expression": "lines is non-empty && DISTRICTS[(warehouse_id, district_id)].next_order_id == order_id",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 433,
+            "end_line": 440,
+            "code": "district.next_order_id += 1; DISTRICTS.save(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "CUSTOMERS",
+          "key": {
+            "semantic_name": "warehouse_district_customer",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, customer_id)"
+            }
+          },
+          "guard": {
+            "expression": "lines is non-empty && district order id matches",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 532,
+            "end_line": 540,
+            "code": "let mut customer = CUSTOMERS.may_load(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CUSTOMERS",
+          "key": {
+            "semantic_name": "warehouse_district_customer",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, customer_id)"
+            }
+          },
+          "guard": {
+            "expression": "lines is non-empty && district order id matches",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 446,
+            "end_line": 447,
+            "code": "customer.last_order_id = Some(order_id); CUSTOMERS.save(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "STOCK",
+          "key": {
+            "semantic_name": "warehouse_item",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(lines[i].supply_warehouse_id, lines[i].item_id)"
+            }
+          },
+          "guard": {
+            "expression": "lines is non-empty",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 449,
+            "end_line": 454,
+            "code": "for line in lines { STOCK.may_load(..., stock_key(line.supply_warehouse_id, line.item_id))?; }"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "STOCK",
+          "key": {
+            "semantic_name": "warehouse_item",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(lines[i].supply_warehouse_id, lines[i].item_id)"
+            }
+          },
+          "guard": {
+            "expression": "lines is non-empty && STOCK[(lines[i].supply_warehouse_id, lines[i].item_id)].quantity >= lines[i].quantity",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 455,
+            "end_line": 466,
+            "code": "stock.quantity -= line.quantity; STOCK.save(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ORDER_LINES",
+          "key": {
+            "semantic_name": "order_line",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id, line_number)"
+            }
+          },
+          "guard": {
+            "expression": "all stock checks through line_number succeed",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 473,
+            "end_line": 484,
+            "code": "ORDER_LINES.save(..., order_line_key(..., line_number), OrderLineRecord { ... })?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "warehouse_district_order",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
+            }
+          },
+          "guard": {
+            "expression": "all order lines validate",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 490,
+            "end_line": 500,
+            "code": "ORDERS.save(..., order_key(...), OrderRecord { ... })?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "NEW_ORDERS",
+          "key": {
+            "semantic_name": "warehouse_district_order",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
+            }
+          },
+          "guard": {
+            "expression": "all order lines validate",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 490,
+            "end_line": 500,
+            "code": "NEW_ORDERS.save(..., order_key(...), true)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Payment",
+      "input_parameters": [
+        "warehouse_id",
+        "district_id",
+        "customer_id",
+        "amount",
+        "history_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "WAREHOUSES",
+          "key": {
+            "semantic_name": "warehouse_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "warehouse_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 504,
+            "end_line": 520,
+            "code": "let mut warehouse = WAREHOUSES.may_load(..., warehouse_id)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "WAREHOUSES",
+          "key": {
+            "semantic_name": "warehouse_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "warehouse_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 516,
+            "end_line": 520,
+            "code": "warehouse.payment_ytd += amount; WAREHOUSES.save(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "DISTRICTS",
+          "key": {
+            "semantic_name": "warehouse_district",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 522,
+            "end_line": 530,
+            "code": "let mut district = DISTRICTS.may_load(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "DISTRICTS",
+          "key": {
+            "semantic_name": "warehouse_district",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 526,
+            "end_line": 530,
+            "code": "district.payment_ytd += amount; DISTRICTS.save(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "CUSTOMERS",
+          "key": {
+            "semantic_name": "warehouse_district_customer",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, customer_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 532,
+            "end_line": 540,
+            "code": "let mut customer = CUSTOMERS.may_load(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CUSTOMERS",
+          "key": {
+            "semantic_name": "warehouse_district_customer",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, customer_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 536,
+            "end_line": 540,
+            "code": "customer.payment_total += amount; CUSTOMERS.save(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "HISTORY",
+          "key": {
+            "semantic_name": "history_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "history_id"
+            }
+          },
+          "guard": {
+            "expression": "warehouse, district, and customer records exist",
+            "dependency_kind": "state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 542,
+            "end_line": 552,
+            "code": "HISTORY.save(..., history_key(history_id), HistoryRecord { ... })?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Delivery",
+      "input_parameters": [
+        "warehouse_id",
+        "district_id",
+        "order_id",
+        "carrier_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "NEW_ORDERS",
+          "key": {
+            "semantic_name": "warehouse_district_order",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 556,
+            "end_line": 570,
+            "code": "NEW_ORDERS.may_load(..., order_key(...))?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "NEW_ORDERS",
+          "key": {
+            "semantic_name": "warehouse_district_order",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
+            }
+          },
+          "guard": {
+            "expression": "NEW_ORDERS[(warehouse_id, district_id, order_id)] exists",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 564,
+            "end_line": 570,
+            "code": "NEW_ORDERS.remove(..., order_key(...));"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "warehouse_district_order",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
+            }
+          },
+          "guard": {
+            "expression": "new-order marker exists",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 572,
+            "end_line": 576,
+            "code": "let mut order = ORDERS.may_load(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "warehouse_district_order",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
+            }
+          },
+          "guard": {
+            "expression": "new-order marker and order exist",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 575,
+            "end_line": 576,
+            "code": "order.carrier_id = Some(carrier_id); ORDERS.save(...)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "ORDER_LINES",
+          "key": {
+            "semantic_name": "order_line",
+            "depends_on": {
+              "dependency_kind": "input"
+            }
+          },
+          "guard": {
+            "expression": "new-order marker and order exist",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 578,
+            "end_line": 586,
+            "code": "ORDER_LINES.range(...).filter(key starts_with order prefix).collect()?;"
+          },
+          "notes": [
+            "The current analyzer schema cannot encode prefix overlap, so the concrete key binding is intentionally unresolved."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "ORDER_LINES",
+          "key": {
+            "semantic_name": "order_line",
+            "depends_on": {
+              "dependency_kind": "input"
+            }
+          },
+          "guard": {
+            "expression": "new-order marker and order exist",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 588,
+            "end_line": 594,
+            "code": "for matching line { line.delivered = true; ORDER_LINES.save(...)?; }"
+          },
+          "notes": [
+            "Writes every order-line key under the input-derived order prefix."
+          ]
+        },
+        {
+          "kind": "read",
+          "resource": "CUSTOMERS",
+          "key": {
+            "semantic_name": "warehouse_district_customer",
+            "depends_on": {
+              "dependency_kind": "state"
+            }
+          },
+          "guard": {
+            "expression": "order exists",
+            "dependency_kind": "state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 596,
+            "end_line": 604,
+            "code": "CUSTOMERS.may_load(..., customer_key(warehouse_id, district_id, order.customer_id))?;"
+          },
+          "notes": [
+            "customer_id is loaded from ORDERS rather than provided as transaction input."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "CUSTOMERS",
+          "key": {
+            "semantic_name": "warehouse_district_customer",
+            "depends_on": {
+              "dependency_kind": "state"
+            }
+          },
+          "guard": {
+            "expression": "order and customer exist",
+            "dependency_kind": "state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 600,
+            "end_line": 604,
+            "code": "customer.delivery_total += delivered_total; CUSTOMERS.save(...)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Warehouse",
+      "input_parameters": [
+        "warehouse_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "WAREHOUSES",
+          "key": {
+            "semantic_name": "warehouse_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "warehouse_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 616,
+            "end_line": 621,
+            "code": "WAREHOUSES.load(..., warehouse_key(warehouse_id))?"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Customer",
+      "input_parameters": [
+        "warehouse_id",
+        "district_id",
+        "customer_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CUSTOMERS",
+          "key": {
+            "semantic_name": "warehouse_district_customer",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, customer_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 622,
+            "end_line": 629,
+            "code": "CUSTOMERS.load(..., customer_key(warehouse_id, district_id, customer_id))?"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Stock",
+      "input_parameters": [
+        "warehouse_id",
+        "item_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "STOCK",
+          "key": {
+            "semantic_name": "warehouse_item",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, item_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 630,
+            "end_line": 633,
+            "code": "STOCK.load(..., stock_key(warehouse_id, item_id))?"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::OrderStatus",
+      "input_parameters": [
+        "warehouse_id",
+        "district_id",
+        "customer_id",
+        "order_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CUSTOMERS",
+          "key": {
+            "semantic_name": "warehouse_district_customer",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, customer_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 661,
+            "end_line": 671,
+            "code": "CUSTOMERS.load(..., customer_key(warehouse_id, district_id, customer_id))?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "warehouse_district_order",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 672,
+            "end_line": 675,
+            "code": "ORDERS.load(..., order_key(warehouse_id, district_id, order_id))?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "ORDER_LINES",
+          "key": {
+            "semantic_name": "order_line",
+            "depends_on": {
+              "dependency_kind": "input"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 676,
+            "end_line": 684,
+            "code": "ORDER_LINES.range(...).filter key starts_with order_line_prefix(...);"
+          },
+          "notes": [
+            "Prefix scan is input-derived but not representable as equality in schema 3.1."
+          ]
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::StockLevel",
+      "input_parameters": [
+        "warehouse_id",
+        "district_id",
+        "threshold",
+        "item_ids"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "DISTRICTS",
+          "key": {
+            "semantic_name": "warehouse_district",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 692,
+            "end_line": 699,
+            "code": "DISTRICTS.load(..., district_key(warehouse_id, district_id))?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "STOCK",
+          "key": {
+            "semantic_name": "warehouse_item",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, item_ids[i])"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
+            "start_line": 700,
+            "end_line": 705,
+            "code": "for item_id in item_ids { STOCK.load(..., stock_key(warehouse_id, item_id))?; }"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ],
+  "semantic_key_rules": {
+    "CONFIG": "key.semantic_name is a list of top-level Config fields.",
+    "WAREHOUSES": "warehouse_id is an input-derived logical key.",
+    "DISTRICTS": "warehouse_district denotes (warehouse_id, district_id).",
+    "CUSTOMERS": "warehouse_district_customer denotes (warehouse_id, district_id, customer_id); delivery uses a state-derived customer_id.",
+    "STOCK": "warehouse_item denotes (warehouse_id, item_id), including per-line item expressions.",
+    "ORDERS": "warehouse_district_order denotes (warehouse_id, district_id, order_id).",
+    "NEW_ORDERS": "uses the same warehouse/district/order tuple as ORDERS.",
+    "ORDER_LINES": "order_line denotes an exact order-line key or an unresolved order-prefix scan; schema 3.1 cannot yet express prefix matching.",
+    "HISTORY": "history_id is a caller-provided unique key."
+  }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "acg-validator-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+acg-cosmwasm-engine.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+cosmwasm-std.workspace = true
+serde_json.workspace = true

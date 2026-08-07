@@ -1,0 +1,36 @@
+--- runtime/crates/acg-cosmwasm-engine/src/engine.rs	2026-08-07 09:50:49.689823327 +0000
++++ runtime/crates/acg-cosmwasm-engine/src/engine.rs	2026-08-07 09:50:49.690833184 +0000
+@@ -75,22 +75,29 @@
+ }
+ 
+ impl CosmWasmEngine {
+-    pub fn new(config: EngineConfig) -> Self {
+-        Self {
++    pub fn try_new(config: EngineConfig) -> EngineResult<Self> {
++        let wasm_cache = WasmModuleCache::new(&config.wasm_cache)?;
++        Ok(Self {
+             core: Arc::new(EngineCore {
+                 config,
+                 state: Arc::new(RwLock::new(WorldState::default())),
+                 codes: RwLock::new(BTreeMap::new()),
++                wasm_cache,
+                 next_code_id: AtomicU64::new(1),
+             }),
+-        }
++        })
++    }
++
++    pub fn new(config: EngineConfig) -> Self {
++        Self::try_new(config).expect("failed to initialize CosmWasm engine")
+     }
+ 
+     pub fn upload_wasm(&self, wasm: Vec<u8>) -> EngineResult<CodeId> {
+         if wasm.is_empty() {
+             return Err(EngineError::Vm("Wasm bytecode must not be empty".to_owned()));
+         }
+-        let checksum = checksum_bytes(&wasm);
++        let vm_checksum = self.core.wasm_cache.save_wasm(&wasm)?;
++        let checksum = checksum_from_vm(vm_checksum);
+         let code_id = CodeId(self.core.next_code_id.fetch_add(1, Ordering::Relaxed));
+         let metadata = CodeMetadata {
+             code_id,

@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/acg-core",
+    "crates/acg-symbolic-json",
+    "crates/acg-profile-graph",
+    "crates/acg-cli",
+]
+exclude = ["benchmarks", "runtime"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+authors = ["Adaptive Conflict Graph contributors"]
+
+[workspace.dependencies]
+anyhow = "=1.0.86"
+bitflags = { version = "=2.6.0", features = ["serde"] }
+blake3 = "=1.5.4"
+clap = { version = "=4.5.16", features = ["derive"] }
+hex = "=0.4.3"
+serde = { version = "=1.0.210", features = ["derive"] }
+serde_json = "=1.0.128"
+thiserror = "=1.0.63"
+
+acg-core = { path = "crates/acg-core" }
+acg-symbolic-json = { path = "crates/acg-symbolic-json" }
+acg-profile-graph = { path = "crates/acg-profile-graph" }
