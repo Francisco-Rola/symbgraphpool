@@ -18,12 +18,18 @@ use crate::cache::{WasmCacheConfig, WasmCacheMetrics, WasmModuleCache};
 use crate::error::{EngineError, EngineResult};
 use crate::native::{NativeCallContext, NativeContract};
 use crate::querier::EngineQuerier;
+use crate::speculative::{
+    CanonicalTransaction, CanonicalTxDisposition, CanonicalTxResult, SpeculativeBlockOutcome,
+    SpeculativeExecutionMetrics, SpeculativeExecutionOutcome, SpeculativeExecutionStatus,
+    SpeculativeTxResult, StateSnapshot, StateWriteSet,
+};
 use crate::state::{code_id_of, SharedTx, SharedWorld, TransactionState, WorldState};
 use crate::storage::EngineStorage;
 use crate::types::{
     AccessKind, Address, BlockContext, CodeChecksum, CodeId, CodeKind, CodeMetadata,
     ContractMetadata, ExecutionOutcome, ExecutionRequest, QueryOutcome, TransactionId,
 };
+use crate::validation::{apply_write_set, validate_dependencies, ValidationOutcome};
 
 const EXECUTE_RESPONSE_TYPE_URL: &str = "/cosmwasm.wasm.v1.MsgExecuteContractResponse";
 const INSTANTIATE_RESPONSE_TYPE_URL: &str = "/cosmwasm.wasm.v1.MsgInstantiateContractResponse";
@@ -64,6 +70,7 @@ pub(crate) struct CodeRecord {
 pub(crate) struct EngineCore {
     pub config: EngineConfig,
     pub state: SharedWorld,
+    engine_identity: Arc<()>,
     codes: RwLock<BTreeMap<CodeId, CodeRecord>>,
     wasm_cache: WasmModuleCache,
     next_code_id: AtomicU64,
@@ -77,11 +84,11 @@ pub struct CosmWasmEngine {
 impl CosmWasmEngine {
     pub fn try_new(config: EngineConfig) -> EngineResult<Self> {
         let wasm_cache = WasmModuleCache::new(&config.wasm_cache)?;
-
         Ok(Self {
             core: Arc::new(EngineCore {
                 config,
                 state: Arc::new(RwLock::new(WorldState::default())),
+                engine_identity: Arc::new(()),
                 codes: RwLock::new(BTreeMap::new()),
                 wasm_cache,
                 next_code_id: AtomicU64::new(1),
@@ -246,12 +253,251 @@ impl CosmWasmEngine {
             .and_then(|storage| storage.get(key).cloned())
     }
 
+    /// Capture a detached, immutable view of the current world state for speculative execution.
+    pub fn snapshot(&self) -> StateSnapshot {
+        StateSnapshot {
+            core: self.core.clone(),
+            state: Arc::new(RwLock::new(self.core.state.read().clone())),
+        }
+    }
+
+    /// Execute one transaction against a detached snapshot without mutating canonical state.
+    ///
+    /// Contract/runtime failures are represented in `SpeculativeTxResult::status` so validation can
+    /// later decide whether the same failure is reusable. The outer `EngineResult` is reserved for
+    /// misuse of the speculative API itself, such as passing a snapshot from another engine.
+    pub fn execute_speculative(
+        &self,
+        snapshot: &StateSnapshot,
+        block: BlockContext,
+        request: ExecutionRequest,
+    ) -> EngineResult<SpeculativeTxResult> {
+        if !Arc::ptr_eq(&self.core, &snapshot.core) {
+            return Err(EngineError::InvalidConfiguration(
+                "state snapshot belongs to a different CosmWasm engine".to_owned(),
+            ));
+        }
+
+        let transaction_id = request.transaction_id();
+        let receipt_block = block.clone();
+        let receipt_request = request.clone();
+        let (result, tx) =
+            self.execute_request_on_state(snapshot.state.clone(), block, request, false);
+        let state = tx.lock();
+        let read_dependencies = state.read_dependencies.clone();
+        let write_set = if result.is_ok() {
+            state.write_set()
+        } else {
+            StateWriteSet::default()
+        };
+        let mut accesses = state.accesses.clone();
+        drop(state);
+
+        let status = match result {
+            Ok(outcome) => SpeculativeExecutionStatus::Succeeded(SpeculativeExecutionOutcome {
+                contract: outcome.contract,
+                events: outcome.events,
+                data: outcome.data,
+                created_contracts: outcome.created_contracts,
+            }),
+            Err(error) => {
+                for access in &mut accesses {
+                    access.reverted = true;
+                }
+                SpeculativeExecutionStatus::Failed(error)
+            }
+        };
+
+        Ok(SpeculativeTxResult {
+            transaction_id,
+            block: receipt_block,
+            request: receipt_request,
+            status,
+            accesses,
+            read_dependencies,
+            write_set,
+            engine_identity: self.core.engine_identity.clone(),
+        })
+    }
+
+    /// Validate a detached speculative receipt against the current canonical world state.
+    pub fn validate_speculative(
+        &self,
+        result: &SpeculativeTxResult,
+    ) -> EngineResult<ValidationOutcome> {
+        self.ensure_receipt_belongs_to_engine(result)?;
+        Ok(validate_dependencies(
+            &self.core.state,
+            &result.read_dependencies,
+        ))
+    }
+
+    /// Drain a block in canonical order, reusing valid speculative receipts and replaying only
+    /// receipts whose recorded dependencies no longer match canonical predecessor state.
+    ///
+    /// Transaction-level contract/runtime failures are returned inside each `CanonicalTxResult`;
+    /// the outer `EngineResult` is reserved for malformed coordinator input or foreign receipts.
+    pub fn execute_canonical_with_speculation(
+        &self,
+        transactions: Vec<CanonicalTransaction>,
+        speculative_results: Vec<SpeculativeTxResult>,
+    ) -> EngineResult<SpeculativeBlockOutcome> {
+        let mut canonical_bindings = BTreeMap::new();
+        for transaction in &transactions {
+            let transaction_id = transaction.transaction_id();
+            if canonical_bindings
+                .insert(
+                    transaction_id,
+                    (transaction.block.clone(), transaction.request.clone()),
+                )
+                .is_some()
+            {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "duplicate canonical transaction ID {}",
+                    transaction_id.0
+                )));
+            }
+        }
+
+        let mut receipts = BTreeMap::new();
+        for result in speculative_results {
+            self.ensure_receipt_belongs_to_engine(&result)?;
+            let Some((expected_block, expected_request)) =
+                canonical_bindings.get(&result.transaction_id)
+            else {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "speculative receipt references transaction ID {} that is not in the canonical block",
+                    result.transaction_id.0
+                )));
+            };
+            if &result.block != expected_block || &result.request != expected_request {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "speculative receipt for transaction ID {} was produced from a different block context or request",
+                    result.transaction_id.0
+                )));
+            }
+            let transaction_id = result.transaction_id;
+            if receipts.insert(transaction_id, result).is_some() {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "duplicate speculative receipt for transaction ID {}",
+                    transaction_id.0
+                )));
+            }
+        }
+
+        let mut metrics = SpeculativeExecutionMetrics {
+            speculative_results: receipts.len() as u64,
+            ..SpeculativeExecutionMetrics::default()
+        };
+        let mut outcomes = Vec::with_capacity(transactions.len());
+
+        for transaction in transactions {
+            let transaction_id = transaction.transaction_id();
+            let Some(receipt) = receipts.remove(&transaction_id) else {
+                metrics.canonical_transactions += 1;
+                let result = self.execute_request(transaction.block, transaction.request);
+                outcomes.push(CanonicalTxResult {
+                    transaction_id,
+                    disposition: CanonicalTxDisposition::Canonical,
+                    validation: None,
+                    result,
+                });
+                continue;
+            };
+
+            let validation = validate_dependencies(&self.core.state, &receipt.read_dependencies);
+            if validation.is_valid() {
+                metrics.reused_results += 1;
+                let result = self.commit_reused_receipt(receipt);
+                outcomes.push(CanonicalTxResult {
+                    transaction_id,
+                    disposition: CanonicalTxDisposition::ReusedSpeculative,
+                    validation: Some(validation),
+                    result,
+                });
+            } else {
+                metrics.invalidated_results += 1;
+                metrics.replayed_transactions += 1;
+                let result = self.execute_request(transaction.block, transaction.request);
+                outcomes.push(CanonicalTxResult {
+                    transaction_id,
+                    disposition: CanonicalTxDisposition::Replayed,
+                    validation: Some(validation),
+                    result,
+                });
+            }
+        }
+
+        debug_assert!(receipts.is_empty());
+        Ok(SpeculativeBlockOutcome {
+            transactions: outcomes,
+            metrics,
+        })
+    }
+
+    fn ensure_receipt_belongs_to_engine(&self, result: &SpeculativeTxResult) -> EngineResult<()> {
+        if !Arc::ptr_eq(&result.engine_identity, &self.core.engine_identity) {
+            return Err(EngineError::InvalidConfiguration(
+                "speculative receipt belongs to a different CosmWasm engine".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn commit_reused_receipt(
+        &self,
+        receipt: SpeculativeTxResult,
+    ) -> Result<ExecutionOutcome, EngineError> {
+        let SpeculativeTxResult {
+            transaction_id,
+            status,
+            accesses,
+            write_set,
+            ..
+        } = receipt;
+
+        match status {
+            SpeculativeExecutionStatus::Succeeded(outcome) => {
+                apply_write_set(&self.core.state, &write_set);
+                Ok(ExecutionOutcome {
+                    transaction_id,
+                    contract: outcome.contract,
+                    events: outcome.events,
+                    data: outcome.data,
+                    accesses,
+                    created_contracts: outcome.created_contracts,
+                })
+            }
+            SpeculativeExecutionStatus::Failed(error) => {
+                debug_assert!(write_set.is_empty());
+                Err(error)
+            }
+        }
+    }
+
     pub fn execute_request(
         &self,
         block: BlockContext,
         request: ExecutionRequest,
     ) -> EngineResult<ExecutionOutcome> {
-        match request {
+        self.execute_request_on_state(self.core.state.clone(), block, request, true)
+            .0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn instantiate(
+        &self,
+        transaction_id: TransactionId,
+        block: BlockContext,
+        sender: Address,
+        code_id: CodeId,
+        admin: Option<Address>,
+        label: String,
+        funds: Vec<Coin>,
+        msg: Binary,
+    ) -> EngineResult<ExecutionOutcome> {
+        self.execute_request(
+            block,
             ExecutionRequest::Instantiate {
                 transaction_id,
                 sender,
@@ -260,7 +506,76 @@ impl CosmWasmEngine {
                 label,
                 funds,
                 msg,
-            } => self.instantiate(
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute(
+        &self,
+        transaction_id: TransactionId,
+        block: BlockContext,
+        sender: Address,
+        contract: Address,
+        funds: Vec<Coin>,
+        msg: Binary,
+    ) -> EngineResult<ExecutionOutcome> {
+        self.execute_request(
+            block,
+            ExecutionRequest::Execute {
+                transaction_id,
+                sender,
+                contract,
+                funds,
+                msg,
+            },
+        )
+    }
+
+    pub fn query(
+        &self,
+        block: BlockContext,
+        contract: Address,
+        msg: Binary,
+    ) -> EngineResult<QueryOutcome> {
+        validate_public_address(&contract)?;
+        let tx = self.begin_transaction(TransactionId(0));
+        let data = query_contract_shared(
+            self.core.clone(),
+            tx.clone(),
+            block,
+            contract.clone(),
+            msg,
+            0,
+        )?;
+        let accesses = tx.lock().accesses.clone();
+        Ok(QueryOutcome {
+            contract,
+            data,
+            accesses,
+        })
+    }
+
+    fn execute_request_on_state(
+        &self,
+        base: SharedWorld,
+        block: BlockContext,
+        request: ExecutionRequest,
+        commit: bool,
+    ) -> (EngineResult<ExecutionOutcome>, SharedTx) {
+        let transaction_id = request.transaction_id();
+        let tx = self.begin_transaction_on(base, transaction_id);
+        let result = match request {
+            ExecutionRequest::Instantiate {
+                sender,
+                code_id,
+                admin,
+                label,
+                funds,
+                msg,
+                ..
+            } => self.instantiate_in_transaction(
+                tx.clone(),
                 transaction_id,
                 block,
                 sender,
@@ -271,18 +586,32 @@ impl CosmWasmEngine {
                 msg,
             ),
             ExecutionRequest::Execute {
-                transaction_id,
                 sender,
                 contract,
                 funds,
                 msg,
-            } => self.execute(transaction_id, block, sender, contract, funds, msg),
+                ..
+            } => self.execute_in_transaction(
+                tx.clone(),
+                transaction_id,
+                block,
+                sender,
+                contract,
+                funds,
+                msg,
+            ),
+        };
+
+        if commit && result.is_ok() {
+            tx.lock().commit();
         }
+        (result, tx)
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn instantiate(
+    fn instantiate_in_transaction(
         &self,
+        tx: SharedTx,
         transaction_id: TransactionId,
         block: BlockContext,
         sender: Address,
@@ -299,7 +628,6 @@ impl CosmWasmEngine {
         validate_contract_label(&label)?;
         let code = self.code(code_id)?;
 
-        let tx = self.begin_transaction(transaction_id);
         let contract = tx
             .lock()
             .allocate_contract_address(&self.core.config.contract_address_prefix)?;
@@ -337,7 +665,6 @@ impl CosmWasmEngine {
             0,
             Event::new("instantiate").add_attribute("_contract_address", contract.as_str()),
         );
-        tx.lock().commit();
         let state = tx.lock();
         Ok(ExecutionOutcome {
             transaction_id,
@@ -350,8 +677,9 @@ impl CosmWasmEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn execute(
+    fn execute_in_transaction(
         &self,
+        tx: SharedTx,
         transaction_id: TransactionId,
         block: BlockContext,
         sender: Address,
@@ -361,7 +689,6 @@ impl CosmWasmEngine {
     ) -> EngineResult<ExecutionOutcome> {
         validate_public_address(&sender)?;
         validate_public_address(&contract)?;
-        let tx = self.begin_transaction(transaction_id);
         code_id_of(&tx, &contract)?;
         tx.lock()
             .transfer(&sender, &contract, &funds, &contract, 0)?;
@@ -385,7 +712,6 @@ impl CosmWasmEngine {
             response,
             0,
         )?;
-        tx.lock().commit();
         let state = tx.lock();
         Ok(ExecutionOutcome {
             transaction_id,
@@ -397,33 +723,13 @@ impl CosmWasmEngine {
         })
     }
 
-    pub fn query(
-        &self,
-        block: BlockContext,
-        contract: Address,
-        msg: Binary,
-    ) -> EngineResult<QueryOutcome> {
-        validate_public_address(&contract)?;
-        let tx = self.begin_transaction(TransactionId(0));
-        let data = query_contract_shared(
-            self.core.clone(),
-            tx.clone(),
-            block,
-            contract.clone(),
-            msg,
-            0,
-        )?;
-        let accesses = tx.lock().accesses.clone();
-        Ok(QueryOutcome {
-            contract,
-            data,
-            accesses,
-        })
+    fn begin_transaction(&self, transaction_id: TransactionId) -> SharedTx {
+        self.begin_transaction_on(self.core.state.clone(), transaction_id)
     }
 
-    fn begin_transaction(&self, transaction_id: TransactionId) -> SharedTx {
+    fn begin_transaction_on(&self, base: SharedWorld, transaction_id: TransactionId) -> SharedTx {
         Arc::new(parking_lot::Mutex::new(TransactionState::new(
-            self.core.state.clone(),
+            base,
             transaction_id,
         )))
     }
@@ -601,6 +907,7 @@ pub(crate) fn query_contract_shared(
     ensure_depth(&core, depth)?;
     let checkpoint = tx.lock().clone();
     let trace_start = checkpoint.accesses.len();
+    let dependency_start = checkpoint.read_dependencies.len();
     let code_id = code_id_of(&tx, &contract)?;
     let artifact = core.code(code_id)?.artifact;
     let env = make_env(&block, &contract);
@@ -648,10 +955,12 @@ pub(crate) fn query_contract_shared(
     }) || current.created_contracts != checkpoint.created_contracts;
     if wrote {
         let mut restored = checkpoint;
+        let attempted_dependencies = current.read_dependencies[dependency_start..].to_vec();
         for access in &mut attempted {
             access.reverted = true;
         }
         restored.accesses.extend(attempted);
+        restored.read_dependencies.extend(attempted_dependencies);
         *tx.lock() = restored;
         return Err(EngineError::Contract(
             "query attempted to mutate state".to_owned(),
@@ -702,6 +1011,7 @@ fn dispatch_submessage(
     ensure_depth(&core, depth)?;
     let checkpoint = tx.lock().clone();
     let trace_start = checkpoint.accesses.len();
+    let dependency_start = checkpoint.read_dependencies.len();
     let result = dispatch_message(
         core.clone(),
         tx.clone(),
@@ -716,10 +1026,12 @@ fn dispatch_submessage(
         let current = tx.lock().clone();
         let mut restored = checkpoint;
         let mut attempted = current.accesses[trace_start..].to_vec();
+        let attempted_dependencies = current.read_dependencies[dependency_start..].to_vec();
         for access in &mut attempted {
             access.reverted = true;
         }
         restored.accesses.extend(attempted);
+        restored.read_dependencies.extend(attempted_dependencies);
         *tx.lock() = restored;
     }
 

@@ -5,9 +5,10 @@ use cosmwasm_std::{Coin, Uint128};
 use parking_lot::{Mutex, RwLock};
 
 use crate::error::{EngineError, EngineResult};
+use crate::speculative::{BalanceWrite, ReadDependency, StateWriteSet, StorageWrite};
 use crate::types::{AccessKind, AccessRecord, Address, CodeId, ContractMetadata, TransactionId};
 
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorldState {
     pub contracts: BTreeMap<Address, ContractMetadata>,
     pub storage: BTreeMap<Address, BTreeMap<Vec<u8>, Vec<u8>>>,
@@ -25,6 +26,7 @@ pub(crate) struct TransactionState {
     pub balance_writes: BTreeMap<(Address, String), Uint128>,
     pub created_contracts: BTreeMap<Address, ContractMetadata>,
     pub accesses: Vec<AccessRecord>,
+    pub read_dependencies: Vec<ReadDependency>,
     next_instance_ordinal: u32,
 }
 
@@ -37,6 +39,7 @@ impl TransactionState {
             balance_writes: BTreeMap::new(),
             created_contracts: BTreeMap::new(),
             accesses: Vec::new(),
+            read_dependencies: Vec::new(),
             next_instance_ordinal: 0,
         }
     }
@@ -53,11 +56,17 @@ impl TransactionState {
         )))
     }
 
-    pub fn contract(&self, address: &Address) -> Option<ContractMetadata> {
-        self.created_contracts
-            .get(address)
-            .cloned()
-            .or_else(|| self.base.read().contracts.get(address).cloned())
+    pub fn contract(&mut self, address: &Address) -> Option<ContractMetadata> {
+        if let Some(metadata) = self.created_contracts.get(address).cloned() {
+            return Some(metadata);
+        }
+        let metadata = self.base.read().contracts.get(address).cloned();
+        self.read_dependencies
+            .push(ReadDependency::ContractMetadata {
+                address: address.clone(),
+                metadata: metadata.clone(),
+            });
+        metadata
     }
 
     pub fn create_contract(&mut self, metadata: ContractMetadata) -> EngineResult<()> {
@@ -71,17 +80,22 @@ impl TransactionState {
 
     pub fn storage_get(&mut self, contract: &Address, key: &[u8], depth: u32) -> Option<Vec<u8>> {
         let overlay_key = (contract.clone(), key.to_vec());
-        let value = self
-            .storage_writes
-            .get(&overlay_key)
-            .cloned()
-            .unwrap_or_else(|| {
-                self.base
-                    .read()
-                    .storage
-                    .get(contract)
-                    .and_then(|entries| entries.get(key).cloned())
+        let value = if let Some(value) = self.storage_writes.get(&overlay_key) {
+            value.clone()
+        } else {
+            let value = self
+                .base
+                .read()
+                .storage
+                .get(contract)
+                .and_then(|entries| entries.get(key).cloned());
+            self.read_dependencies.push(ReadDependency::Storage {
+                contract: contract.clone(),
+                key: key.to_vec(),
+                value: value.clone(),
             });
+            value
+        };
         self.accesses.push(AccessRecord {
             transaction_id: self.transaction_id,
             call_depth: depth,
@@ -143,14 +157,42 @@ impl TransactionState {
             reverted: false,
         });
 
-        let mut merged = self
+        let base_entries = self
             .base
             .read()
             .storage
             .get(contract)
             .cloned()
             .unwrap_or_default();
+        let masked_keys: Vec<Vec<u8>> = self
+            .storage_writes
+            .keys()
+            .filter(|(write_contract, key)| {
+                write_contract == contract
+                    && start.map_or(true, |start| key.as_slice() >= start)
+                    && end.map_or(true, |end| key.as_slice() < end)
+            })
+            .map(|(_, key)| key.clone())
+            .collect();
+        let masked: BTreeSet<Vec<u8>> = masked_keys.iter().cloned().collect();
+        let observed_base_entries = base_entries
+            .iter()
+            .filter(|(key, _)| {
+                start.map_or(true, |start| key.as_slice() >= start)
+                    && end.map_or(true, |end| key.as_slice() < end)
+                    && !masked.contains(key.as_slice())
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        self.read_dependencies.push(ReadDependency::StorageRange {
+            contract: contract.clone(),
+            start: start.map(ToOwned::to_owned),
+            end: end.map(ToOwned::to_owned),
+            base_entries: observed_base_entries,
+            masked_keys,
+        });
 
+        let mut merged = base_entries;
         for ((write_contract, key), value) in &self.storage_writes {
             if write_contract != contract {
                 continue;
@@ -182,14 +224,23 @@ impl TransactionState {
         depth: u32,
     ) -> Uint128 {
         let key = (address.clone(), denom.to_owned());
-        let value = self.balance_writes.get(&key).copied().unwrap_or_else(|| {
-            self.base
+        let value = if let Some(value) = self.balance_writes.get(&key).copied() {
+            value
+        } else {
+            let value = self
+                .base
                 .read()
                 .balances
                 .get(&key)
                 .copied()
-                .unwrap_or_default()
-        });
+                .unwrap_or_default();
+            self.read_dependencies.push(ReadDependency::BankBalance {
+                address: address.clone(),
+                denom: denom.to_owned(),
+                amount: value.u128(),
+            });
+            value
+        };
         self.accesses.push(AccessRecord {
             transaction_id: self.transaction_id,
             call_depth: depth,
@@ -226,6 +277,30 @@ impl TransactionState {
     }
 
     pub fn all_balances(&mut self, address: &Address, contract: &Address, depth: u32) -> Vec<Coin> {
+        let masked_denoms: Vec<String> = self
+            .balance_writes
+            .keys()
+            .filter(|(owner, _)| owner == address)
+            .map(|(_, denom)| denom.clone())
+            .collect();
+        let masked: BTreeSet<String> = masked_denoms.iter().cloned().collect();
+        let base_balances: Vec<(String, u128)> = self
+            .base
+            .read()
+            .balances
+            .iter()
+            .filter(|((owner, denom), amount)| {
+                owner == address && !amount.is_zero() && !masked.contains(denom.as_str())
+            })
+            .map(|((_, denom), amount)| (denom.clone(), amount.u128()))
+            .collect();
+        self.read_dependencies
+            .push(ReadDependency::BankAllBalances {
+                address: address.clone(),
+                base_balances,
+                masked_denoms,
+            });
+
         let base_denoms: BTreeSet<String> = self
             .base
             .read()
@@ -348,6 +423,30 @@ impl TransactionState {
             } else {
                 world.balances.insert(key.clone(), *value);
             }
+        }
+    }
+
+    pub fn write_set(&self) -> StateWriteSet {
+        StateWriteSet {
+            storage: self
+                .storage_writes
+                .iter()
+                .map(|((contract, key), value)| StorageWrite {
+                    contract: contract.clone(),
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+            balances: self
+                .balance_writes
+                .iter()
+                .map(|((address, denom), amount)| BalanceWrite {
+                    address: address.clone(),
+                    denom: denom.clone(),
+                    amount: amount.u128(),
+                })
+                .collect(),
+            created_contracts: self.created_contracts.values().cloned().collect(),
         }
     }
 

@@ -1,0 +1,225 @@
+use std::collections::BTreeSet;
+
+use cosmwasm_std::Uint128;
+
+use crate::speculative::{ReadDependency, StateWriteSet};
+use crate::state::SharedWorld;
+use crate::types::{Address, ContractMetadata};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValidationConflict {
+    ContractMetadata {
+        dependency_index: usize,
+        address: Address,
+        expected: Option<ContractMetadata>,
+        actual: Option<ContractMetadata>,
+    },
+    Storage {
+        dependency_index: usize,
+        contract: Address,
+        key: Vec<u8>,
+        expected: Option<Vec<u8>>,
+        actual: Option<Vec<u8>>,
+    },
+    StorageRange {
+        dependency_index: usize,
+        contract: Address,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        expected: Vec<(Vec<u8>, Vec<u8>)>,
+        actual: Vec<(Vec<u8>, Vec<u8>)>,
+    },
+    BankBalance {
+        dependency_index: usize,
+        address: Address,
+        denom: String,
+        expected: u128,
+        actual: u128,
+    },
+    BankAllBalances {
+        dependency_index: usize,
+        address: Address,
+        expected: Vec<(String, u128)>,
+        actual: Vec<(String, u128)>,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ValidationOutcome {
+    conflicts: Vec<ValidationConflict>,
+}
+
+impl ValidationOutcome {
+    pub fn valid() -> Self {
+        Self::default()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.conflicts.is_empty()
+    }
+
+    pub fn conflicts(&self) -> &[ValidationConflict] {
+        &self.conflicts
+    }
+
+    pub fn into_conflicts(self) -> Vec<ValidationConflict> {
+        self.conflicts
+    }
+}
+
+pub(crate) fn validate_dependencies(
+    world: &SharedWorld,
+    dependencies: &[ReadDependency],
+) -> ValidationOutcome {
+    let world = world.read();
+    let mut conflicts = Vec::new();
+
+    for (dependency_index, dependency) in dependencies.iter().enumerate() {
+        match dependency {
+            ReadDependency::ContractMetadata { address, metadata } => {
+                let actual = world.contracts.get(address).cloned();
+                if actual != *metadata {
+                    conflicts.push(ValidationConflict::ContractMetadata {
+                        dependency_index,
+                        address: address.clone(),
+                        expected: metadata.clone(),
+                        actual,
+                    });
+                }
+            }
+            ReadDependency::Storage {
+                contract,
+                key,
+                value,
+            } => {
+                let actual = world
+                    .storage
+                    .get(contract)
+                    .and_then(|entries| entries.get(key).cloned());
+                if actual != *value {
+                    conflicts.push(ValidationConflict::Storage {
+                        dependency_index,
+                        contract: contract.clone(),
+                        key: key.clone(),
+                        expected: value.clone(),
+                        actual,
+                    });
+                }
+            }
+            ReadDependency::StorageRange {
+                contract,
+                start,
+                end,
+                base_entries,
+                masked_keys,
+            } => {
+                let masked: BTreeSet<&[u8]> = masked_keys.iter().map(Vec::as_slice).collect();
+                let actual = world
+                    .storage
+                    .get(contract)
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter(|(key, _)| {
+                                start
+                                    .as_deref()
+                                    .map_or(true, |start| key.as_slice() >= start)
+                                    && end.as_deref().map_or(true, |end| key.as_slice() < end)
+                                    && !masked.contains(key.as_slice())
+                            })
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if actual != *base_entries {
+                    conflicts.push(ValidationConflict::StorageRange {
+                        dependency_index,
+                        contract: contract.clone(),
+                        start: start.clone(),
+                        end: end.clone(),
+                        expected: base_entries.clone(),
+                        actual,
+                    });
+                }
+            }
+            ReadDependency::BankBalance {
+                address,
+                denom,
+                amount,
+            } => {
+                let actual = world
+                    .balances
+                    .get(&(address.clone(), denom.clone()))
+                    .copied()
+                    .unwrap_or_default()
+                    .u128();
+                if actual != *amount {
+                    conflicts.push(ValidationConflict::BankBalance {
+                        dependency_index,
+                        address: address.clone(),
+                        denom: denom.clone(),
+                        expected: *amount,
+                        actual,
+                    });
+                }
+            }
+            ReadDependency::BankAllBalances {
+                address,
+                base_balances,
+                masked_denoms,
+            } => {
+                let masked: BTreeSet<&str> = masked_denoms.iter().map(String::as_str).collect();
+                let actual = world
+                    .balances
+                    .iter()
+                    .filter(|((owner, denom), amount)| {
+                        owner == address && !amount.is_zero() && !masked.contains(denom.as_str())
+                    })
+                    .map(|((_, denom), amount)| (denom.clone(), amount.u128()))
+                    .collect::<Vec<_>>();
+                if actual != *base_balances {
+                    conflicts.push(ValidationConflict::BankAllBalances {
+                        dependency_index,
+                        address: address.clone(),
+                        expected: base_balances.clone(),
+                        actual,
+                    });
+                }
+            }
+        }
+    }
+
+    ValidationOutcome { conflicts }
+}
+
+pub(crate) fn apply_write_set(world: &SharedWorld, write_set: &StateWriteSet) {
+    let mut world = world.write();
+
+    for metadata in &write_set.created_contracts {
+        world
+            .contracts
+            .insert(metadata.address.clone(), metadata.clone());
+        world.storage.entry(metadata.address.clone()).or_default();
+    }
+
+    for write in &write_set.storage {
+        let storage = world.storage.entry(write.contract.clone()).or_default();
+        match &write.value {
+            Some(value) => {
+                storage.insert(write.key.clone(), value.clone());
+            }
+            None => {
+                storage.remove(&write.key);
+            }
+        }
+    }
+
+    for write in &write_set.balances {
+        let key = (write.address.clone(), write.denom.clone());
+        if write.amount == 0 {
+            world.balances.remove(&key);
+        } else {
+            world.balances.insert(key, Uint128::new(write.amount));
+        }
+    }
+}

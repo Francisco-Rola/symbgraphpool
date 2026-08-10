@@ -99,6 +99,12 @@ impl NativeCallContext {
             .u128()
     }
 
+    pub fn all_balances(&mut self, address: &Address) -> Vec<Coin> {
+        self.tx
+            .lock()
+            .all_balances(address, &self.contract, self.depth)
+    }
+
     pub fn send(&mut self, to: &Address, coins: &[Coin]) -> EngineResult<()> {
         self.tx
             .lock()

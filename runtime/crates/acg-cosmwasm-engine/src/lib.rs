@@ -10,16 +10,25 @@ mod engine;
 mod error;
 mod native;
 mod querier;
+mod speculative;
 mod state;
 mod storage;
 mod types;
+mod validation;
 
 pub use crate::cache::{WasmCacheConfig, WasmCacheMetrics};
 pub use crate::engine::{CosmWasmEngine, EngineConfig};
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::native::{NativeCallContext, NativeContract};
+pub use crate::speculative::{
+    BalanceWrite, CanonicalTransaction, CanonicalTxDisposition, CanonicalTxResult, ReadDependency,
+    SpeculativeBlockOutcome, SpeculativeExecutionMetrics, SpeculativeExecutionOutcome,
+    SpeculativeExecutionStatus, SpeculativeTxResult, StateSnapshot, StateWriteSet, StorageWrite,
+};
 pub use crate::types::{
     AccessKind, AccessRecord, Address, BlockContext, CodeChecksum, CodeId, CodeKind, CodeMetadata,
     ContractMetadata, ExecutionOutcome, ExecutionRequest, NativeResponse, QueryOutcome,
     TransactionId,
 };
+
+pub use crate::validation::{ValidationConflict, ValidationOutcome};
