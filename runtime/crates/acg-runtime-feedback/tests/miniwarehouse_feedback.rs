@@ -125,7 +125,7 @@ fn miniwarehouse_history_adapts_from_conflicting_to_independent_phase() {
         ])
         .unwrap();
     assert_eq!(candidate_graph.edges().len(), 1);
-    let edge_index = candidate_graph.edges()[0].profile_edge_index;
+    let edge_index = candidate_graph.edges()[0].profile_edge_index().unwrap();
 
     let config = AdaptiveFeedbackConfig {
         retention_factor: 0.95,

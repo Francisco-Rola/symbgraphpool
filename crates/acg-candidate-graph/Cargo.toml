@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 acg-core.workspace = true
+acg-feedback.workspace = true
 acg-predicate.workspace = true
 acg-profile-graph.workspace = true
 serde.workspace = true

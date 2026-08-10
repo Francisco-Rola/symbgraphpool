@@ -5,6 +5,27 @@ persistent runtime-discovered fallback edges. The next work is Brick 4.
 
 ## Brick 4: weighted scheduling
 
+### Brick 4A policy: runtime evidence can override symbolic pruning
+
+Concrete execution is authoritative evidence for scheduling belief, while symbolic predicates remain
+advisory. There are two miss classes:
+
+- **topology miss:** no static profile edge exists; Brick 3 creates a persistent runtime-discovered
+  fallback edge;
+- **predicate/materialization miss:** a static profile edge exists, but the concrete candidate pair was
+  pruned and execution later proves a conflict.
+
+Brick 4A persists `candidate_miss_observations` on the affected adaptive statistics. Brick 4B will use
+that history as the gate for bypassing an otherwise-false symbolic predicate. A symbolic prior or
+unrelated positive history alone must not turn every false concrete predicate into an edge. Once a
+real candidate miss has been observed, however, the symbolic predicate is no longer treated as an
+absolute proof of independence; the learned posterior may materialize the relationship subject to the
+weighted graph's normal probability threshold.
+
+Brick 4A also exposes non-mutating current-epoch estimates for static and runtime-discovered edges
+and maintains profile adjacency for fallback edges so candidate construction can traverse learned
+topology without a global fallback-edge scan.
+
 1. Expose current-epoch probability/confidence estimates for static and fallback profile edges.
 2. Materialize fallback profile relationships into the candidate transaction graph.
 3. Attach compact conflict probabilities to concrete transaction edges.

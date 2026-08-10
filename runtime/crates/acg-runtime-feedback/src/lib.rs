@@ -1,8 +1,15 @@
 //! CosmWasm/validator-runtime feedback collection for adaptive conflict statistics.
 
+mod adaptive_pipeline;
+
+pub use adaptive_pipeline::{
+    AdaptiveBlockPlan, AdaptiveBlockRun, AdaptivePipelineError, AdaptivePlanningConfig,
+    AdaptiveSerialPipeline,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 
-use acg_candidate_graph::CandidateGraph;
+use acg_candidate_graph::{CandidateGraph, EdgeProvenance};
 use acg_core::{ConflictKinds, ProfileId, TxIndex};
 use acg_cosmwasm_engine::{AccessKind, AccessRecord, Address};
 use acg_feedback::{
@@ -437,15 +444,19 @@ impl BlockFeedbackCollector {
             }
             let left = candidate_transaction(candidate_graph, pair.0)?;
             let right = candidate_transaction(candidate_graph, pair.1)?;
+            let target = match edge.provenance {
+                EdgeProvenance::Static { profile_edge_index } => ObservationTarget::Static {
+                    edge_index: profile_edge_index,
+                },
+                EdgeProvenance::RuntimeDiscovered { .. } => ObservationTarget::RuntimeDiscovered,
+            };
             buffer.push(ConflictObservation::independent(
                 left.profile_id,
                 right.profile_id,
                 left.tx_id,
                 right.tx_id,
                 observation_source,
-                ObservationTarget::Static {
-                    edge_index: edge.profile_edge_index,
-                },
+                target,
                 independent_weight,
                 epoch,
                 true,
@@ -734,6 +745,10 @@ impl RuntimeFeedbackEngine {
 
     pub fn store(&self) -> &AdaptiveFeedbackStore {
         &self.store
+    }
+
+    pub fn adaptive_config(&self) -> &AdaptiveFeedbackConfig {
+        &self.adaptive_config
     }
 
     pub fn process_pre_execution(

@@ -67,6 +67,7 @@ fn positive_and_negative_evidence_update_beta_posterior() {
     assert_eq!(summary.negative_observations, 0);
     assert!(after_positive.probability() > initial.probability());
     assert_eq!(after_positive.positive_observations, 1);
+    assert_eq!(after_positive.candidate_miss_observations, 0);
 
     let mut negative = ObservationBuffer::default();
     negative.push(
@@ -206,6 +207,7 @@ fn runtime_miss_creates_reviewable_fallback_and_later_negative_updates_it() {
     assert_eq!(summary.fallback_edges_created, 1);
     assert_eq!(summary.candidate_misses, 1);
     let fallback = store.fallback_edge(credit, counter).unwrap();
+    assert_eq!(fallback.statistics.candidate_miss_observations, 1);
     assert!(fallback.review_required);
     assert!(fallback.conflict_kinds.contains(ConflictKinds::WRITE_WRITE));
     let after_positive = fallback.statistics.probability();
@@ -230,6 +232,7 @@ fn runtime_miss_creates_reviewable_fallback_and_later_negative_updates_it() {
     let fallback = store.fallback_edge(credit, counter).unwrap();
     assert!(fallback.conflict_kinds.contains(ConflictKinds::WRITE_WRITE));
     assert!(fallback.conflict_kinds.contains(ConflictKinds::READ_WRITE));
+    assert_eq!(fallback.statistics.candidate_miss_observations, 2);
 
     let mut independent = ObservationBuffer::default();
     independent.push(
@@ -249,6 +252,7 @@ fn runtime_miss_creates_reviewable_fallback_and_later_negative_updates_it() {
     store.apply_batch(&graph, independent, &config).unwrap();
     let fallback = store.fallback_edge(credit, counter).unwrap();
     assert_eq!(fallback.statistics.negative_observations, 1);
+    assert_eq!(fallback.statistics.candidate_miss_observations, 2);
     assert!(fallback.statistics.probability() < after_positive);
 }
 
@@ -302,6 +306,156 @@ fn checkpoint_round_trip_preserves_static_and_runtime_discovered_statistics() {
         store.static_statistics(edge)
     );
     assert_eq!(restored.fallback_edges(), store.fallback_edges());
+}
+
+#[test]
+fn static_candidate_miss_is_persisted_for_future_materialization() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let config = AdaptiveFeedbackConfig::default();
+
+    let initial = store.estimate_static_edge(edge, 0, &config).unwrap();
+    assert!(!initial.has_candidate_miss_history());
+
+    let mut buffer = ObservationBuffer::default();
+    buffer.push(
+        ConflictObservation::conflict(
+            credit,
+            credit,
+            TxId(10),
+            TxId(11),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::CanonicalExecution,
+            ObservationTarget::Static { edge_index: edge },
+            3.0,
+            1,
+            false,
+        )
+        .unwrap(),
+    );
+    let summary = store.apply_batch(&graph, buffer, &config).unwrap();
+    assert_eq!(summary.candidate_misses, 1);
+
+    let estimate = store.estimate_static_edge(edge, 1, &config).unwrap();
+    assert!(estimate.has_candidate_miss_history());
+    assert_eq!(estimate.candidate_miss_observations, 1);
+
+    let checkpoint = store.checkpoint(&graph).unwrap();
+    let restored = AdaptiveFeedbackStore::restore(&graph, checkpoint, 0).unwrap();
+    let restored_estimate = restored.estimate_static_edge(edge, 1, &config).unwrap();
+    assert!(restored_estimate.has_candidate_miss_history());
+    assert_eq!(restored_estimate.candidate_miss_observations, 1);
+}
+
+#[test]
+fn store_exposes_non_mutating_current_epoch_estimates_for_static_and_fallback_edges() {
+    let graph = graph();
+    let credit = profile_id(&graph, "execute::Credit");
+    let counter = profile_id(&graph, "execute::IncrementCounter");
+    let static_edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let config = AdaptiveFeedbackConfig {
+        retention_factor: 0.5,
+        ..AdaptiveFeedbackConfig::default()
+    };
+
+    let mut miss = ObservationBuffer::default();
+    miss.push(
+        ConflictObservation::conflict(
+            credit,
+            counter,
+            TxId(1),
+            TxId(2),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::CanonicalExecution,
+            ObservationTarget::RuntimeDiscovered,
+            3.0,
+            1,
+            false,
+        )
+        .unwrap(),
+    );
+    store.apply_batch(&graph, miss, &config).unwrap();
+
+    let static_before = *store.static_statistics(static_edge).unwrap();
+    let fallback = store.fallback_edge(credit, counter).unwrap().clone();
+    let fallback_before = fallback.statistics;
+
+    let static_estimate = store.estimate_static_edge(static_edge, 4, &config).unwrap();
+    let fallback_estimate = store
+        .estimate_fallback_edge(fallback.id, 4, &config)
+        .unwrap();
+
+    assert!(static_estimate.posterior_mass < static_before.posterior_mass());
+    assert!(fallback_estimate.posterior_mass < fallback_before.posterior_mass());
+    assert_eq!(fallback_estimate.candidate_miss_observations, 1);
+    assert_eq!(
+        *store.static_statistics(static_edge).unwrap(),
+        static_before
+    );
+    assert_eq!(
+        store.fallback_edge_by_id(fallback.id).unwrap().statistics,
+        fallback_before
+    );
+}
+
+#[test]
+fn runtime_discovered_edges_have_profile_adjacency_for_candidate_construction() {
+    let graph = graph();
+    let credit = profile_id(&graph, "execute::Credit");
+    let counter = profile_id(&graph, "execute::IncrementCounter");
+    let transfer = profile_id(&graph, "execute::Transfer");
+    assert!(graph.edge_between_profiles(credit, counter).is_none());
+
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let config = AdaptiveFeedbackConfig::default();
+    let mut miss = ObservationBuffer::default();
+    miss.push(
+        ConflictObservation::conflict(
+            credit,
+            counter,
+            TxId(1),
+            TxId(2),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::CanonicalExecution,
+            ObservationTarget::RuntimeDiscovered,
+            3.0,
+            1,
+            false,
+        )
+        .unwrap(),
+    );
+    store.apply_batch(&graph, miss, &config).unwrap();
+    let fallback_id = store.fallback_edge(credit, counter).unwrap().id;
+
+    let credit_edges = store
+        .fallback_edges_for_profile(credit)
+        .map(|edge| edge.id)
+        .collect::<Vec<_>>();
+    let counter_edges = store
+        .fallback_edges_for_profile(counter)
+        .map(|edge| edge.id)
+        .collect::<Vec<_>>();
+    let transfer_edges = store
+        .fallback_edges_for_profile(transfer)
+        .map(|edge| edge.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(credit_edges, vec![fallback_id]);
+    assert_eq!(counter_edges, vec![fallback_id]);
+    assert!(transfer_edges.is_empty());
+
+    let checkpoint = store.checkpoint(&graph).unwrap();
+    let restored = AdaptiveFeedbackStore::restore(&graph, checkpoint, 0).unwrap();
+    assert_eq!(
+        restored
+            .fallback_edges_for_profile(credit)
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec![fallback_id]
+    );
 }
 
 #[test]

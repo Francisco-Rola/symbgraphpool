@@ -15,8 +15,10 @@ thiserror.workspace = true
 [dev-dependencies]
 acg-candidate-graph.workspace = true
 acg-core.workspace = true
+acg-feedback.workspace = true
 acg-cosmwasm-adapter.workspace = true
 acg-profile-graph.workspace = true
+acg-runtime-feedback.workspace = true
 acg-predicate.workspace = true
 acg-symbolic-json.workspace = true
 acg-validator-sim.workspace = true

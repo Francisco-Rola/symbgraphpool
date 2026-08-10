@@ -1,4 +1,6 @@
-use acg_candidate_graph::{CandidateGraph, CandidateGraphBuilder, CandidateTransaction};
+use acg_candidate_graph::{
+    CandidateGraph, CandidateGraphBuilder, CandidateTransaction, WeightedCandidateGraphConfig,
+};
 use acg_core::{ConflictKinds, ContractCodeHash, InstanceId, RuntimeId, TxId, TxIndex};
 use acg_cosmwasm_engine::{
     AccessKind, AccessRecord, Address, EngineError, ExecutionOutcome, TransactionId,
@@ -709,6 +711,113 @@ fn an_existing_fallback_pair_collects_future_independence() {
         second.observations()[0].target,
         ObservationTarget::RuntimeDiscovered
     );
+}
+
+#[test]
+fn weighted_runtime_fallback_edge_collects_independence_for_the_fallback_target() {
+    let graph = profile_graph();
+    let transactions = vec![
+        candidate_tx(&graph, 1, "execute::Credit", json!({"account":"alice"})),
+        candidate_tx(
+            &graph,
+            2,
+            "execute::IncrementCounter",
+            json!({"shard_id":1}),
+        ),
+    ];
+    let initial_candidate = candidate_graph(&graph, transactions.clone());
+    assert!(initial_candidate.edges().is_empty());
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let adaptive_config = AdaptiveFeedbackConfig {
+        retention_factor: 1.0,
+        ..AdaptiveFeedbackConfig::default()
+    };
+    let overlap = report(vec![
+        successful_execution(
+            0,
+            1,
+            vec![access(
+                1,
+                "contract-a",
+                AccessKind::StorageWrite,
+                b"miss",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            1,
+            2,
+            vec![access(
+                2,
+                "contract-a",
+                AccessKind::StorageRead,
+                b"miss",
+                None,
+                false,
+            )],
+        ),
+    ]);
+    let observations = collector()
+        .collect_block(&graph, &initial_candidate, &overlap, &store, 1)
+        .unwrap();
+    store
+        .apply_batch(&graph, observations, &adaptive_config)
+        .unwrap();
+
+    let weighted = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            transactions,
+            &store,
+            &adaptive_config,
+            WeightedCandidateGraphConfig {
+                epoch: 1,
+                edge_materialization_threshold: 0.0,
+            },
+        )
+        .unwrap();
+    assert_eq!(weighted.edges().len(), 1);
+    assert!(weighted.edges()[0].runtime_edge_id().is_some());
+
+    let independent = report(vec![
+        successful_execution(
+            0,
+            1,
+            vec![access(
+                1,
+                "contract-a",
+                AccessKind::StorageWrite,
+                b"a",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            1,
+            2,
+            vec![access(
+                2,
+                "contract-a",
+                AccessKind::StorageRead,
+                b"b",
+                None,
+                false,
+            )],
+        ),
+    ]);
+    let negative = collector()
+        .collect_block(&graph, &weighted, &independent, &store, 2)
+        .unwrap();
+    assert_eq!(negative.len(), 1);
+    assert_eq!(
+        negative.observations()[0].outcome,
+        ObservationOutcome::Independent
+    );
+    assert_eq!(
+        negative.observations()[0].target,
+        ObservationTarget::RuntimeDiscovered
+    );
+    assert!(negative.observations()[0].candidate_edge_present);
 }
 
 #[test]

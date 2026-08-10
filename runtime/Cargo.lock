@@ -7,6 +7,7 @@ name = "acg-candidate-graph"
 version = "0.1.0"
 dependencies = [
  "acg-core",
+ "acg-feedback",
  "acg-predicate",
  "acg-profile-graph",
  "serde",
@@ -83,8 +84,10 @@ dependencies = [
  "acg-core",
  "acg-cosmwasm-adapter",
  "acg-cosmwasm-engine",
+ "acg-feedback",
  "acg-predicate",
  "acg-profile-graph",
+ "acg-runtime-feedback",
  "acg-symbolic-json",
  "acg-validator-sim",
  "cosmwasm-std",
@@ -119,12 +122,14 @@ version = "0.1.0"
 dependencies = [
  "acg-candidate-graph",
  "acg-core",
+ "acg-cosmwasm-adapter",
  "acg-cosmwasm-engine",
  "acg-feedback",
  "acg-predicate",
  "acg-profile-graph",
  "acg-symbolic-json",
  "acg-validator-sim",
+ "cosmwasm-std",
  "serde_json",
  "thiserror",
 ]

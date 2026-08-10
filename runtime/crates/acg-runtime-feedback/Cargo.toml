@@ -11,6 +11,7 @@ acg-feedback.workspace = true
 acg-candidate-graph.workspace = true
 acg-profile-graph.workspace = true
 acg-cosmwasm-engine.workspace = true
+acg-cosmwasm-adapter.workspace = true
 acg-validator-sim.workspace = true
 thiserror.workspace = true
 
@@ -18,3 +19,4 @@ thiserror.workspace = true
 acg-predicate.workspace = true
 acg-symbolic-json.workspace = true
 serde_json.workspace = true
+cosmwasm-std.workspace = true

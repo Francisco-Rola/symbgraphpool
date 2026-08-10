@@ -186,6 +186,14 @@ pub struct BetaStatistics {
     pub last_update_epoch: u64,
     pub positive_observations: u64,
     pub negative_observations: u64,
+    /// Concrete conflicts that were absent from the candidate graph when observed.
+    ///
+    /// For static edges this records predicate/materialization misses. For runtime-discovered
+    /// edges it records topology misses. The counter is intentionally not decayed: once runtime
+    /// execution has disproved absolute symbolic pruning, later graph construction must be able
+    /// to consult adaptive history instead of treating the symbolic result as a proof.
+    #[serde(default)]
+    pub candidate_miss_observations: u64,
 }
 
 impl BetaStatistics {
@@ -202,6 +210,7 @@ impl BetaStatistics {
             last_update_epoch,
             positive_observations: 0,
             negative_observations: 0,
+            candidate_miss_observations: 0,
         })
     }
 
@@ -255,6 +264,9 @@ impl BetaStatistics {
             probability: projected.probability(),
             posterior_mass: projected.posterior_mass(),
             confidence: projected.confidence(config.confidence_scale)?,
+            positive_observations: projected.positive_observations,
+            negative_observations: projected.negative_observations,
+            candidate_miss_observations: projected.candidate_miss_observations,
             epoch,
         })
     }
@@ -286,6 +298,10 @@ impl BetaStatistics {
             ObservationOutcome::Conflict { .. } => {
                 self.alpha += observation.weight;
                 self.positive_observations = self.positive_observations.saturating_add(1);
+                if !observation.candidate_edge_present {
+                    self.candidate_miss_observations =
+                        self.candidate_miss_observations.saturating_add(1);
+                }
             }
             ObservationOutcome::Independent => {
                 self.beta += observation.weight;
@@ -303,7 +319,20 @@ pub struct EdgeEstimate {
     pub probability: f64,
     pub posterior_mass: f64,
     pub confidence: f64,
+    pub positive_observations: u64,
+    pub negative_observations: u64,
+    pub candidate_miss_observations: u64,
     pub epoch: u64,
+}
+
+impl EdgeEstimate {
+    /// Whether concrete execution has ever observed a conflict that candidate construction missed.
+    ///
+    /// Brick 4 uses this as the gate that allows learned history to override an otherwise-false
+    /// symbolic predicate. A symbolic prior by itself is not enough to bypass concrete pruning.
+    pub fn has_candidate_miss_history(&self) -> bool {
+        self.candidate_miss_observations > 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -384,6 +413,7 @@ pub struct AdaptiveFeedbackStore {
     static_statistics: Vec<BetaStatistics>,
     fallback_edges: Vec<RuntimeDiscoveredEdge>,
     fallback_by_pair: BTreeMap<(ProfileId, ProfileId), usize>,
+    fallback_adjacency: BTreeMap<ProfileId, Vec<usize>>,
 }
 
 impl AdaptiveFeedbackStore {
@@ -403,6 +433,7 @@ impl AdaptiveFeedbackStore {
             static_statistics,
             fallback_edges: Vec::new(),
             fallback_by_pair: BTreeMap::new(),
+            fallback_adjacency: BTreeMap::new(),
         })
     }
 
@@ -410,8 +441,53 @@ impl AdaptiveFeedbackStore {
         self.static_statistics.get(edge.0 as usize)
     }
 
+    /// Returns a current-epoch estimate for one immutable/static profile edge without mutating it.
+    pub fn estimate_static_edge(
+        &self,
+        edge: ProfileEdgeIndex,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<EdgeEstimate, FeedbackError> {
+        self.static_statistics(edge)
+            .ok_or(FeedbackError::UnknownStaticEdge(edge))?
+            .estimate_at(epoch, config)
+    }
+
     pub fn fallback_edges(&self) -> &[RuntimeDiscoveredEdge] {
         &self.fallback_edges
+    }
+
+    pub fn fallback_edge_by_id(&self, id: RuntimeEdgeId) -> Option<&RuntimeDiscoveredEdge> {
+        self.fallback_edges.get(id.0 as usize)
+    }
+
+    /// Returns a current-epoch estimate for one runtime-discovered relationship without mutating it.
+    pub fn estimate_fallback_edge(
+        &self,
+        id: RuntimeEdgeId,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<EdgeEstimate, FeedbackError> {
+        self.fallback_edge_by_id(id)
+            .ok_or(FeedbackError::UnknownRuntimeEdge(id))?
+            .statistics
+            .estimate_at(epoch, config)
+    }
+
+    /// Runtime-discovered relationships incident to `profile`.
+    ///
+    /// This adjacency is maintained when fallback edges are created/restored so Brick 4 candidate
+    /// construction can traverse learned topology in the same profile-bucket style as the static
+    /// graph instead of scanning every fallback relationship.
+    pub fn fallback_edges_for_profile(
+        &self,
+        profile: ProfileId,
+    ) -> impl Iterator<Item = &RuntimeDiscoveredEdge> {
+        self.fallback_adjacency
+            .get(&profile)
+            .into_iter()
+            .flatten()
+            .filter_map(|index| self.fallback_edges.get(*index))
     }
 
     pub fn fallback_edge(
@@ -483,7 +559,7 @@ impl AdaptiveFeedbackStore {
                         )?;
                         self.fallback_edges.push(edge);
                         let index = self.fallback_edges.len() - 1;
-                        self.fallback_by_pair.insert(pair, index);
+                        self.index_fallback_edge(pair, index);
                         summary.fallback_edges_created =
                             summary.fallback_edges_created.saturating_add(1);
                         index
@@ -615,11 +691,24 @@ impl AdaptiveFeedbackStore {
                 statistics: saved.statistics,
             };
             store.fallback_edges.push(edge);
-            store
-                .fallback_by_pair
-                .insert(pair, store.fallback_edges.len() - 1);
+            let index = store.fallback_edges.len() - 1;
+            store.index_fallback_edge(pair, index);
         }
         Ok(store)
+    }
+
+    fn index_fallback_edge(&mut self, pair: (ProfileId, ProfileId), index: usize) {
+        self.fallback_by_pair.insert(pair, index);
+        self.fallback_adjacency
+            .entry(pair.0)
+            .or_default()
+            .push(index);
+        if pair.0 != pair.1 {
+            self.fallback_adjacency
+                .entry(pair.1)
+                .or_default()
+                .push(index);
+        }
     }
 }
 
@@ -785,6 +874,8 @@ pub enum FeedbackError {
     EmptyFallbackConflictKinds,
     #[error("unknown static profile edge {0:?}")]
     UnknownStaticEdge(ProfileEdgeIndex),
+    #[error("unknown runtime-discovered profile edge {0:?}")]
+    UnknownRuntimeEdge(RuntimeEdgeId),
     #[error("unknown profile {0:?}")]
     UnknownProfile(ProfileId),
     #[error("unknown stable profile {0}")]
