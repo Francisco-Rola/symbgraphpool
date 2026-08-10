@@ -211,6 +211,22 @@ impl ProfileGraph {
         &self.adjacency_entries[start as usize..end as usize]
     }
 
+    pub fn edge_between_profiles(
+        &self,
+        left: ProfileId,
+        right: ProfileId,
+    ) -> Option<ProfileEdgeIndex> {
+        let (source, target) = if left <= right {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        self.neighbors(source)
+            .iter()
+            .find(|entry| entry.neighbor == target)
+            .map(|entry| entry.edge_index)
+    }
+
     pub fn edge_prior(&self, edge: ProfileEdgeIndex) -> Option<(f32, f32)> {
         let index = edge.0 as usize;
         Some((*self.edge_alpha.get(index)?, *self.edge_beta.get(index)?))

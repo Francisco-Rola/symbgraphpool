@@ -27,6 +27,9 @@
 ./crates/acg-core/src/ids.rs
 ./crates/acg-core/src/lib.rs
 ./crates/acg-core/src/profile.rs
+./crates/acg-feedback/Cargo.toml
+./crates/acg-feedback/src/lib.rs
+./crates/acg-feedback/tests/statistics.rs
 ./crates/acg-predicate/Cargo.toml
 ./crates/acg-predicate/src/lib.rs
 ./crates/acg-predicate/tests/predicate.rs
@@ -50,6 +53,7 @@
 ./docs/brick-2.1.md
 ./docs/brick-2.5.md
 ./docs/brick-2.md
+./docs/brick-3.md
 ./docs/next-brick.md
 ./docs/runtime-simulation.md
 ./runtime/Cargo.toml
@@ -80,6 +84,10 @@
 ./runtime/crates/acg-miniwarehouse-workload/tests/candidate_pipeline.rs
 ./runtime/crates/acg-miniwarehouse-workload/tests/generator.rs
 ./runtime/crates/acg-miniwarehouse-workload/tests/ingress.rs
+./runtime/crates/acg-runtime-feedback/Cargo.toml
+./runtime/crates/acg-runtime-feedback/src/lib.rs
+./runtime/crates/acg-runtime-feedback/tests/miniwarehouse_feedback.rs
+./runtime/crates/acg-runtime-feedback/tests/runtime_feedback.rs
 ./runtime/crates/acg-validator-sim/Cargo.toml
 ./runtime/crates/acg-validator-sim/src/block.rs
 ./runtime/crates/acg-validator-sim/src/executor.rs

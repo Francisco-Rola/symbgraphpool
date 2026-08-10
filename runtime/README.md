@@ -39,6 +39,13 @@ It resolves the executing code checksum and entrypoint to `ProfileId`, assigns d
 `CandidateTransaction` records. Ordinary top-level CosmWasm execute enums are supported by
 default; contract-specific nested dispatch can provide another `ExecuteEntrypointDecoder`.
 
+### `acg-runtime-feedback`
+
+Brick 3 adapter from concrete `ExecutionOutcome` access traces and pair-specific validation/replay
+events to `acg-feedback` observations. It detects exact storage/bank overlaps, scan/write conflicts,
+explicit independence for tracked pairs, runtime topology misses, and owns a convenience
+`RuntimeFeedbackEngine` for batched update/checkpoint flow.
+
 ### `acg-miniwarehouse-workload`
 
 Brick 2.5 benchmark traffic source for MiniWarehouse. It emits concrete `ExecutionRequest` values
@@ -92,7 +99,9 @@ The tests cover the original execution semantics plus Brick 2 runtime adaptation
 - end-to-end ConflictLab `ExecutionRequest` to candidate-graph construction;
 - all MiniWarehouse execute variants and nested line binding extraction;
 - local/remote MiniWarehouse stock conflict construction;
-- deterministic MiniWarehouse bootstrap/workload generation and ingress integration.
+- deterministic MiniWarehouse bootstrap/workload generation and ingress integration;
+- concrete access conflict detection and explicit negative-evidence semantics;
+- decayed Beta updates, runtime fallback edges, validation/replay evidence, and checkpoint restore.
 
 ## Engine usage
 
@@ -161,6 +170,41 @@ ingress.pump_until(2_000_000_000, &mempool);
 
 Call `generator.bootstrap()` first when the actual MiniWarehouse contract state has not already been
 seeded.
+
+## Runtime feedback usage
+
+`acg-runtime-feedback` converts concrete execution traces into adaptive profile-edge evidence. A
+`RuntimeFeedbackEngine` owns the collector and statistics store:
+
+```rust
+use acg_feedback::AdaptiveFeedbackConfig;
+use acg_runtime_feedback::{
+    RuntimeFeedbackEngine, RuntimeFeedbackWeights, TraceConflictConfig,
+};
+
+let mut feedback = RuntimeFeedbackEngine::new(
+    &profile_graph,
+    0,
+    TraceConflictConfig::default(),
+    RuntimeFeedbackWeights::default(),
+    AdaptiveFeedbackConfig::default(),
+)?;
+
+let summary = feedback.process_block(
+    &profile_graph,
+    &candidate_graph,
+    &execution_report,
+    block_height,
+)?;
+
+let checkpoint = feedback.checkpoint(&profile_graph)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Concrete conflicts absent from static topology create reviewable runtime fallback edges. Failed
+top-level executions are currently excluded from negative evidence because the engine does not yet
+return a top-level failure trace artifact. See [`../docs/brick-3.md`](../docs/brick-3.md).
+
 
 ## Dependency policy
 

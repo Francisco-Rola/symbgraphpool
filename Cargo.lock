@@ -39,6 +39,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "acg-feedback"
+version = "0.1.0"
+dependencies = [
+ "acg-core",
+ "acg-profile-graph",
+ "acg-symbolic-json",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "acg-predicate"
 version = "0.1.0"
 dependencies = [

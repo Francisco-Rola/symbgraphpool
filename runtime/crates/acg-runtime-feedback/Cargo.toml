@@ -1,0 +1,20 @@
+[package]
+name = "acg-runtime-feedback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+acg-core.workspace = true
+acg-feedback.workspace = true
+acg-candidate-graph.workspace = true
+acg-profile-graph.workspace = true
+acg-cosmwasm-engine.workspace = true
+acg-validator-sim.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+acg-predicate.workspace = true
+acg-symbolic-json.workspace = true
+serde_json.workspace = true

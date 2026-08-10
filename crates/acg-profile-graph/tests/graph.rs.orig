@@ -224,21 +224,3 @@ fn legacy_v1_artifact_is_rejected_by_version_after_deserialization() {
         .to_string()
         .contains("unsupported profile graph format version 1"));
 }
-
-#[test]
-fn finds_profile_edge_by_dense_endpoint_pair_in_either_order() {
-    let graph = ProfileGraph::load(compile_artifact(), GraphLoadConfig::default()).unwrap();
-    let swap = graph
-        .profiles()
-        .iter()
-        .find(|record| record.definition.entrypoint_name == "execute::Swap")
-        .unwrap();
-    let balance = graph
-        .profiles()
-        .iter()
-        .find(|record| record.definition.entrypoint_name == "query::AssetBalanceAt")
-        .unwrap();
-    let forward = graph.edge_between_profiles(swap.id, balance.id).unwrap();
-    let reverse = graph.edge_between_profiles(balance.id, swap.id).unwrap();
-    assert_eq!(forward, reverse);
-}

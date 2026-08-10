@@ -65,6 +65,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "acg-feedback"
+version = "0.1.0"
+dependencies = [
+ "acg-core",
+ "acg-profile-graph",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "acg-miniwarehouse-workload"
 version = "0.1.0"
 dependencies = [
@@ -98,6 +109,22 @@ version = "0.1.0"
 dependencies = [
  "acg-core",
  "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "acg-runtime-feedback"
+version = "0.1.0"
+dependencies = [
+ "acg-candidate-graph",
+ "acg-core",
+ "acg-cosmwasm-engine",
+ "acg-feedback",
+ "acg-predicate",
+ "acg-profile-graph",
+ "acg-symbolic-json",
+ "acg-validator-sim",
  "serde_json",
  "thiserror",
 ]

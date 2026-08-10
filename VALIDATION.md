@@ -283,3 +283,58 @@ cargo fmt --manifest-path runtime/Cargo.toml --all -- --check
 cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets -- -D warnings
 cargo test --manifest-path runtime/Cargo.toml --workspace --all-targets
 ```
+
+## Brick 3: runtime feedback and adaptive statistics (2026-08-10)
+
+Added the runtime-independent `acg-feedback` crate and the runtime-specific
+`runtime/crates/acg-runtime-feedback` bridge.
+
+Brick 3 features:
+
+- explicit positive conflict and negative independence observations;
+- separate pre-execution, canonical execution, validation, and replay evidence sources;
+- configurable source weights with post/canonical evidence stronger than speculative evidence;
+- exact concrete storage and bank access indexing;
+- read/write, write/read, and write/write conflict attribution;
+- storage scan versus in-range write attribution;
+- contract-local storage scope and global bank-key scope;
+- reverted-access inclusion configurable for audit experiments;
+- no negative evidence for untracked pairs or failed top-level transactions;
+- decayed Beta-Bernoulli statistics with projected confidence at a requested epoch;
+- per-block observation buffering and batched updates;
+- static predicate-miss updates to existing profile edges;
+- runtime topology misses creating reviewable fallback profile edges;
+- future independence updates for already-discovered fallback pairs;
+- stable-key-based versioned feedback checkpoints;
+- restore of static and runtime-discovered statistics;
+- pair-specific validation/invalidation/replay ingestion prepared for the speculative executor;
+- `RuntimeFeedbackEngine` facade for collect -> apply -> checkpoint integration.
+
+New focused tests: 9 `acg-feedback` tests, 15 `acg-runtime-feedback` tests, plus one profile-graph
+lookup regression test. They cover posterior movement, decay, confidence projection, out-of-order
+batch epochs, empty-buffer semantics, fallback creation/update/checkpointing, stale observation
+rejection, exact storage and bank conflict scope, scan conflicts, reverted accesses, explicit
+negative evidence, runtime topology misses, static predicate misses, failed-transaction handling,
+fallback negative learning, pre/post weights, validation/replay events, transaction-id trace
+validation, end-to-end feedback-engine checkpoint restore, and MiniWarehouse adaptation across conflicting/independent workload phases.
+
+Static validation completed in this environment:
+
+- parsed all Cargo manifests with Python's TOML parser;
+- parsed all repository JSON artifacts;
+- checked new Rust source delimiter balance while ignoring comments/string literals;
+- checked all new benchmark fixture paths used by tests;
+- reviewed that absence of an observation never becomes negative evidence;
+- reviewed that static topology remains immutable while mutable statistics/fallbacks are separated;
+- reviewed checkpoint identity so persistence uses `StableProfileKey` rather than dense `ProfileId`.
+
+A Rust toolchain is still unavailable in this environment. The definitive acceptance commands are:
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cargo fmt --manifest-path runtime/Cargo.toml --all -- --check
+cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets -- -D warnings
+cargo test --manifest-path runtime/Cargo.toml --workspace --all-targets
+```

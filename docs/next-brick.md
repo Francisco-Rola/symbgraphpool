@@ -1,22 +1,21 @@
-# Next brick: runtime observations and adaptive profile-edge statistics
+# Next brick: weighted candidate graph and adaptive scheduling
 
-Brick 2.5 now drives structured MiniWarehouse transactions through concrete input binding,
-candidate-graph construction, and the validator ingress/block path. The next work is Brick 3.
+Brick 3 now translates concrete execution/validation evidence into decayed Beta statistics and
+persistent runtime-discovered fallback edges. The next work is Brick 4.
 
-## Brick 3: runtime observations
+## Brick 4: weighted scheduling
 
-1. Translate execution `AccessRecord`s into normalized concrete resource accesses.
-2. Associate observed overlaps with persistent profile edges and concrete predicate context.
-3. Distinguish positive conflict evidence, compared-and-independent evidence, and pairs that were
-   never compared.
-4. Buffer observations per block and aggregate updates outside the critical execution loop.
-5. Implement symbolic Beta priors, weighted pre/post observations, posterior mean, and confidence.
-6. Add epoch-based exponential decay.
-7. Persist adaptive alpha/beta/timestamp arrays separately from immutable graph topology.
-8. Create runtime-discovered fallback edges when observed accesses reveal a profile relationship
-   missing from the symbolic graph.
-9. Add ConflictLab and MiniWarehouse tests for repeated positive/negative observations and workload
-   shifts.
+1. Expose current-epoch probability/confidence estimates for static and fallback profile edges.
+2. Materialize fallback profile relationships into the candidate transaction graph.
+3. Attach compact conflict probabilities to concrete transaction edges.
+4. Define configurable hard and soft thresholds.
+5. Orient hard dependencies by predicted block order.
+6. Implement the risk-bounded wave scheduler using cumulative soft-edge risk.
+7. Keep FIFO/serial scheduling as a baseline implementation.
+8. Add deterministic ConflictLab tests for threshold boundaries and wave placement.
+9. Add MiniWarehouse tests for local/remote stock contention and workload skew.
+10. Add scheduler metrics for edge classes, wave width, estimated risk, and construction latency.
 
-Weighted scheduling and speculative parallel execution remain later bricks. The serial executor
-continues to be the correctness baseline while runtime learning is introduced.
+Speculative parallel commit remains disabled until Brick 5 introduces isolated execution,
+canonical validation, invalidation, and selective replay. Brick 4 can therefore validate scheduling
+logic while the serial executor remains the correctness baseline.

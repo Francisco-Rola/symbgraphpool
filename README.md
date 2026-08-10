@@ -17,7 +17,8 @@ This first brick implements:
 - a deterministic single-validator harness with rate-controlled ingress, an all-accepting FIFO mempool, two-second block windows, and scheduler/executor extension points;
 - Brick 2 concrete-transaction adaptation, executable three-valued predicates, and candidate transaction-graph materialization;
 - Brick 2.1 clause-level conflict resolution and explicit unknown-reason metadata;
-- Brick 2.5 MiniWarehouse structured integration, input-derived order-line prefixes, and a deterministic workload generator.
+- Brick 2.5 MiniWarehouse structured integration, input-derived order-line prefixes, and a deterministic workload generator;
+- Brick 3 concrete execution feedback, decayed Beta statistics, fallback edges, and checkpoints.
 
 ## Repository layout
 
@@ -27,6 +28,7 @@ crates/acg-symbolic-json   Analyzer JSON schema and normalization
 crates/acg-profile-graph   Edge derivation, artifact format, dense-ID graph loader
 crates/acg-predicate       Precompiled symbolic expressions and three-valued predicate evaluation
 crates/acg-candidate-graph Concrete candidate transactions and per-block conflict graphs
+crates/acg-feedback        Runtime observations, adaptive statistics, fallback edges, checkpoints
 crates/acg-cli             `acg-profilec` compiler and inspector
 benchmarks/contracts       Single-file CosmWasm benchmark contracts
 benchmarks/symbolic        Analyzer-compatible symbolic profile JSON
@@ -145,6 +147,17 @@ Restock traffic, control remote-stock and hot-warehouse probabilities, and feed 
 input-derived `(warehouse_id, district_id, order_id)` prefix, reducing the static graph to 38
 conditional and 6 unknown edges while retaining state-derived Delivery customer uncertainty. See
 [`docs/brick-2.5.md`](docs/brick-2.5.md).
+
+## Adaptive runtime feedback
+
+Brick 3 adds a runtime-neutral feedback/statistics store plus a CosmWasm trace-attribution adapter.
+Concrete storage/bank overlaps become positive observations; successful candidate-edge comparisons
+without overlap become explicit negative observations. A decayed Beta posterior is maintained per
+static edge, while concrete conflicts missing from the symbolic topology create persistent
+reviewable fallback edges. Pre-execution, canonical execution, validation, and replay evidence have
+separate configurable weights. Feedback checkpoints use stable profile keys so statistics survive
+dense `ProfileId` reassignment. See [`docs/brick-3.md`](docs/brick-3.md).
+
 
 ## Publication checklist
 

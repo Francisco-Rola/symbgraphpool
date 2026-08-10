@@ -5,6 +5,7 @@ members = [
     "crates/acg-profile-graph",
     "crates/acg-predicate",
     "crates/acg-candidate-graph",
+    "crates/acg-feedback",
     "crates/acg-cli",
 ]
 exclude = ["benchmarks", "runtime"]
@@ -32,3 +33,4 @@ acg-symbolic-json = { path = "crates/acg-symbolic-json" }
 acg-profile-graph = { path = "crates/acg-profile-graph" }
 acg-predicate = { path = "crates/acg-predicate" }
 acg-candidate-graph = { path = "crates/acg-candidate-graph" }
+acg-feedback = { path = "crates/acg-feedback" }
