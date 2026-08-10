@@ -1,26 +1,22 @@
-# Next brick: concrete transaction edge materialization
+# Next brick: runtime observations and adaptive profile-edge statistics
 
-Brick 1 stops at the persistent profile graph boundary. The next implementation should add:
+Brick 2.5 now drives structured MiniWarehouse transactions through concrete input binding,
+candidate-graph construction, and the validator ingress/block path. The next work is Brick 3.
 
-1. `InstanceId` and a runtime-neutral candidate transaction envelope.
-2. Compile normalized delegation-frame mappings into compact binding IDs rather than strings.
-3. Compilation of `PredicateTemplate` clauses into bytecode or specialized evaluators.
-4. Transaction bucketing by `ProfileId` and `InstanceId`.
-5. Candidate edge materialization from profile adjacency only.
-6. A binary greedy wave scheduler before adaptive probabilities are introduced.
+## Brick 3: runtime observations
 
-The first predicate compiler only needs these operations:
+1. Translate execution `AccessRecord`s into normalized concrete resource accesses.
+2. Associate observed overlaps with persistent profile edges and concrete predicate context.
+3. Distinguish positive conflict evidence, compared-and-independent evidence, and pairs that were
+   never compared.
+4. Buffer observations per block and aggregate updates outside the critical execution loop.
+5. Implement symbolic Beta priors, weighted pre/post observations, posterior mean, and confidence.
+6. Add epoch-based exponential decay.
+7. Persist adaptive alpha/beta/timestamp arrays separately from immutable graph topology.
+8. Create runtime-discovered fallback edges when observed accesses reveal a profile relationship
+   missing from the symbolic graph.
+9. Add ConflictLab and MiniWarehouse tests for repeated positive/negative observations and workload
+   shifts.
 
-```text
-SAME_INSTANCE
-LOAD_LEFT_INPUT binding_id
-LOAD_RIGHT_INPUT binding_id
-EQUAL
-EVAL_LEFT_GUARD predicate_id
-EVAL_RIGHT_GUARD predicate_id
-AND / OR
-UNKNOWN
-```
-
-`KeyMatch::Unresolved` should return an explicit three-valued result, not `false`, so the scheduler
-can apply a conservative fallback probability.
+Weighted scheduling and speculative parallel execution remain later bricks. The serial executor
+continues to be the correctness baseline while runtime learning is introduced.

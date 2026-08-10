@@ -247,10 +247,15 @@ Expected output:
 ```text
 profiles: 14
 edges: 44
-conditional_edges: 37
+conditional_edges: 38
 unconditional_edges: 0
-unknown_edges: 7
+unknown_edges: 6
 ```
+
+Brick 2.5 models `ORDER_LINES` conflicts by their input-derived `(warehouse_id, district_id,
+order_id)` prefix. NewOrder writes deterministic line numbers under that prefix, while Delivery and
+OrderStatus scan the prefix. Delivery customer accesses remain state-derived and therefore account
+for the remaining unknown relationships.
 
 Inspect `NewOrder`:
 

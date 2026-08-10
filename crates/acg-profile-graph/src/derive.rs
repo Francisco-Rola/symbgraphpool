@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use acg_core::{
-    AccessDescriptor, AccessMode, AccessScope, BoundExpression, ConflictKinds, ContractCodeHash,
-    EdgeRelation, GuardRef, KeyMatch, PredicateClause, PredicateTemplate, ProfileDefinition,
-    ProfileEdgeDefinition, ResourceFamily, RuntimeId, SemanticKeyKind, StableProfileKey,
+    AccessDescriptor, AccessMode, AccessScope, BoundExpression, ClauseResolution, ConflictKinds,
+    ContractCodeHash, DependencyKind, EdgeRelation, GuardRef, KeyMatch, PredicateClause,
+    PredicateTemplate, ProfileDefinition, ProfileEdgeDefinition, ResourceFamily, RuntimeId,
+    SemanticKeyKind, StableProfileKey, UnknownReason,
 };
 use thiserror::Error;
 
@@ -48,7 +49,6 @@ struct AccessRef {
 
 #[derive(Clone, Debug)]
 struct EdgeAccumulator {
-    relation: EdgeRelation,
     conflict_kinds: ConflictKinds,
     predicate: PredicateTemplate,
 }
@@ -108,16 +108,13 @@ pub fn derive_profile_edges(
                     source_access,
                     target_access,
                 );
-                let relation = classify_relation(&clause, source_access, target_access);
                 let conflict_kinds =
                     classify_conflict_kinds(self_profile, source_access.mode, target_access.mode);
 
                 let accumulator = edges.entry(pair).or_insert_with(|| EdgeAccumulator {
-                    relation,
                     conflict_kinds: ConflictKinds::empty(),
                     predicate: PredicateTemplate::default(),
                 });
-                accumulator.relation = accumulator.relation.merge(relation);
                 accumulator.conflict_kinds |= conflict_kinds;
                 push_clause_if_new(&mut accumulator.predicate, clause);
                 if self_profile {
@@ -137,7 +134,8 @@ pub fn derive_profile_edges(
         .into_iter()
         .map(|((source, target), mut accumulator)| {
             accumulator.predicate.clauses.sort();
-            let symbolic_score = match accumulator.relation {
+            let relation = EdgeRelation::summarize_clauses(&accumulator.predicate.clauses);
+            let symbolic_score = match relation {
                 EdgeRelation::Conditional => config.conditional_score,
                 EdgeRelation::Unconditional => config.unconditional_score,
                 EdgeRelation::Unknown => config.unknown_score,
@@ -145,7 +143,7 @@ pub fn derive_profile_edges(
             ProfileEdgeDefinition {
                 source,
                 target,
-                relation: accumulator.relation,
+                relation,
                 conflict_kinds: accumulator.conflict_kinds,
                 symbolic_score,
                 predicate: accumulator.predicate,
@@ -238,9 +236,26 @@ fn build_clause(
         },
     };
 
+    let mut unknown_reasons = classify_unknown_reasons(left, right, &key_match);
+    unknown_reasons.sort();
+    unknown_reasons.dedup();
+    let resolution = if !unknown_reasons.is_empty() {
+        ClauseResolution::Unknown
+    } else if !require_same_contract_instance
+        && matches!(&key_match, KeyMatch::WholeResource)
+        && left.guard.is_unconditional()
+        && right.guard.is_unconditional()
+    {
+        ClauseResolution::Unconditional
+    } else {
+        ClauseResolution::Conditional
+    };
+
     PredicateClause {
         resource: resource.clone(),
         semantic_key_component: semantic_component.to_owned(),
+        resolution,
+        unknown_reasons,
         require_same_contract_instance,
         key_match,
         left_guard: GuardRef {
@@ -256,24 +271,40 @@ fn build_clause(
     }
 }
 
-fn classify_relation(
-    clause: &PredicateClause,
+fn classify_unknown_reasons(
     left: &AccessDescriptor,
     right: &AccessDescriptor,
-) -> EdgeRelation {
-    if matches!(&clause.key_match, KeyMatch::Unresolved)
-        || left.scope == AccessScope::Unknown
-        || right.scope == AccessScope::Unknown
-    {
-        EdgeRelation::Unknown
-    } else if !clause.require_same_contract_instance
-        && matches!(&clause.key_match, KeyMatch::WholeResource)
-        && left.guard.is_unconditional()
-        && right.guard.is_unconditional()
-    {
-        EdgeRelation::Unconditional
-    } else {
-        EdgeRelation::Conditional
+    key_match: &KeyMatch,
+) -> Vec<UnknownReason> {
+    let mut reasons = Vec::new();
+    if left.scope == AccessScope::Unknown || right.scope == AccessScope::Unknown {
+        reasons.push(UnknownReason::UnknownScope);
+    }
+    if matches!(key_match, KeyMatch::Unresolved) {
+        append_unresolved_key_reason(&mut reasons, left);
+        append_unresolved_key_reason(&mut reasons, right);
+        if reasons.is_empty() {
+            reasons.push(UnknownReason::UnresolvedKey);
+        }
+    }
+    reasons
+}
+
+fn append_unresolved_key_reason(reasons: &mut Vec<UnknownReason>, access: &AccessDescriptor) {
+    if access.semantic_key_kind == SemanticKeyKind::FieldSet {
+        return;
+    }
+    match access.key_dependency.as_ref() {
+        Some(dependency) if dependency.origin_input.is_some() => {}
+        Some(dependency)
+            if matches!(
+                dependency.dependency_kind,
+                DependencyKind::State | DependencyKind::InputAndState
+            ) =>
+        {
+            reasons.push(UnknownReason::StateDerivedKey);
+        }
+        _ => reasons.push(UnknownReason::UnresolvedKey),
     }
 }
 

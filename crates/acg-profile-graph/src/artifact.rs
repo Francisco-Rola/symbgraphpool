@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{derive_profile_edges, EdgeBuildConfig, EdgeDerivationError};
 
-pub const PROFILE_GRAPH_ARTIFACT_VERSION: u16 = 1;
+pub const PROFILE_GRAPH_ARTIFACT_VERSION: u16 = 2;
 
 /// Portable graph artifact. Endpoints use stable keys; dense IDs are assigned only at load time.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

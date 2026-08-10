@@ -96,7 +96,7 @@ fn parses_miniwarehouse_multi_resource_profiles() {
 }
 
 #[test]
-fn preserves_miniwarehouse_prefix_and_state_derived_uncertainty() {
+fn preserves_miniwarehouse_input_derived_prefix_and_state_derived_customer() {
     let profiles = normalize_document(parse_slice(MINIWAREHOUSE).unwrap(), &context(24)).unwrap();
     let delivery = profiles
         .iter()
@@ -108,10 +108,11 @@ fn preserves_miniwarehouse_prefix_and_state_derived_uncertainty() {
         .iter()
         .filter(|access| access.resource.as_str() == "ORDER_LINES")
         .all(|access| {
-            access
-                .key_dependency
-                .as_ref()
-                .is_some_and(|dependency| dependency.origin_input.is_none())
+            access.key_dependency.as_ref().is_some_and(|dependency| {
+                dependency.dependency_kind == DependencyKind::Input
+                    && dependency.origin_input.as_deref()
+                        == Some("(warehouse_id, district_id, order_id)")
+            })
         }));
     assert!(delivery
         .accesses

@@ -3,6 +3,19 @@
 version = 3
 
 [[package]]
+name = "acg-candidate-graph"
+version = "0.1.0"
+dependencies = [
+ "acg-core",
+ "acg-predicate",
+ "acg-profile-graph",
+ "acg-symbolic-json",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "acg-cli"
 version = "0.1.0"
 dependencies = [
@@ -22,6 +35,16 @@ dependencies = [
  "blake3",
  "hex",
  "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "acg-predicate"
+version = "0.1.0"
+dependencies = [
+ "acg-core",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

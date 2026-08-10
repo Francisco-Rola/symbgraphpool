@@ -2,6 +2,8 @@
 members = [
     "crates/acg-cosmwasm-engine",
     "crates/acg-validator-sim",
+    "crates/acg-cosmwasm-adapter",
+    "crates/acg-miniwarehouse-workload",
 ]
 resolver = "2"
 
@@ -13,7 +15,15 @@ rust-version = "1.75"
 authors = ["Adaptive Conflict Graph contributors"]
 
 [workspace.dependencies]
+acg-core = { path = "../crates/acg-core" }
+acg-predicate = { path = "../crates/acg-predicate" }
+acg-candidate-graph = { path = "../crates/acg-candidate-graph" }
+acg-profile-graph = { path = "../crates/acg-profile-graph" }
+acg-symbolic-json = { path = "../crates/acg-symbolic-json" }
 acg-cosmwasm-engine = { path = "crates/acg-cosmwasm-engine" }
+acg-validator-sim = { path = "crates/acg-validator-sim" }
+acg-cosmwasm-adapter = { path = "crates/acg-cosmwasm-adapter" }
+acg-miniwarehouse-workload = { path = "crates/acg-miniwarehouse-workload" }
 
 # Stable CosmWasm 2.x host interface. The uploaded fork was based on 2.0.0-rc.1.
 cosmwasm-std = { version = "=2.0.9", default-features = false, features = ["std", "iterator"] }

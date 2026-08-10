@@ -31,6 +31,22 @@ The default cache uses a process-local temporary directory. For repeatable long-
 set `EngineConfig::wasm_cache.base_dir` to a persistent validator-local directory. Cache metrics are
 available through `CosmWasmEngine::wasm_cache_metrics()`.
 
+### `acg-cosmwasm-adapter`
+
+The Brick 2 bridge from concrete runtime transactions to the runtime-independent conflict graph.
+It resolves the executing code checksum and entrypoint to `ProfileId`, assigns dense local
+`InstanceId`s, extracts concrete input bindings, and adapts a `ProducedBlock` into
+`CandidateTransaction` records. Ordinary top-level CosmWasm execute enums are supported by
+default; contract-specific nested dispatch can provide another `ExecuteEntrypointDecoder`.
+
+### `acg-miniwarehouse-workload`
+
+Brick 2.5 benchmark traffic source for MiniWarehouse. It emits concrete `ExecutionRequest` values
+using deterministic pseudo-random generation, can bootstrap the configured warehouse state, keeps
+per-district order IDs monotonic, tracks generated orders so Delivery requests reference previously generated orders, and exposes
+remote-stock plus hot-warehouse contention controls. Generated requests plug directly into
+`RateControlledIngress`.
+
 ### `acg-validator-sim`
 
 A deterministic, single-validator harness with four independent layers:
@@ -60,7 +76,7 @@ cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets -- -D 
 cargo test --manifest-path runtime/Cargo.toml --workspace --all-targets
 ```
 
-The tests cover the original execution semantics plus:
+The tests cover the original execution semantics plus Brick 2 runtime adaptation:
 
 - compiled Wasm pinning and repeated pinned-cache hits;
 - all-accepting FIFO mempool admission;
@@ -69,7 +85,14 @@ The tests cover the original execution semantics plus:
 - serial FIFO scheduling and a custom reverse-order scheduler plug-in;
 - block execution that preserves order and continues after failed transactions;
 - explicit rejection of unsafe parallel waves;
-- the complete submit, produce, schedule, and execute pipeline.
+- the complete submit, produce, schedule, and execute pipeline;
+- runtime code-checksum to `ProfileId` resolution;
+- dense `InstanceId` assignment;
+- execute-message binding extraction;
+- end-to-end ConflictLab `ExecutionRequest` to candidate-graph construction;
+- all MiniWarehouse execute variants and nested line binding extraction;
+- local/remote MiniWarehouse stock conflict construction;
+- deterministic MiniWarehouse bootstrap/workload generation and ingress integration.
 
 ## Engine usage
 
@@ -113,6 +136,32 @@ println!("executed {} transactions", report.transactions.len());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+## MiniWarehouse workload usage
+
+```rust
+use acg_cosmwasm_engine::Address;
+use acg_miniwarehouse_workload::{
+    MiniWarehouseWorkloadConfig, MiniWarehouseWorkloadGenerator,
+};
+use acg_validator_sim::{IngressConfig, Mempool, RateControlledIngress};
+
+let config = MiniWarehouseWorkloadConfig::for_contract(Address::new("miniwarehouse"));
+let mut generator = MiniWarehouseWorkloadGenerator::new(config)?;
+let requests = generator.generate_requests(1_000)?;
+
+let mut ingress = RateControlledIngress::new(
+    IngressConfig { transactions_per_second: 500 },
+    0,
+)?;
+ingress.enqueue_all(requests);
+let mempool = Mempool::default();
+ingress.pump_until(2_000_000_000, &mempool);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Call `generator.bootstrap()` first when the actual MiniWarehouse contract state has not already been
+seeded.
+
 ## Dependency policy
 
 The uploaded experimental fork was based on CosmWasm `2.0.0-rc.1`. This runtime uses the published
@@ -137,6 +186,9 @@ executable research component, so its complete dependency graph should remain lo
 - contract addresses use deterministic transaction-local allocation rather than a chain-specific
   address derivation;
 - address canonicalization is deterministic UTF-8 rather than Bech32 or chain-specific bytes.
+- MiniWarehouse workload generation tracks structural order sequencing but not committed stock/customer
+  state; long runs should provision sufficient stock or Restock traffic until runtime feedback is wired
+  into workload generation.
 
 ## Deliberately excluded
 

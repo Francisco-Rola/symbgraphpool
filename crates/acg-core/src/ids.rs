@@ -14,6 +14,28 @@ const SELECTOR_DOMAIN: &[u8] = b"acg.entrypoint-selector.v1\0";
 #[serde(transparent)]
 pub struct ProfileId(pub u32);
 
+/// Dense validator-local contract-instance identifier.
+///
+/// This identifier is assigned by a runtime adapter and is intentionally separate from
+/// profile identity: multiple deployed instances can share one profile while maintaining
+/// disjoint contract-local state.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InstanceId(pub u32);
+
+/// Dense index of a concrete transaction inside one candidate block.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TxIndex(pub u32);
+
+/// Runtime-independent logical transaction identifier.
+///
+/// Candidate graph topology uses [`TxIndex`] for uniqueness; the logical identifier is kept
+/// for tracing and correlation with the execution runtime.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TxId(pub u64);
+
 /// Index of an edge in the immutable in-memory edge arrays.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]

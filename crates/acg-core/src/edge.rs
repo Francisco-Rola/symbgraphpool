@@ -34,6 +34,11 @@ impl<'de> Deserialize<'de> for ConflictKinds {
     }
 }
 
+/// Coarse summary of a profile edge.
+///
+/// Online materialization must evaluate the predicate clauses; this value is metadata used for
+/// inspection, priors, and fast-path selection. In particular, `Unknown` means at least one
+/// alternative clause is unresolved, not that every concrete transaction pair is unknown.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeRelation {
@@ -43,13 +48,50 @@ pub enum EdgeRelation {
 }
 
 impl EdgeRelation {
-    pub fn merge(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Unconditional, _) | (_, Self::Unconditional) => Self::Unconditional,
-            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
-            _ => Self::Conditional,
+    pub fn summarize_clauses(clauses: &[PredicateClause]) -> Self {
+        if clauses
+            .iter()
+            .any(|clause| clause.resolution == ClauseResolution::Unconditional)
+        {
+            return Self::Unconditional;
         }
+        if clauses
+            .iter()
+            .any(|clause| clause.resolution == ClauseResolution::Unknown)
+        {
+            return Self::Unknown;
+        }
+        Self::Conditional
     }
+}
+
+/// Offline resolution class for one alternative overlap clause.
+///
+/// This classification describes whether the key/scope portion can be decided from runtime
+/// instance identity and transaction bindings. Runtime guard evaluation can still produce
+/// `Unknown` when a guard depends on contract state.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClauseResolution {
+    Conditional,
+    Unconditional,
+    Unknown,
+}
+
+/// Why a clause cannot be fully resolved from the symbolic artifact or concrete bindings.
+///
+/// The first three variants can be attached statically to a persisted clause. The remaining
+/// variants are also used by detailed runtime predicate diagnostics.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownReason {
+    StateDerivedKey,
+    UnresolvedKey,
+    UnknownScope,
+    MissingInputBinding,
+    UnsupportedExpression,
+    StateDependentGuard,
+    UnsupportedGuard,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -72,10 +114,18 @@ pub struct PredicateTemplate {
 pub struct PredicateClause {
     pub resource: ResourceFamily,
     pub semantic_key_component: String,
+    #[serde(default = "legacy_clause_resolution")]
+    pub resolution: ClauseResolution,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_reasons: Vec<UnknownReason>,
     pub require_same_contract_instance: bool,
     pub key_match: KeyMatch,
     pub left_guard: GuardRef,
     pub right_guard: GuardRef,
+}
+
+fn legacy_clause_resolution() -> ClauseResolution {
+    ClauseResolution::Conditional
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]

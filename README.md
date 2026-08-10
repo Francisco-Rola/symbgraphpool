@@ -5,8 +5,7 @@ A modular Rust implementation of profile-guided smart-contract conflict graphs.
 This first brick implements:
 
 - parsing and validating symbolic-analyzer JSON documents;
-- normalization into runtime-independent symbolic profiles, including delegated-entrypoint access
-  composition and binding provenance;
+- normalization into runtime-independent symbolic profiles;
 - deterministic stable profile keys;
 - dense validator-local `ProfileId` assignment at graph load time;
 - indexed derivation of offline profile edges from read/write resource overlap;
@@ -15,7 +14,10 @@ This first brick implements:
 - tests using Astroport and the source-controlled ConflictLab and MiniWarehouse workloads;
 - a separate benchmark-contract workspace with analyzer-compatible symbolic profiles;
 - a minimal CosmWasm execution runtime with compiled-module caching, atomic storage, native transfers, nested calls, and access tracing;
-- a deterministic single-validator harness with rate-controlled ingress, an all-accepting FIFO mempool, two-second block windows, and scheduler/executor extension points.
+- a deterministic single-validator harness with rate-controlled ingress, an all-accepting FIFO mempool, two-second block windows, and scheduler/executor extension points;
+- Brick 2 concrete-transaction adaptation, executable three-valued predicates, and candidate transaction-graph materialization;
+- Brick 2.1 clause-level conflict resolution and explicit unknown-reason metadata;
+- Brick 2.5 MiniWarehouse structured integration, input-derived order-line prefixes, and a deterministic workload generator.
 
 ## Repository layout
 
@@ -23,11 +25,13 @@ This first brick implements:
 crates/acg-core            Domain types, profile identities, symbolic profiles, edge types
 crates/acg-symbolic-json   Analyzer JSON schema and normalization
 crates/acg-profile-graph   Edge derivation, artifact format, dense-ID graph loader
+crates/acg-predicate       Precompiled symbolic expressions and three-valued predicate evaluation
+crates/acg-candidate-graph Concrete candidate transactions and per-block conflict graphs
 crates/acg-cli             `acg-profilec` compiler and inspector
 benchmarks/contracts       Single-file CosmWasm benchmark contracts
 benchmarks/symbolic        Analyzer-compatible symbolic profile JSON
 benchmarks/README.md       Benchmark build, inspection, and debugging guide
-runtime/                   CosmWasm engine and single-validator simulation workspace
+runtime/                   CosmWasm engine, adapter, MiniWarehouse workload generator, and validator simulation
 docs/audits/               Audit records for imported or replaced prototypes
 ```
 
@@ -90,17 +94,6 @@ cargo run -p acg-cli -- compile \
   --code-hash 0000000000000000000000000000000000000000000000000000000000000001
 ```
 
-For runtimes with native numeric selectors, pass a JSON object such as:
-
-```json
-{
-  "execute::Swap": 42,
-  "query::Pair": 7
-}
-```
-
-with `--selector-map selectors.json`. Unknown entries and same-kind selector collisions are rejected.
-
 Inspect the compiled artifact:
 
 ```bash
@@ -124,29 +117,36 @@ BLAKE3 digest. A chain-native numeric selector can override that fallback throug
 sorted by `StableProfileKey` and assigned IDs `0..N`, making loading deterministic and enabling
 array-based adjacency.
 
-## Current edge semantics
+## Concrete transaction graph
 
-The compiler indexes each normalized access by `(contract code hash, resource family, semantic
-key component)` and materializes write-read, read-write, and write-write profile pairs. Read-read
-pairs are excluded.
+The compiler still indexes normalized accesses by `(contract code hash, resource family, semantic
+key component)` and excludes read-read profile pairs. Brick 2 now compiles each profile-edge
+predicate into an executable representation and evaluates it against concrete transaction
+bindings.
 
-Delegated entrypoints inherit their target's effective accesses recursively. Exact input-key
-origins are remapped through the analyzer's `input_mapping`, while a delegation-frame path is
-retained on keys and guards for later predicate compilation. Missing targets and cycles are rejected.
+The candidate builder buckets transactions by dense `ProfileId`, traverses only persistent profile
+adjacencies, and materializes concrete edges for `true` and `unknown` predicate results. A `false`
+result is a concrete pruning decision. Brick 2.1 classifies each alternative predicate clause
+independently as conditional, unconditional, or unknown; the edge relation is now only summary
+metadata. Detailed predicate evaluation reports why an unresolved clause remains unknown. Contract-local clauses additionally compare dense
+validator-local `InstanceId`s, so two deployments of the same code do not collide merely because
+they share a profile.
 
-Each edge stores one or more predicate clauses. In this phase the clauses are declarative rather
-than executable bytecode:
+The CosmWasm adapter derives these graph-facing transactions directly from the existing
+`ExecutionRequest` type using runtime code checksums, contract addresses, execute-message payloads,
+`info`, and block context. See [`docs/brick-2.md`](docs/brick-2.md), [`docs/brick-2.1.md`](docs/brick-2.1.md), and [`docs/brick-2.5.md`](docs/brick-2.5.md).
 
-- same contract instance;
-- optional equality between two input-derived resource keys;
-- unresolved key matching when the analyzer cannot expose both key origins;
-- original path guards for later predicate compilation.
+## Structured MiniWarehouse workload
 
-The next brick should compile these clauses into the online predicate representation and build
-transaction-level edges from concrete `InstanceId` and input bindings.
+Brick 2.5 adds a deterministic runtime workload generator for MiniWarehouse. It can bootstrap the
+configured warehouse/district/customer/stock domain, generate repeatable NewOrder/Payment/Delivery/
+Restock traffic, control remote-stock and hot-warehouse probabilities, and feed the existing
+`RateControlledIngress`. MiniWarehouse ORDER_LINES conflict matching now uses the fully
+input-derived `(warehouse_id, district_id, order_id)` prefix, reducing the static graph to 38
+conditional and 6 unknown edges while retaining state-derived Delivery customer uncertainty. See
+[`docs/brick-2.5.md`](docs/brick-2.5.md).
 
 ## Publication checklist
 
-Before publishing, add the repository URL to workspace metadata, select project governance, add a
-code of conduct, generate and commit `Cargo.lock`, and document the analyzer JSON compatibility
-policy.
+Before publishing, replace the placeholder repository URL, select project governance, add a code
+of conduct, and document the analyzer JSON compatibility policy.

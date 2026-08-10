@@ -511,7 +511,7 @@
             "semantic_name": "order_line",
             "depends_on": {
               "dependency_kind": "input",
-              "origin_input": "(warehouse_id, district_id, order_id, line_number)"
+              "origin_input": "(warehouse_id, district_id, order_id)"
             }
           },
           "guard": {
@@ -524,7 +524,9 @@
             "end_line": 484,
             "code": "ORDER_LINES.save(..., order_line_key(..., line_number), OrderLineRecord { ... })?;"
           },
-          "notes": []
+          "notes": [
+            "Conflict matching uses the input-derived order prefix. Concrete line numbers are deterministic 0..lines.len()-1, so two non-empty NewOrder executions with the same order prefix overlap at line 0."
+          ]
         },
         {
           "kind": "write",
@@ -841,7 +843,8 @@
           "key": {
             "semantic_name": "order_line",
             "depends_on": {
-              "dependency_kind": "input"
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
             }
           },
           "guard": {
@@ -855,7 +858,7 @@
             "code": "ORDER_LINES.range(...).filter(key starts_with order prefix).collect()?;"
           },
           "notes": [
-            "The current analyzer schema cannot encode prefix overlap, so the concrete key binding is intentionally unresolved."
+            "The implementation scans all order-line keys with this input-derived order prefix; conflict matching therefore compares the prefix rather than a concrete line number."
           ]
         },
         {
@@ -864,7 +867,8 @@
           "key": {
             "semantic_name": "order_line",
             "depends_on": {
-              "dependency_kind": "input"
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
             }
           },
           "guard": {
@@ -878,7 +882,7 @@
             "code": "for matching line { line.delivered = true; ORDER_LINES.save(...)?; }"
           },
           "notes": [
-            "Writes every order-line key under the input-derived order prefix."
+            "The implementation scans all order-line keys with this input-derived order prefix; conflict matching therefore compares the prefix rather than a concrete line number."
           ]
         },
         {
@@ -1079,7 +1083,8 @@
           "key": {
             "semantic_name": "order_line",
             "depends_on": {
-              "dependency_kind": "input"
+              "dependency_kind": "input",
+              "origin_input": "(warehouse_id, district_id, order_id)"
             }
           },
           "guard": {
@@ -1093,7 +1098,7 @@
             "code": "ORDER_LINES.range(...).filter key starts_with order_line_prefix(...);"
           },
           "notes": [
-            "Prefix scan is input-derived but not representable as equality in schema 3.1."
+            "The implementation scans all order-line keys with this input-derived order prefix; conflict matching therefore compares the prefix rather than a concrete line number."
           ]
         }
       ]
@@ -1162,7 +1167,7 @@
     "STOCK": "warehouse_item denotes (warehouse_id, item_id), including per-line item expressions.",
     "ORDERS": "warehouse_district_order denotes (warehouse_id, district_id, order_id).",
     "NEW_ORDERS": "uses the same warehouse/district/order tuple as ORDERS.",
-    "ORDER_LINES": "order_line denotes an exact order-line key or an unresolved order-prefix scan; schema 3.1 cannot yet express prefix matching.",
+    "ORDER_LINES": "order_line conflict matching uses the input-derived (warehouse_id, district_id, order_id) prefix. NewOrder writes deterministic line numbers below that prefix; Delivery and OrderStatus scan the whole prefix.",
     "HISTORY": "history_id is a caller-provided unique key."
   }
 }

@@ -1,0 +1,931 @@
+//! Precompiled runtime evaluation for symbolic profile-edge predicates.
+//!
+//! Analyzer strings are parsed once into compact expression trees. Online evaluation uses
+//! concrete transaction bindings and returns three-valued results so missing state or unsupported
+//! analyzer expressions remain conservative instead of being treated as independence proofs.
+
+use std::collections::BTreeSet;
+use std::fmt;
+
+use acg_core::{
+    ClauseResolution, DelegationFrame, DependencyKind, GuardRef, InstanceId, KeyMatch,
+    PredicateClause, PredicateTemplate, UnknownReason,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PredicateResult {
+    False,
+    True,
+    Unknown,
+}
+
+impl PredicateResult {
+    pub fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::False, _) | (_, Self::False) => Self::False,
+            (Self::True, Self::True) => Self::True,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::False, Self::False) => Self::False,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PredicateEvaluation {
+    pub result: PredicateResult,
+    pub clauses: Vec<ClauseEvaluation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClauseEvaluation {
+    pub clause_index: usize,
+    pub resolution: ClauseResolution,
+    pub result: PredicateResult,
+    pub unknown_reasons: Vec<UnknownReason>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputBindings {
+    root: Value,
+}
+
+impl InputBindings {
+    pub fn from_value(root: Value) -> Self {
+        Self { root }
+    }
+
+    pub fn from_object(root: Map<String, Value>) -> Self {
+        Self {
+            root: Value::Object(root),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self::from_object(Map::new())
+    }
+
+    pub fn root(&self) -> &Value {
+        &self.root
+    }
+
+    pub fn get(&self, expression: &CompiledExpression) -> EvaluatedKeys {
+        evaluate_expression(expression, &self.root)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum BindingAtom {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+}
+
+impl fmt::Display for BindingAtom {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => formatter.write_str("null"),
+            Self::Bool(value) => write!(formatter, "{value}"),
+            Self::Number(value) | Self::String(value) => formatter.write_str(value),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum BindingKey {
+    Atom(BindingAtom),
+    Tuple(Vec<BindingAtom>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluatedKeys {
+    pub values: Vec<BindingKey>,
+    /// False means the expression could not be fully resolved for the provided bindings.
+    pub complete: bool,
+}
+
+impl EvaluatedKeys {
+    fn unknown() -> Self {
+        Self {
+            values: Vec::new(),
+            complete: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CompiledPath {
+    segments: Vec<PathSegment>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum PathSegment {
+    Field(String),
+    Index(IndexExpression),
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum IndexExpression {
+    Fixed(usize),
+    Variable(String),
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CompiledExpression {
+    Path(CompiledPath),
+    Tuple(Vec<CompiledExpression>),
+    Literal(BindingAtom),
+    Unsupported(String),
+}
+
+impl CompiledExpression {
+    pub fn compile(expression: &str) -> Self {
+        compile_expression(expression.trim())
+    }
+
+    fn contains_unsupported(&self) -> bool {
+        match self {
+            Self::Unsupported(_) => true,
+            Self::Tuple(expressions) => expressions.iter().any(Self::contains_unsupported),
+            Self::Path(_) | Self::Literal(_) => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CompiledPredicate {
+    clauses: Vec<CompiledClause>,
+}
+
+#[derive(Clone, Debug)]
+struct CompiledClause {
+    resolution: ClauseResolution,
+    static_unknown_reasons: Vec<UnknownReason>,
+    require_same_contract_instance: bool,
+    key_match: CompiledKeyMatch,
+    left_guard: CompiledGuard,
+    right_guard: CompiledGuard,
+}
+
+#[derive(Clone, Debug)]
+enum CompiledKeyMatch {
+    WholeResource,
+    InputEquality {
+        left: CompiledExpression,
+        right: CompiledExpression,
+    },
+    Unresolved,
+}
+
+impl CompiledPredicate {
+    pub fn compile(template: &PredicateTemplate) -> Self {
+        Self {
+            clauses: template
+                .clauses
+                .iter()
+                .map(CompiledClause::compile)
+                .collect(),
+        }
+    }
+
+    pub fn requires_same_instance(&self) -> bool {
+        !self.clauses.is_empty()
+            && self
+                .clauses
+                .iter()
+                .all(|clause| clause.require_same_contract_instance)
+    }
+
+    pub fn evaluate(
+        &self,
+        left_instance: InstanceId,
+        left_bindings: &InputBindings,
+        right_instance: InstanceId,
+        right_bindings: &InputBindings,
+    ) -> PredicateResult {
+        self.clauses
+            .iter()
+            .fold(PredicateResult::False, |result, clause| {
+                result.or(clause.evaluate(
+                    left_instance,
+                    left_bindings,
+                    right_instance,
+                    right_bindings,
+                ))
+            })
+    }
+
+    /// Diagnostic evaluation retaining one result per alternative clause and the reasons for
+    /// unresolved clauses. The hot candidate-graph path should use `evaluate`, which avoids
+    /// allocating this diagnostic structure.
+    pub fn evaluate_detailed(
+        &self,
+        left_instance: InstanceId,
+        left_bindings: &InputBindings,
+        right_instance: InstanceId,
+        right_bindings: &InputBindings,
+    ) -> PredicateEvaluation {
+        let clauses = self
+            .clauses
+            .iter()
+            .enumerate()
+            .map(|(clause_index, clause)| {
+                clause.evaluate_detailed(
+                    clause_index,
+                    left_instance,
+                    left_bindings,
+                    right_instance,
+                    right_bindings,
+                )
+            })
+            .collect::<Vec<_>>();
+        let result = clauses
+            .iter()
+            .fold(PredicateResult::False, |result, clause| {
+                result.or(clause.result)
+            });
+        PredicateEvaluation { result, clauses }
+    }
+}
+
+impl CompiledClause {
+    fn compile(clause: &PredicateClause) -> Self {
+        let key_match = match &clause.key_match {
+            KeyMatch::WholeResource => CompiledKeyMatch::WholeResource,
+            KeyMatch::InputEquality { left, right } => CompiledKeyMatch::InputEquality {
+                left: compile_expression_with_delegation(&left.expression, &left.delegation_path),
+                right: compile_expression_with_delegation(
+                    &right.expression,
+                    &right.delegation_path,
+                ),
+            },
+            KeyMatch::Unresolved => CompiledKeyMatch::Unresolved,
+        };
+        Self {
+            resolution: clause.resolution,
+            static_unknown_reasons: clause.unknown_reasons.clone(),
+            require_same_contract_instance: clause.require_same_contract_instance,
+            key_match,
+            left_guard: CompiledGuard::compile(&clause.left_guard),
+            right_guard: CompiledGuard::compile(&clause.right_guard),
+        }
+    }
+
+    fn evaluate(
+        &self,
+        left_instance: InstanceId,
+        left_bindings: &InputBindings,
+        right_instance: InstanceId,
+        right_bindings: &InputBindings,
+    ) -> PredicateResult {
+        if self.require_same_contract_instance && left_instance != right_instance {
+            return PredicateResult::False;
+        }
+
+        let key_result = match &self.key_match {
+            CompiledKeyMatch::WholeResource => PredicateResult::True,
+            CompiledKeyMatch::InputEquality { left, right } => {
+                compare_key_sets(&left_bindings.get(left), &right_bindings.get(right))
+            }
+            CompiledKeyMatch::Unresolved => PredicateResult::Unknown,
+        };
+
+        key_result
+            .and(self.left_guard.evaluate(left_bindings))
+            .and(self.right_guard.evaluate(right_bindings))
+    }
+
+    fn evaluate_detailed(
+        &self,
+        clause_index: usize,
+        left_instance: InstanceId,
+        left_bindings: &InputBindings,
+        right_instance: InstanceId,
+        right_bindings: &InputBindings,
+    ) -> ClauseEvaluation {
+        let result = self.evaluate(left_instance, left_bindings, right_instance, right_bindings);
+        let mut unknown_reasons = Vec::new();
+        if result == PredicateResult::Unknown {
+            unknown_reasons.extend(self.static_unknown_reasons.iter().copied());
+            match &self.key_match {
+                CompiledKeyMatch::InputEquality { left, right } => {
+                    let left_keys = left_bindings.get(left);
+                    let right_keys = right_bindings.get(right);
+                    if compare_key_sets(&left_keys, &right_keys) == PredicateResult::Unknown {
+                        if left.contains_unsupported() || right.contains_unsupported() {
+                            unknown_reasons.push(UnknownReason::UnsupportedExpression);
+                        } else if !left_keys.complete || !right_keys.complete {
+                            unknown_reasons.push(UnknownReason::MissingInputBinding);
+                        }
+                    }
+                }
+                CompiledKeyMatch::Unresolved if unknown_reasons.is_empty() => {
+                    unknown_reasons.push(UnknownReason::UnresolvedKey);
+                }
+                CompiledKeyMatch::WholeResource | CompiledKeyMatch::Unresolved => {}
+            }
+            self.left_guard
+                .append_unknown_reasons(left_bindings, &mut unknown_reasons);
+            self.right_guard
+                .append_unknown_reasons(right_bindings, &mut unknown_reasons);
+            unknown_reasons.sort();
+            unknown_reasons.dedup();
+        }
+        ClauseEvaluation {
+            clause_index,
+            resolution: self.resolution,
+            result,
+            unknown_reasons,
+        }
+    }
+}
+
+fn compare_key_sets(left: &EvaluatedKeys, right: &EvaluatedKeys) -> PredicateResult {
+    if left
+        .values
+        .iter()
+        .any(|left_key| right.values.iter().any(|right_key| left_key == right_key))
+    {
+        return PredicateResult::True;
+    }
+    if left.complete && right.complete {
+        PredicateResult::False
+    } else {
+        PredicateResult::Unknown
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompiledGuard {
+    node: GuardNode,
+    dependency_kind: DependencyKind,
+}
+
+#[derive(Clone, Debug)]
+enum GuardNode {
+    Constant(bool),
+    And(Vec<GuardNode>),
+    Or(Vec<GuardNode>),
+    Compare {
+        left: CompiledExpression,
+        operator: CompareOperator,
+        right: CompiledExpression,
+    },
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CompareOperator {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CompiledGuard {
+    fn compile(reference: &GuardRef) -> Self {
+        Self {
+            node: compile_guard_node(reference.expression.trim(), &reference.delegation_path),
+            dependency_kind: reference.dependency_kind,
+        }
+    }
+
+    fn evaluate(&self, bindings: &InputBindings) -> PredicateResult {
+        let result = self.node.evaluate(bindings);
+        match self.dependency_kind {
+            DependencyKind::None | DependencyKind::Input => result,
+            DependencyKind::State | DependencyKind::InputAndState | DependencyKind::Unknown => {
+                // A deterministically false input prefix can still disprove a state-dependent
+                // guard.
+                // A true result cannot prove a state-dependent guard without concrete state.
+                match result {
+                    PredicateResult::False => PredicateResult::False,
+                    _ => PredicateResult::Unknown,
+                }
+            }
+        }
+    }
+
+    fn append_unknown_reasons(&self, bindings: &InputBindings, reasons: &mut Vec<UnknownReason>) {
+        if self.evaluate(bindings) != PredicateResult::Unknown {
+            return;
+        }
+        if matches!(
+            self.dependency_kind,
+            DependencyKind::State | DependencyKind::InputAndState | DependencyKind::Unknown
+        ) {
+            reasons.push(UnknownReason::StateDependentGuard);
+        }
+        if self.node.contains_unsupported() {
+            reasons.push(UnknownReason::UnsupportedGuard);
+        } else if matches!(
+            self.dependency_kind,
+            DependencyKind::None | DependencyKind::Input
+        ) {
+            reasons.push(UnknownReason::MissingInputBinding);
+        }
+    }
+}
+
+impl GuardNode {
+    fn contains_unsupported(&self) -> bool {
+        match self {
+            Self::Unsupported => true,
+            Self::And(nodes) | Self::Or(nodes) => nodes.iter().any(Self::contains_unsupported),
+            Self::Compare { left, right, .. } => {
+                left.contains_unsupported() || right.contains_unsupported()
+            }
+            Self::Constant(_) => false,
+        }
+    }
+
+    fn evaluate(&self, bindings: &InputBindings) -> PredicateResult {
+        match self {
+            Self::Constant(value) => {
+                if *value {
+                    PredicateResult::True
+                } else {
+                    PredicateResult::False
+                }
+            }
+            Self::And(nodes) => nodes.iter().fold(PredicateResult::True, |result, node| {
+                result.and(node.evaluate(bindings))
+            }),
+            Self::Or(nodes) => nodes.iter().fold(PredicateResult::False, |result, node| {
+                result.or(node.evaluate(bindings))
+            }),
+            Self::Compare {
+                left,
+                operator,
+                right,
+            } => compare_guard_values(bindings.get(left), *operator, bindings.get(right)),
+            Self::Unsupported => PredicateResult::Unknown,
+        }
+    }
+}
+
+fn compare_guard_values(
+    left: EvaluatedKeys,
+    operator: CompareOperator,
+    right: EvaluatedKeys,
+) -> PredicateResult {
+    match operator {
+        CompareOperator::Eq => compare_key_sets(&left, &right),
+        CompareOperator::Ne => match compare_key_sets(&left, &right) {
+            PredicateResult::True => PredicateResult::False,
+            PredicateResult::False => PredicateResult::True,
+            PredicateResult::Unknown => PredicateResult::Unknown,
+        },
+        CompareOperator::Lt | CompareOperator::Le | CompareOperator::Gt | CompareOperator::Ge => {
+            if !left.complete
+                || !right.complete
+                || left.values.len() != 1
+                || right.values.len() != 1
+            {
+                return PredicateResult::Unknown;
+            }
+            let Some(left_number) = numeric_key(&left.values[0]) else {
+                return PredicateResult::Unknown;
+            };
+            let Some(right_number) = numeric_key(&right.values[0]) else {
+                return PredicateResult::Unknown;
+            };
+            let value = match operator {
+                CompareOperator::Lt => left_number < right_number,
+                CompareOperator::Le => left_number <= right_number,
+                CompareOperator::Gt => left_number > right_number,
+                CompareOperator::Ge => left_number >= right_number,
+                CompareOperator::Eq | CompareOperator::Ne => unreachable!(),
+            };
+            if value {
+                PredicateResult::True
+            } else {
+                PredicateResult::False
+            }
+        }
+    }
+}
+
+fn numeric_key(key: &BindingKey) -> Option<f64> {
+    let BindingKey::Atom(atom) = key else {
+        return None;
+    };
+    match atom {
+        BindingAtom::Number(value) | BindingAtom::String(value) => value.parse().ok(),
+        BindingAtom::Null | BindingAtom::Bool(_) => None,
+    }
+}
+
+fn compile_guard_node(input: &str, delegation_path: &[DelegationFrame]) -> GuardNode {
+    let input = trim_outer_parentheses(input.trim());
+    if input.eq_ignore_ascii_case("true") {
+        return GuardNode::Constant(true);
+    }
+    if input.eq_ignore_ascii_case("false") {
+        return GuardNode::Constant(false);
+    }
+
+    let or_parts = split_top_level_token(input, "||");
+    if or_parts.len() > 1 {
+        return GuardNode::Or(
+            or_parts
+                .into_iter()
+                .map(|part| compile_guard_node(part.trim(), delegation_path))
+                .collect(),
+        );
+    }
+    let and_parts = split_top_level_token(input, "&&");
+    if and_parts.len() > 1 {
+        return GuardNode::And(
+            and_parts
+                .into_iter()
+                .map(|part| compile_guard_node(part.trim(), delegation_path))
+                .collect(),
+        );
+    }
+
+    for (token, operator) in [
+        ("==", CompareOperator::Eq),
+        ("!=", CompareOperator::Ne),
+        ("<=", CompareOperator::Le),
+        (">=", CompareOperator::Ge),
+        ("<", CompareOperator::Lt),
+        (">", CompareOperator::Gt),
+    ] {
+        if let Some((left, right)) = split_once_top_level(input, token) {
+            return GuardNode::Compare {
+                left: compile_expression_with_delegation(left, delegation_path),
+                operator,
+                right: compile_expression_with_delegation(right, delegation_path),
+            };
+        }
+    }
+
+    GuardNode::Unsupported
+}
+
+fn compile_expression_with_delegation(
+    input: &str,
+    delegation_path: &[DelegationFrame],
+) -> CompiledExpression {
+    let mut expression = input.trim().to_owned();
+    for frame in delegation_path.iter().rev() {
+        if let Some(mapping) = frame
+            .input_mapping
+            .iter()
+            .find(|mapping| mapping.target.trim() == expression)
+        {
+            expression = mapping.expression.trim().to_owned();
+        }
+    }
+    CompiledExpression::compile(&expression)
+}
+
+fn compile_expression(input: &str) -> CompiledExpression {
+    let input = input.trim();
+    if input.is_empty() {
+        return CompiledExpression::Unsupported(String::new());
+    }
+    if let Some(literal) = parse_literal(input) {
+        return CompiledExpression::Literal(literal);
+    }
+    if input.starts_with('(') && input.ends_with(')') && outer_parentheses_wrap(input) {
+        let inner = &input[1..input.len() - 1];
+        let parts = split_top_level_char(inner, ',');
+        if parts.len() > 1 {
+            return CompiledExpression::Tuple(
+                parts
+                    .into_iter()
+                    .map(|part| compile_expression(part.trim()))
+                    .collect(),
+            );
+        }
+        return compile_expression(inner);
+    }
+    match parse_path(input) {
+        Some(path) => CompiledExpression::Path(path),
+        None => CompiledExpression::Unsupported(input.to_owned()),
+    }
+}
+
+fn parse_literal(input: &str) -> Option<BindingAtom> {
+    if input == "null" {
+        return Some(BindingAtom::Null);
+    }
+    if input == "true" {
+        return Some(BindingAtom::Bool(true));
+    }
+    if input == "false" {
+        return Some(BindingAtom::Bool(false));
+    }
+    if input.len() >= 2
+        && ((input.starts_with('"') && input.ends_with('"'))
+            || (input.starts_with('\'') && input.ends_with('\'')))
+    {
+        return Some(BindingAtom::String(input[1..input.len() - 1].to_owned()));
+    }
+    if input.parse::<f64>().is_ok() {
+        return Some(BindingAtom::Number(input.to_owned()));
+    }
+    None
+}
+
+fn parse_path(input: &str) -> Option<CompiledPath> {
+    if input.contains('{') || input.contains('}') || input.contains(' ') {
+        return None;
+    }
+    let mut segments = Vec::new();
+    for component in input.split('.') {
+        if component.is_empty() {
+            return None;
+        }
+        let mut rest = component;
+        if let Some(open) = rest.find('[') {
+            let field = &rest[..open];
+            if !field.is_empty() {
+                segments.push(PathSegment::Field(field.to_owned()));
+            }
+            rest = &rest[open..];
+            while rest.starts_with('[') {
+                let close = rest.find(']')?;
+                let index = &rest[1..close];
+                let expression = match index.parse::<usize>() {
+                    Ok(index) => IndexExpression::Fixed(index),
+                    Err(_) if is_identifier(index) => IndexExpression::Variable(index.to_owned()),
+                    Err(_) => return None,
+                };
+                segments.push(PathSegment::Index(expression));
+                rest = &rest[close + 1..];
+            }
+            if !rest.is_empty() {
+                return None;
+            }
+        } else {
+            if !is_identifier(component) {
+                return None;
+            }
+            segments.push(PathSegment::Field(component.to_owned()));
+        }
+    }
+    if segments.is_empty() {
+        None
+    } else {
+        Some(CompiledPath { segments })
+    }
+}
+
+fn is_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn evaluate_expression(expression: &CompiledExpression, root: &Value) -> EvaluatedKeys {
+    let mut variables = BTreeSet::new();
+    collect_variables(expression, &mut variables);
+    if variables.len() > 1 {
+        return EvaluatedKeys::unknown();
+    }
+    if let Some(variable) = variables.iter().next() {
+        let Some(extent) = variable_extent(expression, root, variable) else {
+            return EvaluatedKeys::unknown();
+        };
+        let mut values = Vec::with_capacity(extent);
+        let mut complete = true;
+        for index in 0..extent {
+            match evaluate_at(expression, root, Some((variable.as_str(), index))) {
+                Some(value) => values.push(value),
+                None => complete = false,
+            }
+        }
+        values.sort();
+        values.dedup();
+        EvaluatedKeys { values, complete }
+    } else {
+        match evaluate_at(expression, root, None) {
+            Some(value) => EvaluatedKeys {
+                values: vec![value],
+                complete: true,
+            },
+            None => EvaluatedKeys::unknown(),
+        }
+    }
+}
+
+fn collect_variables(expression: &CompiledExpression, variables: &mut BTreeSet<String>) {
+    match expression {
+        CompiledExpression::Path(path) => {
+            for segment in &path.segments {
+                if let PathSegment::Index(IndexExpression::Variable(variable)) = segment {
+                    variables.insert(variable.clone());
+                }
+            }
+        }
+        CompiledExpression::Tuple(expressions) => {
+            for expression in expressions {
+                collect_variables(expression, variables);
+            }
+        }
+        CompiledExpression::Literal(_) | CompiledExpression::Unsupported(_) => {}
+    }
+}
+
+fn variable_extent(expression: &CompiledExpression, root: &Value, variable: &str) -> Option<usize> {
+    match expression {
+        CompiledExpression::Path(path) => path_variable_extent(path, root, variable),
+        CompiledExpression::Tuple(expressions) => expressions
+            .iter()
+            .find_map(|expression| variable_extent(expression, root, variable)),
+        CompiledExpression::Literal(_) | CompiledExpression::Unsupported(_) => None,
+    }
+}
+
+fn path_variable_extent(path: &CompiledPath, root: &Value, variable: &str) -> Option<usize> {
+    let mut current = root;
+    for segment in &path.segments {
+        match segment {
+            PathSegment::Field(field) => current = current.get(field)?,
+            PathSegment::Index(IndexExpression::Fixed(index)) => current = current.get(*index)?,
+            PathSegment::Index(IndexExpression::Variable(candidate)) if candidate == variable => {
+                return current.as_array().map(Vec::len)
+            }
+            PathSegment::Index(IndexExpression::Variable(_)) => return None,
+        }
+    }
+    None
+}
+
+fn evaluate_at(
+    expression: &CompiledExpression,
+    root: &Value,
+    variable: Option<(&str, usize)>,
+) -> Option<BindingKey> {
+    match expression {
+        CompiledExpression::Path(path) => {
+            let value = evaluate_path(path, root, variable)?;
+            Some(BindingKey::Atom(json_atom(value)?))
+        }
+        CompiledExpression::Tuple(expressions) => {
+            let mut values = Vec::with_capacity(expressions.len());
+            for expression in expressions {
+                let BindingKey::Atom(value) = evaluate_at(expression, root, variable)? else {
+                    return None;
+                };
+                values.push(value);
+            }
+            Some(BindingKey::Tuple(values))
+        }
+        CompiledExpression::Literal(value) => Some(BindingKey::Atom(value.clone())),
+        CompiledExpression::Unsupported(_) => None,
+    }
+}
+
+fn evaluate_path<'a>(
+    path: &CompiledPath,
+    root: &'a Value,
+    variable: Option<(&str, usize)>,
+) -> Option<&'a Value> {
+    let mut current = root;
+    for segment in &path.segments {
+        match segment {
+            PathSegment::Field(field) => current = current.get(field)?,
+            PathSegment::Index(IndexExpression::Fixed(index)) => current = current.get(*index)?,
+            PathSegment::Index(IndexExpression::Variable(name)) => {
+                let (variable_name, index) = variable?;
+                if variable_name != name {
+                    return None;
+                }
+                current = current.get(index)?;
+            }
+        }
+    }
+    Some(current)
+}
+
+fn json_atom(value: &Value) -> Option<BindingAtom> {
+    match value {
+        Value::Null => Some(BindingAtom::Null),
+        Value::Bool(value) => Some(BindingAtom::Bool(*value)),
+        Value::Number(value) => Some(BindingAtom::Number(value.to_string())),
+        Value::String(value) => Some(BindingAtom::String(value.clone())),
+        Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn trim_outer_parentheses(mut input: &str) -> &str {
+    while input.starts_with('(') && input.ends_with(')') && outer_parentheses_wrap(input) {
+        input = input[1..input.len() - 1].trim();
+    }
+    input
+}
+
+fn outer_parentheses_wrap(input: &str) -> bool {
+    let mut depth = 0_i32;
+    let mut quoted = None;
+    let bytes = input.as_bytes();
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if let Some(quote) = quoted {
+            if byte == quote && (index == 0 || bytes[index - 1] != b'\\') {
+                quoted = None;
+            }
+            continue;
+        }
+        if byte == b'"' || byte == b'\'' {
+            quoted = Some(byte);
+            continue;
+        }
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 && index + 1 != bytes.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn split_top_level_char(input: &str, delimiter: char) -> Vec<&str> {
+    let mut buffer = [0_u8; 4];
+    let token = delimiter.encode_utf8(&mut buffer);
+    split_top_level(input, token)
+}
+
+fn split_top_level_token<'a>(input: &'a str, delimiter: &str) -> Vec<&'a str> {
+    split_top_level(input, delimiter)
+}
+
+fn split_top_level<'a>(input: &'a str, delimiter: &str) -> Vec<&'a str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut paren = 0_i32;
+    let mut bracket = 0_i32;
+    let mut brace = 0_i32;
+    let mut quoted = None;
+    let bytes = input.as_bytes();
+    let delimiter = delimiter.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(quote) = quoted {
+            if byte == quote && (index == 0 || bytes[index - 1] != b'\\') {
+                quoted = None;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' || byte == b'\'' {
+            quoted = Some(byte);
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b'[' => bracket += 1,
+            b']' => bracket -= 1,
+            b'{' => brace += 1,
+            b'}' => brace -= 1,
+            _ => {}
+        }
+        if paren == 0
+            && bracket == 0
+            && brace == 0
+            && !delimiter.is_empty()
+            && bytes[index..].starts_with(delimiter)
+        {
+            parts.push(&input[start..index]);
+            index += delimiter.len();
+            start = index;
+            continue;
+        }
+        index += 1;
+    }
+    parts.push(&input[start..]);
+    parts
+}
+
+fn split_once_top_level<'a>(input: &'a str, delimiter: &str) -> Option<(&'a str, &'a str)> {
+    let parts = split_top_level(input, delimiter);
+    if parts.len() == 2 {
+        Some((parts[0].trim(), parts[1].trim()))
+    } else {
+        None
+    }
+}

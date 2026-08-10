@@ -3,6 +3,8 @@ members = [
     "crates/acg-core",
     "crates/acg-symbolic-json",
     "crates/acg-profile-graph",
+    "crates/acg-predicate",
+    "crates/acg-candidate-graph",
     "crates/acg-cli",
 ]
 exclude = ["benchmarks", "runtime"]
@@ -28,3 +30,5 @@ thiserror = "=1.0.63"
 acg-core = { path = "crates/acg-core" }
 acg-symbolic-json = { path = "crates/acg-symbolic-json" }
 acg-profile-graph = { path = "crates/acg-profile-graph" }
+acg-predicate = { path = "crates/acg-predicate" }
+acg-candidate-graph = { path = "crates/acg-candidate-graph" }

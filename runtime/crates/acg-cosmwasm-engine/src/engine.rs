@@ -178,6 +178,18 @@ impl CosmWasmEngine {
             .and_then(|metadata| self.code_metadata(metadata.code_id))
     }
 
+    /// Predict the deterministic address allocated for an instantiation ordinal in a transaction.
+    ///
+    /// The top-level instantiate call uses ordinal 0. Nested instantiations increment the ordinal
+    /// transaction-locally. This helper lets pre-execution graph construction assign the same
+    /// contract-instance identity that execution will later commit.
+    pub fn predict_contract_address(&self, transaction_id: TransactionId, ordinal: u32) -> Address {
+        Address::new(format!(
+            "{}-{}-{ordinal}",
+            self.core.config.contract_address_prefix, transaction_id.0
+        ))
+    }
+
     pub fn set_balance(&self, address: impl Into<Address>, coins: &[Coin]) -> EngineResult<()> {
         let address = address.into();
         validate_public_address(&address)?;

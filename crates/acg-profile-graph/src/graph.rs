@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use acg_core::{
-    ConflictKinds, EdgeRelation, PredicateTemplate, ProfileDefinition, ProfileEdgeIndex, ProfileId,
-    StableProfileKey,
+    ClauseResolution, ConflictKinds, EdgeRelation, PredicateTemplate, ProfileDefinition,
+    ProfileEdgeIndex, ProfileId, StableProfileKey,
 };
 use thiserror::Error;
 
@@ -130,6 +130,7 @@ impl ProfileGraph {
         let mut edge_alpha = Vec::with_capacity(unresolved_edges.len());
         let mut edge_beta = Vec::with_capacity(unresolved_edges.len());
         for (index, (source, target, edge)) in unresolved_edges.into_iter().enumerate() {
+            validate_edge_metadata(&edge)?;
             if !edge.symbolic_score.is_finite() || !(0.0..=1.0).contains(&edge.symbolic_score) {
                 return Err(GraphLoadError::InvalidSymbolicScore(edge.symbolic_score));
             }
@@ -252,10 +253,47 @@ pub enum GraphLoadError {
     },
     #[error("symbolic score must be finite and within [0, 1], got {0}")]
     InvalidSymbolicScore(f32),
+    #[error("edge relation {stored:?} does not match clause summary {computed:?}")]
+    EdgeRelationMismatch {
+        stored: EdgeRelation,
+        computed: EdgeRelation,
+    },
+    #[error("unknown clause must include at least one unknown reason")]
+    MissingUnknownReason,
+    #[error("resolved clause {resolution:?} cannot carry unknown reasons")]
+    UnexpectedUnknownReason { resolution: ClauseResolution },
     #[error("symbolic prior strength must be finite and non-negative, got {0}")]
     InvalidPriorStrength(f32),
     #[error("epsilon must be finite and positive, got {0}")]
     InvalidEpsilon(f32),
+}
+
+fn validate_edge_metadata(edge: &acg_core::ProfileEdgeDefinition) -> Result<(), GraphLoadError> {
+    let computed = EdgeRelation::summarize_clauses(&edge.predicate.clauses);
+    if edge.relation != computed {
+        return Err(GraphLoadError::EdgeRelationMismatch {
+            stored: edge.relation,
+            computed,
+        });
+    }
+    for clause in &edge.predicate.clauses {
+        match clause.resolution {
+            ClauseResolution::Unknown if clause.unknown_reasons.is_empty() => {
+                return Err(GraphLoadError::MissingUnknownReason);
+            }
+            ClauseResolution::Conditional | ClauseResolution::Unconditional
+                if !clause.unknown_reasons.is_empty() =>
+            {
+                return Err(GraphLoadError::UnexpectedUnknownReason {
+                    resolution: clause.resolution,
+                });
+            }
+            ClauseResolution::Conditional
+            | ClauseResolution::Unconditional
+            | ClauseResolution::Unknown => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate_load_config(config: GraphLoadConfig) -> Result<(), GraphLoadError> {

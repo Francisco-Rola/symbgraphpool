@@ -118,7 +118,7 @@ fn miniwarehouse_graph_has_expected_shape() {
             .iter()
             .filter(|edge| edge.relation == EdgeRelation::Conditional)
             .count(),
-        38
+        37
     );
     assert_eq!(
         graph
@@ -126,7 +126,7 @@ fn miniwarehouse_graph_has_expected_shape() {
             .iter()
             .filter(|edge| edge.relation == EdgeRelation::Unknown)
             .count(),
-        6
+        7
     );
 }
 
@@ -167,7 +167,7 @@ fn miniwarehouse_stock_edges_bind_line_items_to_stock_queries() {
 }
 
 #[test]
-fn miniwarehouse_delivery_preserves_precise_order_prefix_and_state_derived_customer() {
+fn miniwarehouse_delivery_prefix_and_customer_keys_remain_unknown() {
     let graph = graph(MINIWAREHOUSE, 36);
     let delivery = graph
         .profiles()
@@ -190,20 +190,8 @@ fn miniwarehouse_delivery_preserves_precise_order_prefix_and_state_derived_custo
     assert_eq!(edge.relation, EdgeRelation::Unknown);
     assert!(edge.predicate.clauses.iter().any(|clause| {
         clause.resource.as_str() == "ORDER_LINES"
-            && clause.resolution == ClauseResolution::Conditional
-            && matches!(
-                &clause.key_match,
-                KeyMatch::InputEquality { left, right }
-                    if left.expression == "(warehouse_id, district_id, order_id)"
-                        && right.expression == "(warehouse_id, district_id, order_id)"
-            )
-    }));
-    assert!(edge.predicate.clauses.iter().any(|clause| {
-        clause.resource.as_str() == "CUSTOMERS"
             && clause.resolution == ClauseResolution::Unknown
-            && clause
-                .unknown_reasons
-                .contains(&UnknownReason::StateDerivedKey)
+            && matches!(&clause.key_match, KeyMatch::Unresolved)
     }));
 }
 
@@ -243,35 +231,5 @@ fn conflictlab_create_cancel_preserves_precise_and_unknown_clauses() {
                 .unknown_reasons
                 .contains(&UnknownReason::StateDerivedKey)
             && matches!(&clause.key_match, KeyMatch::Unresolved)
-    }));
-}
-
-#[test]
-fn miniwarehouse_unknown_edges_are_all_delivery_state_derived() {
-    let graph = graph(MINIWAREHOUSE, 38);
-    let delivery = graph
-        .profiles()
-        .iter()
-        .find(|record| record.definition.entrypoint_name == "execute::Delivery")
-        .unwrap()
-        .id;
-    let unknown = graph
-        .edges()
-        .iter()
-        .filter(|edge| edge.relation == EdgeRelation::Unknown)
-        .collect::<Vec<_>>();
-
-    assert_eq!(unknown.len(), 6);
-    assert!(unknown
-        .iter()
-        .all(|edge| { edge.source == delivery || edge.target == delivery }));
-    assert!(unknown.iter().all(|edge| {
-        edge.predicate.clauses.iter().any(|clause| {
-            clause.resource.as_str() == "CUSTOMERS"
-                && clause.resolution == ClauseResolution::Unknown
-                && clause
-                    .unknown_reasons
-                    .contains(&UnknownReason::StateDerivedKey)
-        })
     }));
 }

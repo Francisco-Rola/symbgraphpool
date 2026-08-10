@@ -1,0 +1,22 @@
+[package]
+name = "acg-miniwarehouse-workload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+acg-cosmwasm-engine.workspace = true
+cosmwasm-std.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+acg-candidate-graph.workspace = true
+acg-core.workspace = true
+acg-cosmwasm-adapter.workspace = true
+acg-profile-graph.workspace = true
+acg-predicate.workspace = true
+acg-symbolic-json.workspace = true
+acg-validator-sim.workspace = true
