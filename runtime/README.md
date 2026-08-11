@@ -69,9 +69,10 @@ The requested block-window default is two seconds. The default ingress rate is 2
 per second, chosen as a benchmark-oriented reference to Injective's published throughput figure;
 it is only a workload-generator default and not a claim about admission guarantees.
 
-Parallel waves are rejected explicitly by the serial executor. Executing them concurrently without
-MVCC validation could commit incorrect state. A speculative parallel executor will be added after
-the candidate graph and validation/replay boundaries exist.
+The serial executor still rejects wide plans. Split-phase speculative execution instead uses a
+dependency READY-DAG plus block-local MVCC: scheduler levels are diagnostic only, completed
+predecessor deltas are published as versions, and concrete canonical validation/replay remains the
+correctness boundary.
 
 ## Validate
 
@@ -91,7 +92,7 @@ The tests cover the original execution semantics plus Brick 2 runtime adaptation
 - two-second FIFO block production;
 - serial FIFO scheduling and a custom reverse-order scheduler plug-in;
 - block execution that preserves order and continues after failed transactions;
-- explicit rejection of unsafe parallel waves;
+- serial-executor rejection of wide plans plus dependency/MVCC speculative execution tests;
 - the complete submit, produce, schedule, and execute pipeline;
 - runtime code-checksum to `ProfileId` resolution;
 - dense `InstanceId` assignment;

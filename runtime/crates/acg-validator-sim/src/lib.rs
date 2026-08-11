@@ -18,8 +18,8 @@ pub use crate::block::{
 };
 pub use crate::executor::{
     BlockExecutionError, BlockExecutionReport, BlockExecutor, ReconciliationTransactionDiagnostic,
-    SerialBlockExecutor, SpeculativeParallelBlockExecutor, SpeculativeParallelExecutionReport,
-    SplitPhaseSpeculativeExecutionReport, TransactionExecution,
+    SerialBlockExecutor, SpeculativeParallelBlockExecutor, SplitPhaseSpeculativeExecutionReport,
+    TransactionExecution,
 };
 pub use crate::ingress::{
     IngressConfig, IngressError, RateControlledIngress, DEFAULT_BENCHMARK_INGRESS_TPS,

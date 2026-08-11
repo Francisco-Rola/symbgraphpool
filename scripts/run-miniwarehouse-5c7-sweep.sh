@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run the Brick-5C.6 MiniWarehouse Wasm dependency/versioned-state experiment across a block-size × worker-count matrix.
+# Run the Brick-5C.7 MiniWarehouse Wasm block-local-MVCC experiment across a block-size × worker-count matrix.
 # Runs are intentionally sequential: concurrent benchmark processes would compete for CPU/cache and
 # corrupt wall-clock speedup measurements.
 
@@ -17,7 +17,7 @@ WORKERS="${ACG_MW_SWEEP_WORKERS:-1 2 4 8}"
 SEED="${ACG_MW_SEED:-42}"
 SYMBOLIC_HARD_SOFTEN_AFTER="${ACG_MW_SYMBOLIC_HARD_SOFTEN_AFTER:-8}"
 
-RESULTS_ROOT="${ACG_MW_RESULTS_DIR:-$ROOT_DIR/benchmark-results/miniwarehouse-5c6}"
+RESULTS_ROOT="${ACG_MW_RESULTS_DIR:-$ROOT_DIR/benchmark-results/miniwarehouse-5c7}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RESULTS_DIR="$RESULTS_ROOT/$RUN_ID"
 mkdir -p "$RESULTS_DIR"
@@ -44,7 +44,7 @@ WASM_PATH="$(cd "$(dirname "$WASM_PATH")" && pwd)/$(basename "$WASM_PATH")"
 
 cat <<EOF
 ============================================================
- MiniWarehouse Brick-5C.6 dependency-DAG Wasm sweep
+ MiniWarehouse Brick-5C.7 READY-DAG + block-local-MVCC Wasm sweep
 ============================================================
 warehouses:            $WAREHOUSES
 fixed districts/wh:    10

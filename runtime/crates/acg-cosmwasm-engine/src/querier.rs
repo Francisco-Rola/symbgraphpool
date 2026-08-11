@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cosmwasm_std::{
     from_json, to_json_binary, AllBalanceResponse, BalanceResponse, BankQuery, Binary, Coin,
@@ -8,6 +9,7 @@ use cosmwasm_vm::{BackendError, BackendResult, GasInfo, Querier};
 
 use crate::engine::{query_contract_shared, EngineCore};
 use crate::error::EngineError;
+use crate::parallel::ExecutionHotPathDiagnostics;
 use crate::state::SharedTx;
 use crate::types::{Address, BlockContext};
 
@@ -17,6 +19,7 @@ pub(crate) struct EngineQuerier {
     caller_contract: Address,
     block: BlockContext,
     depth: u32,
+    diagnostics: Option<Arc<ExecutionHotPathDiagnostics>>,
 }
 
 impl EngineQuerier {
@@ -27,12 +30,14 @@ impl EngineQuerier {
         block: BlockContext,
         depth: u32,
     ) -> Self {
+        let diagnostics = tx.lock().diagnostics();
         Self {
             core,
             tx,
             caller_contract,
             block,
             depth,
+            diagnostics,
         }
     }
 }
@@ -43,10 +48,15 @@ impl Querier for EngineQuerier {
         request: &[u8],
         _gas_limit: u64,
     ) -> BackendResult<SystemResult<ContractResult<Binary>>> {
+        let started = Instant::now();
+        let mut lock_wait = Duration::ZERO;
         let gas = GasInfo::with_externally_used(request.len() as u64);
         let parsed: QueryRequest<Empty> = match from_json(request) {
             Ok(parsed) => parsed,
             Err(error) => {
+                if let Some(diagnostics) = &self.diagnostics {
+                    diagnostics.record_host_query(started.elapsed(), lock_wait);
+                }
                 return (
                     Ok(SystemResult::Err(SystemError::InvalidRequest {
                         error: error.to_string(),
@@ -60,18 +70,20 @@ impl Querier for EngineQuerier {
         let response = match parsed {
             QueryRequest::Bank(BankQuery::Balance { address, denom }) => {
                 let address = Address::new(address);
-                let amount =
-                    self.tx
-                        .lock()
-                        .balance(&address, &denom, &self.caller_contract, self.depth);
+                let lock_started = Instant::now();
+                let mut tx = self.tx.lock();
+                lock_wait += lock_started.elapsed();
+                let amount = tx.balance(&address, &denom, &self.caller_contract, self.depth);
+                drop(tx);
                 serialize_contract_response(&BalanceResponse::new(Coin::new(amount.u128(), denom)))
             }
             QueryRequest::Bank(BankQuery::AllBalances { address }) => {
                 let address = Address::new(address);
-                let balances =
-                    self.tx
-                        .lock()
-                        .all_balances(&address, &self.caller_contract, self.depth);
+                let lock_started = Instant::now();
+                let mut tx = self.tx.lock();
+                lock_wait += lock_started.elapsed();
+                let balances = tx.all_balances(&address, &self.caller_contract, self.depth);
+                drop(tx);
                 serialize_contract_response(&AllBalanceResponse::new(balances))
             }
             QueryRequest::Wasm(WasmQuery::Raw { contract_addr, key }) => {
@@ -81,11 +93,13 @@ impl Querier for EngineQuerier {
                         addr: contract_addr,
                     })
                 } else {
-                    let value = self
-                        .tx
-                        .lock()
+                    let lock_started = Instant::now();
+                    let mut tx = self.tx.lock();
+                    lock_wait += lock_started.elapsed();
+                    let value = tx
                         .storage_get(&target, key.as_slice(), self.depth + 1)
                         .unwrap_or_default();
+                    drop(tx);
                     SystemResult::Ok(ContractResult::Ok(Binary::new(value)))
                 }
             }
@@ -109,6 +123,9 @@ impl Querier for EngineQuerier {
                         SystemResult::Ok(ContractResult::Err(error))
                     }
                     Err(error) => {
+                        if let Some(diagnostics) = &self.diagnostics {
+                            diagnostics.record_host_query(started.elapsed(), lock_wait);
+                        }
                         return (Err(BackendError::user_err(error.to_string())), gas);
                     }
                 }
@@ -118,6 +135,9 @@ impl Querier for EngineQuerier {
             }),
         };
 
+        if let Some(diagnostics) = &self.diagnostics {
+            diagnostics.record_host_query(started.elapsed(), lock_wait);
+        }
         (Ok(response), gas)
     }
 }

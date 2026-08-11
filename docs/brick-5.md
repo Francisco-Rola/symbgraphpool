@@ -58,29 +58,16 @@ Blind writes deliberately do not create read dependencies. Therefore a later can
 Brick 5B also introduces reuse/validation/replay metrics. Actual worker parallelism and wall-clock speedup remain Brick 5C/5E concerns.
 
 
-## Brick 5C: bounded parallel wave execution
+## Brick 5C: historical strict-wave prototype
 
-Brick 5C places a bounded Rayon worker pool underneath the 5A speculative receipt API and the 5B
-validator/replay coordinator. `CosmWasmEngine::execute_parallel_waves` consumes the canonical block
-transaction list plus Brick-4-style waves expressed as transaction IDs. It validates the complete
-plan before execution, captures one immutable snapshot per wave, executes every transaction in that
-wave concurrently up to the configured worker bound, and then drains every available receipt in
-canonical block order.
+Brick 5C originally introduced a bounded Rayon strict-wave executor to prove that detached receipts
+could execute concurrently and still reconcile through the Brick-5B canonical validator. That
+prototype served its purpose but exposed two bad production properties: global wave barriers and a
+contiguous-prefix state model that could leave already-completed predecessors invisible.
 
-The launch model intentionally has a strict wave barrier: all speculative tasks in wave N finish
-before wave N+1 is launched. A receipt from an earlier wave may remain pending when an earlier
-canonical predecessor has not been launched yet; once that predecessor becomes available, the 5B
-validator either reuses or replays the pending receipt against the now-canonical predecessor state.
-Worker completion order therefore has no consensus effect.
-
-`ParallelSpeculativeExecutionMetrics` records worker count, wave widths, 5B reuse/replay counters,
-and two early equal-cost planning bounds: exposed parallelism (`transactions / waves`) and a
-worker-aware strict-barrier theoretical speedup based on `sum(ceil(wave_width / workers))`. These are
-not wall-clock speedup claims. Brick 5E will add cost-aware theoretical bounds, worker busy/idle
-time, actual execution timings, realization efficiency, and replay tax.
-
-Brick 5C deliberately does not yet feed validation/replay evidence back into the adaptive graph;
-that remains Brick 5D.
+The strict-wave execution API and Rayon-based execution code were removed in Brick 5C.7. Scheduler waves
+remain only as diagnostic dependency levels; they are not runtime barriers. Canonical correctness is
+still provided by the Brick-5B concrete dependency validator/replay path.
 
 ## Brick 5C.5: split-phase consensus timeline with post-commit speculation
 
@@ -155,9 +142,10 @@ historical false-predicate override, and persisted runtime-discovered topology r
 even when their posterior falls below that threshold. This lets execution evidence soften a known
 dependency without silently deleting it from the graph.
 
-The speculative executor publishes each completed successful receipt as a temporary state version
-tagged by canonical transaction index. When transaction `i` launches, it forks the committed block
-base and applies every *completed* successful version with canonical index `< i` in canonical order.
+The 5C.6 logical model publishes each completed successful receipt as a temporary state version
+tagged by canonical transaction index. Its first physical implementation materialized each launch
+by deep-copying the committed base and replaying all completed earlier-canonical write sets. Brick
+5C.7 keeps the semantics but replaces that expensive materialization with block-local MVCC.
 Consequently:
 
 - a future-canonical transaction can finish physically before `i` without leaking its writes
@@ -166,8 +154,8 @@ Consequently:
   transactions are still running;
 - unrelated earlier-canonical work is allowed to race, which is deliberate speculation rather than
   a global-prefix barrier; and
-- final prepared state projection remains deterministic because detached receipts are applied in
-  canonical order.
+- post-consensus canonical reconciliation remains deterministic because detached receipts are
+  validated and committed in canonical order.
 
 Soft edges have two outcomes during scheduling. If the risk budget accepts a same-level placement,
 the pair executes speculatively with no dependency. If the scheduler separates the pair, it emits a
@@ -190,30 +178,47 @@ The MiniWarehouse benchmark exposes `ACG_MW_SYMBOLIC_HARD_SOFTEN_AFTER` (default
 softening) and now reports dependency counts, pre-execution/replay-feedback time, dependency-DAG theoretical lower
 bounds, and invalidation attribution in terms of guarded versus unguarded predecessors.
 
+## Brick 5C.7: block-local persistent MVCC speculative state
+
+Brick 5C.7 removes the O(block-size²) state reconstruction cost measured in the first 5C.6
+implementation. One detached committed predecessor snapshot is shared by the whole predicted block.
+Successful transactions publish only their final storage/bank/contract deltas into a block-local
+multi-version index keyed by canonical transaction index.
+
+When transaction `i` becomes ready it captures a compact immutable visibility bit-mask of successful
+earlier-canonical transactions that had completed at launch. Point, range, bank, all-balances and
+contract-metadata reads lazily resolve the newest version whose writer index is `< i` and is present
+in that launch mask, then fall through to the immutable block base. Versions completed after launch
+remain invisible for the lifetime of that transaction, so speculative reads are repeatable. A
+future-canonical version can never flow backward.
+
+This removes all per-transaction full-world copies and all historical write-set replay from the
+READY-DAG path. Transaction-local writes remain private overlays until the receipt completes. A
+successful receipt publishes its final delta before its dependency successors are unblocked. Failed
+transactions publish no state. The predictive dependency graph still controls readiness only;
+concrete receipt validation/replay remains the correctness authority for missed Soft/Unknown
+conflicts.
+
+The deprecated strict-wave executor, predicted-successor chaining API, strict-wave theoretical
+metrics and Rayon execution code were removed. The exact Rayon workspace pins are retained only as Rust-1.75 dependency-resolution guards; `SpeculativeWave` is retained only as a scheduler
+level/diagnostic container because candidate scheduling still reports levels.
+
+The MiniWarehouse report now measures MVCC launch-mask cost, version publication, worker readiness,
+contract/receipt work and worker concurrency. It explicitly reports zero per-transaction full-world
+deep copies and zero historical write-set replays for the dependency executor.
+
 ### TODO before Brick 5D
 
-- **Validate the dependency/versioned executor on real MiniWarehouse Wasm.** Re-run the 4/16
-  warehouse block-size and worker sweeps. The first acceptance target is that known symbolic hard
-  predecessors stop producing stale receipts merely because an unrelated canonical prefix is
-  incomplete.
-- **Profile version construction and worker utilization.** The first implementation forks the
-  committed base and reapplies completed earlier-canonical write sets at transaction launch. This is
-  deliberately simple and correctness-oriented; replace it with a more efficient MVCC/version
-  index or persistent state overlay if snapshot reconstruction dominates pre-execution cost.
-- **Investigate residual `Unknown` predicates.** In particular, explain MiniWarehouse
-  `NewOrder <-> NewOrder` and Delivery-related Unknowns after dependency-order replay has been
-  removed as a confounder. Predicate improvements should target graph precision/parallel exposure,
-  not mask executor-ordering bugs.
+- **Validate MVCC performance on real MiniWarehouse Wasm.** Re-run the 16-warehouse/B200 W1/W2/W4/W8
+  diagnostic sweep first, then the block-size/contention sweep if correctness/reuse remain stable.
+- **Investigate remaining Wasm concurrency inflation.** After state reconstruction is removed,
+  compare aggregate contract/receipt cost against serial transaction work as worker count rises.
+- **Investigate residual `Unknown` predicates.** Target graph precision and parallel exposure only
+  after the execution-efficiency numbers are stable.
 - **Parallel post-consensus validation/replay.** Keep concrete receipt dependencies as the
-  correctness authority. The predictive graph may partition or prioritize work but may never skip a
-  concrete dependency check.
-- **Snapshot-aware planning metadata.** Generalize adapter/binding so N+1 planning can safely
-  overlap N validation even when N creates or removes contract instances. MiniWarehouse uses one
-  stable contract instance.
-- **Persistent shared worker pool.** Remove per-block/thread-pool construction overhead after the
-  ready-DAG behavior is validated.
-- **Partial deadline completion.** Preserve receipts completed by the decision deadline rather than
-  treating the whole predicted block as all-or-nothing when deadline enforcement is disabled.
-- **Only then broaden Brick 5D learning policy.** The 5C.6 hard-to-soft loop is intentionally narrow:
-  known topology starts Hard and concrete execution may soften it. Broader adaptive policy should be
-  evaluated only after this execution model has stable correctness and performance numbers.
+  correctness authority.
+- **Snapshot-aware planning metadata.** Generalize N+1 planning overlap for contract create/remove.
+- **Partial deadline completion.** Preserve receipts completed by the decision deadline when
+  deadline enforcement is disabled.
+- **Only then broaden Brick 5D learning policy.** The hard-to-soft loop remains intentionally
+  narrow until this execution model has stable correctness and performance numbers.

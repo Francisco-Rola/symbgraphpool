@@ -5,6 +5,8 @@ use cosmwasm_std::{Coin, Uint128};
 use parking_lot::{Mutex, RwLock};
 
 use crate::error::{EngineError, EngineResult};
+use crate::mvcc::MvccReadView;
+use crate::parallel::ExecutionHotPathDiagnostics;
 use crate::speculative::{BalanceWrite, ReadDependency, StateWriteSet, StorageWrite};
 use crate::types::{AccessKind, AccessRecord, Address, CodeId, ContractMetadata, TransactionId};
 
@@ -21,6 +23,8 @@ pub(crate) type SharedTx = Arc<Mutex<TransactionState>>;
 #[derive(Clone)]
 pub(crate) struct TransactionState {
     pub base: SharedWorld,
+    pub mvcc_view: Option<MvccReadView>,
+    diagnostics: Option<Arc<ExecutionHotPathDiagnostics>>,
     pub transaction_id: TransactionId,
     pub storage_writes: BTreeMap<(Address, Vec<u8>), Option<Vec<u8>>>,
     pub balance_writes: BTreeMap<(Address, String), Uint128>,
@@ -34,6 +38,8 @@ impl TransactionState {
     pub fn new(base: SharedWorld, transaction_id: TransactionId) -> Self {
         Self {
             base,
+            mvcc_view: None,
+            diagnostics: None,
             transaction_id,
             storage_writes: BTreeMap::new(),
             balance_writes: BTreeMap::new(),
@@ -42,6 +48,99 @@ impl TransactionState {
             read_dependencies: Vec::new(),
             next_instance_ordinal: 0,
         }
+    }
+
+    pub fn new_mvcc(
+        base: SharedWorld,
+        mvcc_view: MvccReadView,
+        transaction_id: TransactionId,
+    ) -> Self {
+        let diagnostics = mvcc_view.diagnostics();
+        let mut state = Self::new(base, transaction_id);
+        state.mvcc_view = Some(mvcc_view);
+        state.diagnostics = Some(diagnostics);
+        state
+    }
+
+    pub(crate) fn diagnostics(&self) -> Option<Arc<ExecutionHotPathDiagnostics>> {
+        self.diagnostics.clone()
+    }
+
+    fn base_contract(&self, address: &Address) -> Option<ContractMetadata> {
+        self.mvcc_view.as_ref().map_or_else(
+            || self.base.read().contracts.get(address).cloned(),
+            |view| view.contract(address),
+        )
+    }
+
+    fn base_storage_get(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>> {
+        self.mvcc_view.as_ref().map_or_else(
+            || {
+                self.base
+                    .read()
+                    .storage
+                    .get(contract)
+                    .and_then(|entries| entries.get(key).cloned())
+            },
+            |view| view.storage_get(contract, key),
+        )
+    }
+
+    fn base_storage_range(
+        &self,
+        contract: &Address,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        self.mvcc_view.as_ref().map_or_else(
+            || {
+                self.base
+                    .read()
+                    .storage
+                    .get(contract)
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter(|(key, _)| {
+                                start.map_or(true, |start| key.as_slice() >= start)
+                                    && end.map_or(true, |end| key.as_slice() < end)
+                            })
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            },
+            |view| view.storage_range(contract, start, end),
+        )
+    }
+
+    fn base_balance(&self, address: &Address, denom: &str) -> Uint128 {
+        self.mvcc_view.as_ref().map_or_else(
+            || {
+                self.base
+                    .read()
+                    .balances
+                    .get(&(address.clone(), denom.to_owned()))
+                    .copied()
+                    .unwrap_or_default()
+            },
+            |view| view.balance(address, denom),
+        )
+    }
+
+    fn base_balances(&self, address: &Address) -> BTreeMap<String, Uint128> {
+        self.mvcc_view.as_ref().map_or_else(
+            || {
+                self.base
+                    .read()
+                    .balances
+                    .iter()
+                    .filter(|((owner, _), _)| owner == address)
+                    .map(|((_, denom), amount)| (denom.clone(), *amount))
+                    .collect()
+            },
+            |view| view.balances(address),
+        )
     }
 
     pub fn allocate_contract_address(&mut self, prefix: &str) -> EngineResult<Address> {
@@ -60,7 +159,7 @@ impl TransactionState {
         if let Some(metadata) = self.created_contracts.get(address).cloned() {
             return Some(metadata);
         }
-        let metadata = self.base.read().contracts.get(address).cloned();
+        let metadata = self.base_contract(address);
         self.read_dependencies
             .push(ReadDependency::ContractMetadata {
                 address: address.clone(),
@@ -83,12 +182,7 @@ impl TransactionState {
         let value = if let Some(value) = self.storage_writes.get(&overlay_key) {
             value.clone()
         } else {
-            let value = self
-                .base
-                .read()
-                .storage
-                .get(contract)
-                .and_then(|entries| entries.get(key).cloned());
+            let value = self.base_storage_get(contract, key);
             self.read_dependencies.push(ReadDependency::Storage {
                 contract: contract.clone(),
                 key: key.to_vec(),
@@ -157,13 +251,7 @@ impl TransactionState {
             reverted: false,
         });
 
-        let base_entries = self
-            .base
-            .read()
-            .storage
-            .get(contract)
-            .cloned()
-            .unwrap_or_default();
+        let base_entries = self.base_storage_range(contract, start, end);
         let masked_keys: Vec<Vec<u8>> = self
             .storage_writes
             .keys()
@@ -227,13 +315,7 @@ impl TransactionState {
         let value = if let Some(value) = self.balance_writes.get(&key).copied() {
             value
         } else {
-            let value = self
-                .base
-                .read()
-                .balances
-                .get(&key)
-                .copied()
-                .unwrap_or_default();
+            let value = self.base_balance(address, denom);
             self.read_dependencies.push(ReadDependency::BankBalance {
                 address: address.clone(),
                 denom: denom.to_owned(),
@@ -284,15 +366,11 @@ impl TransactionState {
             .map(|(_, denom)| denom.clone())
             .collect();
         let masked: BTreeSet<String> = masked_denoms.iter().cloned().collect();
-        let base_balances: Vec<(String, u128)> = self
-            .base
-            .read()
-            .balances
+        let visible_balances = self.base_balances(address);
+        let base_balances: Vec<(String, u128)> = visible_balances
             .iter()
-            .filter(|((owner, denom), amount)| {
-                owner == address && !amount.is_zero() && !masked.contains(denom.as_str())
-            })
-            .map(|((_, denom), amount)| (denom.clone(), amount.u128()))
+            .filter(|(denom, amount)| !amount.is_zero() && !masked.contains(denom.as_str()))
+            .map(|(denom, amount)| (denom.clone(), amount.u128()))
             .collect();
         self.read_dependencies
             .push(ReadDependency::BankAllBalances {
@@ -301,14 +379,7 @@ impl TransactionState {
                 masked_denoms,
             });
 
-        let base_denoms: BTreeSet<String> = self
-            .base
-            .read()
-            .balances
-            .keys()
-            .filter(|(owner, _)| owner == address)
-            .map(|(_, denom)| denom.clone())
-            .collect();
+        let base_denoms: BTreeSet<String> = visible_balances.keys().cloned().collect();
         let overlay_denoms = self
             .balance_writes
             .keys()

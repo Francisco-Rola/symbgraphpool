@@ -1,0 +1,280 @@
+
+running 1 test
+test miniwarehouse_prints_expected_vs_realized_parallelism ... 
+============================================================
+ MiniWarehouse Brick-5C.7 block-local MVCC measurement
+============================================================
+runtime model:                 real MiniWarehouse CosmWasm Wasm
+Wasm artifact:                 /home/adminlinux/projects/symbgraphpool/benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_miniwarehouse.wasm
+Wasm bytes:                    2049510
+total transactions:            1000
+blocks:                        5
+max tx / block:                200
+block interval:                700.000 ms
+consensus window:              700.000 ms
+arrival rate:                  285.71 tx/s
+initial mempool backlog:       600 tx
+total worker budget:           2
+post-consensus validation:     1 worker (serial)
+post-commit preexec workers:   2
+dependency executor:           READY-DAG / block-local MVCC
+symbolic hard soften after:    8 concrete observations
+warehouses:                    16
+districts / warehouse:         10
+customers / district:          3000
+items / warehouse:             100000
+N+1 graph planning overlaps N validate: YES
+N+1 preexecution overlaps N validate: NO
+preexecution snapshots committed N state: YES
+require preexec within consensus: YES
+overlapped planning transitions:  4
+
+Sparse Wasm bootstrap (not included in measured block timings)
+  seed transactions / engine:       3193
+  touched warehouses:                  16
+  touched districts:                  158
+  touched customers:                  878
+  touched stock keys:                2141
+  both engines bootstrap wall:    506.489 ms
+
+Workload
+  delivery                 40
+  new_order               457
+  payment                 426
+  restock                  77
+
+Mempool / inclusion latency (virtual time)
+  p50 admission -> proposal:     2100.000 ms
+  p95 admission -> proposal:     2709.000 ms
+  p50 admission -> decision:     2800.000 ms
+  p95 admission -> decision:     3409.000 ms
+
+Prediction / planning / post-commit preexecution (all blocks)
+  adapter/binding:                  4.044 ms
+  candidate graph:                320.507 ms
+  scheduler:                        1.268 ms
+  schedule validation:              1.322 ms
+  plan conversion:                  0.668 ms
+  planning hidden by prev N:       14.862 ms
+  planning overhang after N:      312.947 ms
+  post-commit pre-execution:      209.610 ms
+  preexecution feedback:           24.561 ms
+  post-replay feedback:             0.007 ms
+  avg consensus-critical prep:    109.424 ms
+  average consensus budget:         15.6%
+  p50 critical prep / block:      102.497 ms
+  p95 critical prep / block:      132.000 ms
+  deadline hit rate:               100.0%
+  deadline misses:                      0
+
+Candidate graph across real block boundaries
+  possible within-block pairs:      99500
+  materialized edges:               11666
+  edge density:                    11.72%
+  predicate True:                    6473 ( 55.5%)
+  predicate Unknown:                 5193 ( 44.5%)
+  historical False override:            0
+  Low / Soft / Hard:           0 / 2563 / 9103
+  concrete profile-pair predicate diagnostics:
+    profile pair                                 total    True Unknown   False     Low    Soft    Hard     Unk%
+    execute::NewOrder <-> execute::Payment        4422    4422       0       0       0       0    4422     0.0%
+    execute::Delivery <-> execute::NewOrder       3611       0    3611       0       0    1232    2379   100.0%
+    execute::Payment <-> execute::Payment         2050    2050       0       0       0       0    2050     0.0%
+    execute::Delivery <-> execute::Payment        1176       0    1176       0       0    1176       0   100.0%
+    execute::NewOrder <-> execute::NewOrder        239       0     239       0       0      64     175   100.0%
+    execute::Delivery <-> execute::Delivery        167       0     167       0       0      91      76   100.0%
+    execute::NewOrder <-> execute::Restock           1       1       0       0       0       0       1     0.0%
+
+Schedule / exposed parallelism
+  waves:                              227
+  average wave width:                4.41
+  p50 wave width:                       2
+  p95 wave width:                      17
+  max wave width:                      34
+  exposed N/waves:                   4.41x
+  execution dependencies:           11666
+  hard execution dependencies:       9103
+
+Pre-consensus speculative execution acceleration
+  serial-equivalent work:         221.447 ms
+  actual parallel preexecute:     209.610 ms
+  dependency-DAG lower bound:     130.758 ms
+  theoretical speedup:               1.69x
+  REALIZED preexec speedup:          1.06x
+  preexec/theoretical:              62.4%
+  consensus-critical prep:        547.118 ms
+
+Block-local MVCC dependency executor cost diagnosis
+  NOTE: worker-stage times below are aggregate across workers and overlap in wall time.
+  engine dependency total:        203.469 ms
+  dependency plan/setup:            1.767 ms
+  worker phase wall:              201.642 ms
+  aggregate ready/lock wait:      115.785 ms
+  aggregate visibility capture:     0.169 ms
+  aggregate contract+receipt:     278.513 ms
+  aggregate publish/unblock:        4.898 ms
+  aggregate measured stages:      399.365 ms
+  serial tx work sum:             221.293 ms
+  speculative contract cost / serial:   1.26x
+  effective contract concurrency:       1.38x
+  worker busy capacity:                70.3%
+  worker ready/wait capacity:          28.7%
+  validator/base-snapshot wrapper:     6.141 ms
+  executor coordinator residual:      0.060 ms
+  max in-flight transactions:            2
+  per-tx full-world deep copies:         0
+  historical write-set replays:          0
+  visibility masks captured:          1000
+  visibility words copied:            2060
+  visibility words / tx:              2.06
+  MVCC storage versions published:    8049
+  MVCC balance versions published:       0
+  MVCC contract versions published:      0
+  total MVCC versions published:       8049
+
+Contract/runtime hot-path diagnosis
+  NOTE: nested times below overlap; host/MVCC callbacks occur inside Wasm entrypoint time.
+  aggregate request execution:      258.406 ms
+  aggregate receipt finalization:    14.944 ms
+  outer contract timing residual:     5.162 ms
+  aggregate pre-contract setup:        1.082 ms
+  aggregate response processing:       0.615 ms
+  aggregate outcome assembly:          2.862 ms
+  aggregate backend construction:      0.072 ms
+  aggregate Wasm instance acquire:    52.821 ms
+  aggregate Wasm entrypoint:         177.485 ms
+  aggregate Wasm recycle:             22.216 ms
+  aggregate Wasm runtime total:      252.522 ms
+  aggregate host storage callbacks:   37.584 ms
+  aggregate host queries:              0.000 ms
+  aggregate tx-lock wait in host:      1.248 ms
+  aggregate MVCC storage point:       11.982 ms
+  aggregate MVCC storage range:        6.371 ms
+  aggregate MVCC balance point:        0.000 ms
+  aggregate MVCC all balances:         0.000 ms
+  aggregate MVCC contract lookup:      0.475 ms
+  aggregate MVCC lock wait:            1.666 ms
+  aggregate MVCC publish:              3.264 ms
+  Wasm instance acquires:               1000
+  Wasm entrypoint calls:                1000 (1.00/tx)
+  Wasm instance recycles:               1000
+  Wasm cache pinned/mem/fs/miss:  1000 / 0 / 0 / 0
+  host storage get/scan/next/set/remove: 4915 / 40 / 34844 / 8009 / 40
+  host storage ops / tx:               47.85
+  host query calls:                        0
+  MVCC storage point reads:            39719
+  MVCC point version hits:              9535
+  MVCC point base fallbacks:           30184
+  MVCC storage range reads:               40
+  MVCC balance/all/contract reads: 0 / 0 / 2000
+  receipt access records:              47808
+  receipt read dependencies:           41759
+  receipt storage/balance/contract writes: 8049 / 0 / 0
+
+Prediction quality
+  predicted receipts:                1000
+  matched decided txs:               1000
+  discarded predictions:                0
+  missing predictions:                  0
+  precision:                       100.0%
+  coverage:                        100.0%
+
+Post-consensus critical-path acceleration
+  SERIAL baseline:                221.447 ms
+  adaptive receipt matching:        0.291 ms
+  adaptive validation:             10.874 ms
+  adaptive replay/missing:          0.000 ms
+  adaptive reused commit:           7.516 ms
+  reconciliation bookkeeping:       0.205 ms
+  executor/report wrapper:          1.790 ms
+  canonical deadline fallback:      0.000 ms
+  timing accounting gap:            0.000 ms
+  ADAPTIVE total:                  20.677 ms
+  POST-CONSENSUS SPEEDUP:           10.71x
+
+Speculation quality
+  speculative results:               1000
+  reused results:                    1000
+  invalidated results:                  0
+  replayed transactions:                0
+  no usable receipt:                    0
+  reuse rate:                      100.0%
+  invalidation rate:                 0.0%
+  replay rate:                       0.0%
+
+Invalidation attribution (validation conflicts, not just transactions)
+  invalidated transactions:             0
+  concrete validation conflicts:         0
+  txs with unguarded predecessor:        0
+  txs with cascade candidate:           0
+  txs with unattributed conflict:       0
+  guarded by execution dependency:       0
+  unguarded predecessor conflicts:       0
+  cascade: guarded predecessor replayed:    0
+  guarded+reused unexplained:            0
+  unattributed conflicts:                0
+  writer level relation same/earlier/later: 0 / 0 / 0
+  cause breakdown:
+    (none)
+  predecessor -> invalidated operation:
+    (none)
+  failing dependency:
+    (none)
+  candidate relation for attributed predecessor:
+    (none)
+  execution guard for attributed predecessor:
+    (none)
+  invalidation rate by speculative wave width:
+       width        txs  invalidated       rate
+           1         88            0       0.0%
+           2         82            0       0.0%
+           3         60            0       0.0%
+           4         48            0       0.0%
+           5         75            0       0.0%
+           6         48            0       0.0%
+           7         49            0       0.0%
+           8         40            0       0.0%
+           9         18            0       0.0%
+          10         20            0       0.0%
+          11         22            0       0.0%
+          12         72            0       0.0%
+          13         26            0       0.0%
+          14         28            0       0.0%
+          15         45            0       0.0%
+          17         51            0       0.0%
+          19         38            0       0.0%
+          21         21            0       0.0%
+          22         22            0       0.0%
+          23         23            0       0.0%
+          27         27            0       0.0%
+          30         30            0       0.0%
+          33         33            0       0.0%
+          34         34            0       0.0%
+  invalidation rate by canonical position decile:
+      decile        txs  invalidated       rate
+      0- 10%        100            0       0.0%
+     10- 20%        100            0       0.0%
+     20- 30%        100            0       0.0%
+     30- 40%        100            0       0.0%
+     40- 50%        100            0       0.0%
+     50- 60%        100            0       0.0%
+     60- 70%        100            0       0.0%
+     70- 80%        100            0       0.0%
+     80- 90%        100            0       0.0%
+     90-100%        100            0       0.0%
+============================================================
+NOTE: all block/consensus/mempool times are virtual protocol time; only computation is measured with wall-clock Instant.
+NOTE: ACG_MW_CONSENSUS_MS is an independent configurable design window for completing post-commit pre-execution; it is not constrained to the block batching interval.
+NOTE: only N+1 graph/schedule planning may overlap validation of N. N+1 pre-execution starts after N commits and snapshots the actual canonical post-N state.
+NOTE: the measured execution path uses the real MiniWarehouse CosmWasm Wasm artifact; sparse bootstrap only avoids initializing untouched keys in the large benchmark domain.
+NOTE: pre-consensus speculative-execution speedup and post-consensus critical-path speedup are separate metrics and are not divided into one another.
+NOTE: invalidation predecessor attribution selects the nearest canonical predecessor whose prepared write set touches the concrete failed dependency.
+NOTE: an explicit execution dependency guarantees that predecessor completed before the victim launched; a replayed guarded predecessor is therefore reported as a cascade candidate.
+NOTE: scheduler waves are diagnostic dependency levels only. The executor launches ready transactions across levels without global barriers and resolves completed earlier-canonical versions lazily through block-local MVCC.
+NOTE: dependency cost diagnostics intentionally measure the current implementation's per-transaction deep snapshot clone plus replay of completed earlier versions; aggregate worker-stage times overlap and must not be summed as wall-clock components.
+NOTE: the current post-consensus validator is intentionally single-threaded. Parallel validation remains a future Brick-5 optimization; these diagnostics come first.
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.51s
+

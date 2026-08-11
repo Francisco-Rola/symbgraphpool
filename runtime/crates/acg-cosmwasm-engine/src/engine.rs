@@ -12,19 +12,19 @@ use cosmwasm_vm::{
     call_execute, call_instantiate, call_query, call_reply, Backend, InstanceOptions,
 };
 use parking_lot::{Condvar, Mutex, RwLock};
-use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
 use sha2::{Digest, Sha256};
 
 use crate::api::{validate_address, EngineApi};
 use crate::cache::{WasmCacheConfig, WasmCacheMetrics, WasmModuleCache};
 use crate::error::{EngineError, EngineResult};
+use crate::mvcc::{BlockMvccState, MvccReadView, VisibilityMask};
 use crate::native::{NativeCallContext, NativeContract};
 use crate::parallel::{
-    ParallelExecutionConfig, ParallelSpeculativeBlockOutcome, ParallelSpeculativeExecutionMetrics,
-    PostConsensusTimings, PredictionMatchMetrics, PreparedSpeculativeBlock,
-    ReconciliationDependencyEvidence, SpeculativeDependency, SpeculativeDependencyClass,
-    SpeculativeWave, SplitPhaseSpeculativeBlockOutcome,
+    ContractExecutionDiagnostics, DependencyPreexecutionDiagnostics, ExecutionHotPathDiagnostics,
+    ParallelExecutionConfig, ParallelSpeculativeExecutionMetrics, PostConsensusTimings,
+    PredictionMatchMetrics, PreparedSpeculativeBlock, ReconciliationDependencyEvidence,
+    SpeculativeDependency, SpeculativeDependencyClass, SpeculativeWave,
+    SplitPhaseSpeculativeBlockOutcome,
 };
 use crate::querier::EngineQuerier;
 use crate::speculative::{
@@ -331,6 +331,67 @@ impl CosmWasmEngine {
         })
     }
 
+    fn execute_speculative_mvcc(
+        &self,
+        base: SharedWorld,
+        view: MvccReadView,
+        block: BlockContext,
+        request: ExecutionRequest,
+        diagnostics: Arc<ExecutionHotPathDiagnostics>,
+    ) -> EngineResult<SpeculativeTxResult> {
+        let transaction_id = request.transaction_id();
+        let receipt_block = block.clone();
+        let receipt_request = request.clone();
+        let request_started = Instant::now();
+        let (result, tx) = self.execute_request_on_mvcc(base, view, block, request);
+        diagnostics.record_request_execution(request_started.elapsed());
+
+        let finalize_started = Instant::now();
+        let state = tx.lock();
+        let read_dependencies = state.read_dependencies.clone();
+        let write_set = if result.is_ok() {
+            state.write_set()
+        } else {
+            StateWriteSet::default()
+        };
+        let mut accesses = state.accesses.clone();
+        drop(state);
+
+        let status = match result {
+            Ok(outcome) => SpeculativeExecutionStatus::Succeeded(SpeculativeExecutionOutcome {
+                contract: outcome.contract,
+                events: outcome.events,
+                data: outcome.data,
+                created_contracts: outcome.created_contracts,
+            }),
+            Err(error) => {
+                for access in &mut accesses {
+                    access.reverted = true;
+                }
+                SpeculativeExecutionStatus::Failed(error)
+            }
+        };
+        diagnostics.record_receipt_finalization(
+            finalize_started.elapsed(),
+            accesses.len(),
+            read_dependencies.len(),
+            write_set.storage.len(),
+            write_set.balances.len(),
+            write_set.created_contracts.len(),
+        );
+
+        Ok(SpeculativeTxResult {
+            transaction_id,
+            block: receipt_block,
+            request: receipt_request,
+            status,
+            accesses,
+            read_dependencies,
+            write_set,
+            engine_identity: self.core.engine_identity.clone(),
+        })
+    }
+
     /// Validate a detached speculative receipt against the current canonical world state.
     pub fn validate_speculative(
         &self,
@@ -446,132 +507,6 @@ impl CosmWasmEngine {
         })
     }
 
-    /// Pre-execute a predicted block without mutating canonical state.
-    ///
-    /// This is the speculative half of the Brick-5C.5 split-phase pipeline. Every wave runs
-    /// through a bounded worker pool. As receipts become available, successful write sets are
-    /// applied only to a detached provisional snapshot in canonical-prefix order so later waves of
-    /// the *same block* can observe predicted predecessor effects. The MiniWarehouse 5C.5 pipeline
-    /// invokes this only after the previous block has canonically committed.
-    pub fn preexecute_parallel_waves(
-        &self,
-        config: ParallelExecutionConfig,
-        transactions: Vec<CanonicalTransaction>,
-        waves: Vec<SpeculativeWave>,
-    ) -> EngineResult<PreparedSpeculativeBlock> {
-        let base = self.snapshot();
-        self.preexecute_parallel_waves_from_snapshot(&base, config, transactions, waves)
-    }
-
-    /// Same as [`Self::preexecute_parallel_waves`], but starts from an explicit detached snapshot.
-    ///
-    /// This explicit-snapshot overload remains useful for deterministic tests and controlled
-    /// experiments. The default 5C.5 pipeline does not execute block `N + 1` from block `N`'s
-    /// predicted successor; it waits for canonical commit and calls [`Self::preexecute_parallel_waves`].
-    pub fn preexecute_parallel_waves_from_snapshot(
-        &self,
-        base: &StateSnapshot,
-        config: ParallelExecutionConfig,
-        transactions: Vec<CanonicalTransaction>,
-        waves: Vec<SpeculativeWave>,
-    ) -> EngineResult<PreparedSpeculativeBlock> {
-        if !Arc::ptr_eq(&self.core, &base.core) {
-            return Err(EngineError::InvalidConfiguration(
-                "state snapshot belongs to a different CosmWasm engine".to_owned(),
-            ));
-        }
-        let canonical_bindings = validate_speculative_wave_plan(config, &transactions, &waves)?;
-        let pool = build_speculative_pool(config)?;
-        let wave_widths = waves.iter().map(SpeculativeWave::len).collect::<Vec<_>>();
-        let predicted_successor = base.fork();
-        let mut receipts = BTreeMap::new();
-        let mut provisional_cursor = 0_usize;
-
-        for wave in waves {
-            let wave_snapshot = predicted_successor.fork();
-            let wave_transactions = wave
-                .transaction_ids
-                .iter()
-                .map(|transaction_id| {
-                    canonical_bindings
-                        .get(transaction_id)
-                        .expect("wave plan was validated before execution")
-                        .clone()
-                })
-                .collect::<Vec<_>>();
-
-            let wave_receipts = pool.install(|| {
-                wave_transactions
-                    .into_par_iter()
-                    .map(|transaction| {
-                        self.execute_speculative(
-                            &wave_snapshot,
-                            transaction.block,
-                            transaction.request,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            });
-
-            for receipt in wave_receipts {
-                let receipt = receipt?;
-                let transaction_id = receipt.transaction_id;
-                if receipts.insert(transaction_id, receipt).is_some() {
-                    return Err(EngineError::Internal(format!(
-                        "duplicate speculative receipt for transaction ID {}",
-                        transaction_id.0
-                    )));
-                }
-            }
-
-            // Advance only the canonical prefix whose receipts are available. This avoids making
-            // a later canonical transaction visible to an earlier one merely because the scheduler
-            // placed the later transaction in an earlier speculative wave.
-            while provisional_cursor < transactions.len() {
-                let transaction_id = transactions[provisional_cursor].transaction_id();
-                let Some(receipt) = receipts.get(&transaction_id) else {
-                    break;
-                };
-                if receipt.is_success() {
-                    apply_write_set(&predicted_successor.state, &receipt.write_set);
-                }
-                provisional_cursor += 1;
-            }
-        }
-
-        if provisional_cursor != transactions.len() || receipts.len() != transactions.len() {
-            return Err(EngineError::Internal(
-                "validated speculative wave plan did not produce the complete predicted block"
-                    .to_owned(),
-            ));
-        }
-
-        let ordered_receipts = transactions
-            .iter()
-            .map(|transaction| {
-                receipts
-                    .remove(&transaction.transaction_id())
-                    .expect("every canonical transaction produced one receipt")
-            })
-            .collect::<Vec<_>>();
-
-        Ok(PreparedSpeculativeBlock {
-            predicted_transactions: transactions,
-            receipts: ordered_receipts,
-            metrics: ParallelSpeculativeExecutionMetrics {
-                workers: config.workers,
-                wave_widths,
-                speculative: SpeculativeExecutionMetrics {
-                    speculative_results: canonical_bindings.len() as u64,
-                    ..SpeculativeExecutionMetrics::default()
-                },
-                dependency_count: 0,
-                hard_dependency_count: 0,
-            },
-            predicted_successor,
-        })
-    }
-
     /// Pre-execute a predicted block with pairwise dependency-driven readiness and versioned
     /// speculative visibility.
     ///
@@ -600,6 +535,11 @@ impl CosmWasmEngine {
     }
 
     /// Explicit-snapshot variant of [`Self::preexecute_dependency_plan`].
+    ///
+    /// The detached predecessor snapshot is shared by the whole predicted block. Each transaction
+    /// captures only a compact launch-time visibility mask; reads lazily resolve the newest visible
+    /// block-local version older than the transaction's canonical index. This preserves the 5C.6
+    /// dependency semantics without per-transaction world clones or historical write-set replay.
     pub fn preexecute_dependency_plan_from_snapshot(
         &self,
         base: &StateSnapshot,
@@ -608,16 +548,19 @@ impl CosmWasmEngine {
         waves: Vec<SpeculativeWave>,
         dependencies: Vec<SpeculativeDependency>,
     ) -> EngineResult<PreparedSpeculativeBlock> {
+        let executor_started = Instant::now();
         if !Arc::ptr_eq(&self.core, &base.core) {
             return Err(EngineError::InvalidConfiguration(
                 "state snapshot belongs to a different CosmWasm engine".to_owned(),
             ));
         }
 
+        let setup_started = Instant::now();
         let validated =
             validate_speculative_dependency_plan(config, &transactions, &waves, &dependencies)?;
         let wave_widths = waves.iter().map(SpeculativeWave::len).collect::<Vec<_>>();
         let transaction_count = transactions.len();
+        let dependency_plan_setup = setup_started.elapsed();
         if transaction_count == 0 {
             return Ok(PreparedSpeculativeBlock {
                 predicted_transactions: transactions,
@@ -628,8 +571,12 @@ impl CosmWasmEngine {
                     speculative: SpeculativeExecutionMetrics::default(),
                     dependency_count: dependencies.len(),
                     hard_dependency_count: validated.hard_dependency_count,
+                    dependency_diagnostics: DependencyPreexecutionDiagnostics {
+                        executor_total: executor_started.elapsed(),
+                        dependency_plan_setup,
+                        ..DependencyPreexecutionDiagnostics::default()
+                    },
                 },
-                predicted_successor: base.fork(),
             });
         }
 
@@ -645,96 +592,169 @@ impl CosmWasmEngine {
                 remaining_predecessors: validated.remaining_predecessors,
                 successors: validated.successors,
                 receipts: (0..transaction_count).map(|_| None).collect(),
+                successful_completed: vec![0_u64; transaction_count.div_ceil(64)],
                 completed: 0,
                 in_flight: 0,
+                max_in_flight: 0,
                 failure: None,
             }),
             Condvar::new(),
         ));
+        let versions = Arc::new(BlockMvccState::default());
         let transactions = Arc::new(transactions);
         let worker_count = config.workers.min(transaction_count).max(1);
+        let worker_diagnostics = Arc::new(
+            (0..worker_count)
+                .map(|_| Mutex::new(DependencyWorkerDiagnostics::default()))
+                .collect::<Vec<_>>(),
+        );
+        let wasm_cache_before = self.wasm_cache_metrics();
 
+        let worker_phase_started = Instant::now();
         std::thread::scope(|scope| {
-            for _ in 0..worker_count {
+            for worker_index in 0..worker_count {
                 let shared = shared.clone();
+                let versions = versions.clone();
                 let transactions = transactions.clone();
-                scope.spawn(move || loop {
-                    let transaction_index = {
-                        let (state_lock, ready_changed) = &*shared;
-                        let mut state = state_lock.lock();
-                        loop {
-                            if state.failure.is_some() || state.completed == transaction_count {
-                                return;
-                            }
-                            if let Some(index) = state.ready.pop_first() {
-                                state.in_flight += 1;
-                                break index;
-                            }
-                            if state.in_flight == 0 {
-                                state.failure = Some(
-                                    "dependency-driven speculative execution reached a readiness deadlock"
-                                        .to_owned(),
-                                );
-                                ready_changed.notify_all();
-                                return;
-                            }
-                            ready_changed.wait(&mut state);
-                        }
-                    };
-
-                    // Snapshot all completed earlier-canonical versions at launch time. Hard and
-                    // scheduler-separated soft predecessors are guaranteed complete before the
-                    // transaction becomes ready; unrelated earlier transactions may still race,
-                    // which is intentional speculation and remains protected by concrete replay.
-                    let visible_write_sets = {
-                        let (state_lock, _) = &*shared;
-                        let state = state_lock.lock();
-                        state.receipts[..transaction_index]
-                            .iter()
-                            .filter_map(|receipt| receipt.as_ref())
-                            .filter(|receipt| receipt.is_success())
-                            .map(|receipt| receipt.write_set.clone())
-                            .collect::<Vec<_>>()
-                    };
-                    let snapshot = base.fork();
-                    for write_set in &visible_write_sets {
-                        apply_write_set(&snapshot.state, write_set);
-                    }
-
-                    let transaction = transactions[transaction_index].clone();
-                    let execution = self.execute_speculative(
-                        &snapshot,
-                        transaction.block,
-                        transaction.request,
-                    );
-
-                    let (state_lock, ready_changed) = &*shared;
-                    let mut state = state_lock.lock();
-                    state.in_flight = state.in_flight.saturating_sub(1);
-                    match execution {
-                        Ok(receipt) => {
-                            state.receipts[transaction_index] = Some(receipt);
-                            state.completed += 1;
-                            let successors = state.successors[transaction_index].clone();
-                            for successor in successors {
-                                let remaining = &mut state.remaining_predecessors[successor];
-                                *remaining = remaining.saturating_sub(1);
-                                if *remaining == 0 {
-                                    state.ready.insert(successor);
+                let worker_diagnostics = worker_diagnostics.clone();
+                let base_state = base.state.clone();
+                scope.spawn(move || {
+                    let mut diagnostics = DependencyWorkerDiagnostics::default();
+                    'worker: loop {
+                        let ready_started = Instant::now();
+                        let selection = {
+                            let (state_lock, ready_changed) = &*shared;
+                            let mut state = state_lock.lock();
+                            loop {
+                                if state.failure.is_some() || state.completed == transaction_count {
+                                    break None;
                                 }
+                                if let Some(index) = state.ready.pop_first() {
+                                    state.in_flight += 1;
+                                    state.max_in_flight = state.max_in_flight.max(state.in_flight);
+                                    let ready_elapsed = ready_started.elapsed();
+                                    let visibility_started = Instant::now();
+                                    let visibility = VisibilityMask::from_completed(
+                                        &state.successful_completed,
+                                        index,
+                                    );
+                                    let visibility_elapsed = visibility_started.elapsed();
+                                    break Some((
+                                        index,
+                                        visibility,
+                                        ready_elapsed,
+                                        visibility_elapsed,
+                                    ));
+                                }
+                                if state.in_flight == 0 {
+                                    state.failure = Some(
+                                        "dependency-driven speculative execution reached a readiness deadlock"
+                                            .to_owned(),
+                                    );
+                                    ready_changed.notify_all();
+                                    break None;
+                                }
+                                ready_changed.wait(&mut state);
+                            }
+                        };
+                        let Some((
+                                     transaction_index,
+                                     visibility,
+                                     ready_elapsed,
+                                     visibility_elapsed,
+                                 )) = selection
+                        else {
+                            break 'worker;
+                        };
+                        diagnostics.ready_wait += ready_elapsed;
+                        diagnostics.visibility_capture += visibility_elapsed;
+                        diagnostics.visibility_masks += 1;
+                        diagnostics.visibility_words += visibility.word_count() as u64;
+
+                        let transaction = transactions[transaction_index].clone();
+                        let hot_path = Arc::new(ExecutionHotPathDiagnostics::default());
+                        let view = MvccReadView::new(
+                            base_state.clone(),
+                            versions.clone(),
+                            transaction_index,
+                            visibility,
+                            hot_path.clone(),
+                        );
+                        let execution_started = Instant::now();
+                        let execution = self.execute_speculative_mvcc(
+                            base_state.clone(),
+                            view,
+                            transaction.block,
+                            transaction.request,
+                            hot_path.clone(),
+                        );
+                        diagnostics.contract_execution += execution_started.elapsed();
+
+                        let publish_started = Instant::now();
+                        let (state_lock, ready_changed) = &*shared;
+                        match execution {
+                            Ok(receipt) => {
+                                let succeeded = receipt.is_success();
+                                if succeeded {
+                                    diagnostics.published_storage_versions +=
+                                        receipt.write_set.storage.len() as u64;
+                                    diagnostics.published_balance_versions +=
+                                        receipt.write_set.balances.len() as u64;
+                                    diagnostics.published_contract_versions +=
+                                        receipt.write_set.created_contracts.len() as u64;
+                                    // Keep this transaction counted as in-flight until its MVCC
+                                    // versions are fully published. Otherwise there is a window
+                                    // where `ready` can be empty and `in_flight == 0` even though
+                                    // this worker is still integrating a successful predecessor.
+                                    // A waiter waking in that window can falsely report a
+                                    // readiness deadlock.
+                                    let mvcc_publish_started = Instant::now();
+                                    versions.publish_with_diagnostics(
+                                        transaction_index,
+                                        &receipt.write_set,
+                                        &hot_path,
+                                    );
+                                    hot_path.record_mvcc_publish(mvcc_publish_started.elapsed());
+                                }
+
+                                let mut state = state_lock.lock();
+                                state.in_flight = state.in_flight.saturating_sub(1);
+                                if succeeded {
+                                    let word = transaction_index / 64;
+                                    let bit = transaction_index % 64;
+                                    state.successful_completed[word] |= 1_u64 << bit;
+                                }
+                                state.receipts[transaction_index] = Some(receipt);
+                                state.completed += 1;
+                                let successors = state.successors[transaction_index].clone();
+                                for successor in successors {
+                                    let remaining = &mut state.remaining_predecessors[successor];
+                                    *remaining = remaining.saturating_sub(1);
+                                    if *remaining == 0 {
+                                        state.ready.insert(successor);
+                                    }
+                                }
+                                ready_changed.notify_all();
+                            }
+                            Err(error) => {
+                                let mut state = state_lock.lock();
+                                state.in_flight = state.in_flight.saturating_sub(1);
+                                state.failure = Some(format!(
+                                    "dependency-driven speculative transaction {} failed at API level: {error}",
+                                    transaction_index
+                                ));
+                                ready_changed.notify_all();
                             }
                         }
-                        Err(error) => {
-                            state.failure = Some(format!(
-                                "dependency-driven speculative transaction {} failed at API level: {error}",
-                                transaction_index
-                            ));
-                        }
+                        diagnostics.contract.merge(&hot_path.snapshot());
+                        diagnostics.publish_and_unblock += publish_started.elapsed();
                     }
-                    ready_changed.notify_all();
+                    *worker_diagnostics[worker_index].lock() = diagnostics;
                 });
             }
         });
+        let worker_phase_wall = worker_phase_started.elapsed();
+        let wasm_cache_after = self.wasm_cache_metrics();
 
         let (state_lock, _) = &*shared;
         let mut state = state_lock.lock();
@@ -747,6 +767,7 @@ impl CosmWasmEngine {
                 state.completed, transaction_count
             )));
         }
+        let max_in_flight = state.max_in_flight;
         let mut ordered_receipts = Vec::with_capacity(transaction_count);
         for (index, receipt) in state.receipts.iter_mut().enumerate() {
             ordered_receipts.push(receipt.take().ok_or_else(|| {
@@ -757,14 +778,47 @@ impl CosmWasmEngine {
         }
         drop(state);
 
-        // Advisory complete predicted successor. Applying detached receipts in canonical order
-        // preserves deterministic projection even though physical execution completed out of order.
-        let predicted_successor = base.fork();
-        for receipt in &ordered_receipts {
-            if receipt.is_success() {
-                apply_write_set(&predicted_successor.state, &receipt.write_set);
-            }
+        let mut dependency_diagnostics = DependencyPreexecutionDiagnostics {
+            dependency_plan_setup,
+            worker_phase_wall,
+            max_in_flight,
+            ..DependencyPreexecutionDiagnostics::default()
+        };
+        for worker in worker_diagnostics.iter() {
+            let worker = worker.lock();
+            dependency_diagnostics.aggregate_ready_wait += worker.ready_wait;
+            dependency_diagnostics.aggregate_visibility_capture += worker.visibility_capture;
+            dependency_diagnostics.aggregate_contract_execution += worker.contract_execution;
+            dependency_diagnostics.aggregate_publish_and_unblock += worker.publish_and_unblock;
+            dependency_diagnostics.visibility_masks_captured += worker.visibility_masks;
+            dependency_diagnostics.visibility_words_copied += worker.visibility_words;
+            dependency_diagnostics.published_storage_versions += worker.published_storage_versions;
+            dependency_diagnostics.published_balance_versions += worker.published_balance_versions;
+            dependency_diagnostics.published_contract_versions +=
+                worker.published_contract_versions;
+            dependency_diagnostics.contract.merge(&worker.contract);
         }
+        dependency_diagnostics.contract.wasm_cache_pinned_hits += u64::from(
+            wasm_cache_after
+                .hits_pinned_memory_cache
+                .saturating_sub(wasm_cache_before.hits_pinned_memory_cache),
+        );
+        dependency_diagnostics.contract.wasm_cache_memory_hits += u64::from(
+            wasm_cache_after
+                .hits_memory_cache
+                .saturating_sub(wasm_cache_before.hits_memory_cache),
+        );
+        dependency_diagnostics.contract.wasm_cache_fs_hits += u64::from(
+            wasm_cache_after
+                .hits_fs_cache
+                .saturating_sub(wasm_cache_before.hits_fs_cache),
+        );
+        dependency_diagnostics.contract.wasm_cache_misses += u64::from(
+            wasm_cache_after
+                .misses
+                .saturating_sub(wasm_cache_before.misses),
+        );
+        dependency_diagnostics.executor_total = executor_started.elapsed();
 
         Ok(PreparedSpeculativeBlock {
             predicted_transactions: Arc::try_unwrap(transactions)
@@ -779,8 +833,8 @@ impl CosmWasmEngine {
                 },
                 dependency_count: dependencies.len(),
                 hard_dependency_count: validated.hard_dependency_count,
+                dependency_diagnostics,
             },
-            predicted_successor,
         })
     }
 
@@ -928,182 +982,6 @@ impl CosmWasmEngine {
         })
     }
 
-    /// Execute Brick-4 waves through a bounded Rayon worker pool, then validate and commit
-    /// receipts strictly in canonical block order.
-    ///
-    /// Every wave is launched against one immutable snapshot captured after the canonical prefix
-    /// made available by previous waves has been drained. The method waits for all speculative
-    /// executions in a wave to finish before launching the next wave. Physical worker completion
-    /// order never affects canonical commit order.
-    pub fn execute_parallel_waves(
-        &self,
-        config: ParallelExecutionConfig,
-        transactions: Vec<CanonicalTransaction>,
-        waves: Vec<SpeculativeWave>,
-    ) -> EngineResult<ParallelSpeculativeBlockOutcome> {
-        if config.workers == 0 {
-            return Err(EngineError::InvalidConfiguration(
-                "parallel speculative worker count must be greater than zero".to_owned(),
-            ));
-        }
-
-        let mut canonical_bindings = BTreeMap::new();
-        for transaction in &transactions {
-            let transaction_id = transaction.transaction_id();
-            if canonical_bindings
-                .insert(transaction_id, transaction.clone())
-                .is_some()
-            {
-                return Err(EngineError::InvalidConfiguration(format!(
-                    "duplicate canonical transaction ID {}",
-                    transaction_id.0
-                )));
-            }
-        }
-
-        let mut scheduled = BTreeSet::new();
-        for (wave_index, wave) in waves.iter().enumerate() {
-            if wave.is_empty() {
-                return Err(EngineError::InvalidConfiguration(format!(
-                    "speculative wave {wave_index} is empty"
-                )));
-            }
-            for transaction_id in &wave.transaction_ids {
-                if !canonical_bindings.contains_key(transaction_id) {
-                    return Err(EngineError::InvalidConfiguration(format!(
-                        "speculative wave {wave_index} references transaction ID {} that is not in the canonical block",
-                        transaction_id.0
-                    )));
-                }
-                if !scheduled.insert(*transaction_id) {
-                    return Err(EngineError::InvalidConfiguration(format!(
-                        "transaction ID {} appears in more than one speculative wave",
-                        transaction_id.0
-                    )));
-                }
-            }
-        }
-
-        if scheduled.len() != transactions.len() {
-            let missing = transactions
-                .iter()
-                .filter_map(|transaction| {
-                    let transaction_id = transaction.transaction_id();
-                    (!scheduled.contains(&transaction_id)).then_some(transaction_id.0)
-                })
-                .collect::<Vec<_>>();
-            return Err(EngineError::InvalidConfiguration(format!(
-                "speculative wave plan does not cover canonical transaction IDs {missing:?}"
-            )));
-        }
-
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(config.workers)
-            .thread_name(|index| format!("acg-speculative-{index}"))
-            .build()
-            .map_err(|error| {
-                EngineError::InvalidConfiguration(format!(
-                    "failed to build speculative worker pool: {error}"
-                ))
-            })?;
-
-        let wave_widths = waves.iter().map(SpeculativeWave::len).collect::<Vec<_>>();
-        let mut speculative_metrics = SpeculativeExecutionMetrics {
-            speculative_results: transactions.len() as u64,
-            ..SpeculativeExecutionMetrics::default()
-        };
-        let mut pending_receipts = BTreeMap::new();
-        let mut outcomes = Vec::with_capacity(transactions.len());
-        let mut canonical_cursor = 0_usize;
-
-        for wave in waves {
-            // Snapshot capture occurs after the previous wave's available canonical prefix was
-            // drained. Every transaction in this wave sees exactly the same immutable base state.
-            let snapshot = self.snapshot();
-            let wave_transactions = wave
-                .transaction_ids
-                .iter()
-                .map(|transaction_id| {
-                    canonical_bindings
-                        .get(transaction_id)
-                        .expect("wave plan was validated before execution")
-                        .clone()
-                })
-                .collect::<Vec<_>>();
-
-            let receipts = pool.install(|| {
-                wave_transactions
-                    .into_par_iter()
-                    .map(|transaction| {
-                        self.execute_speculative(&snapshot, transaction.block, transaction.request)
-                    })
-                    .collect::<Vec<_>>()
-            });
-
-            for receipt in receipts {
-                let receipt = receipt?;
-                let transaction_id = receipt.transaction_id;
-                if pending_receipts.insert(transaction_id, receipt).is_some() {
-                    return Err(EngineError::Internal(format!(
-                        "duplicate speculative receipt for transaction ID {}",
-                        transaction_id.0
-                    )));
-                }
-            }
-
-            while canonical_cursor < transactions.len() {
-                let transaction = &transactions[canonical_cursor];
-                let transaction_id = transaction.transaction_id();
-                let Some(receipt) = pending_receipts.remove(&transaction_id) else {
-                    break;
-                };
-
-                let validation =
-                    validate_dependencies(&self.core.state, &receipt.read_dependencies);
-                if validation.is_valid() {
-                    speculative_metrics.reused_results += 1;
-                    let result = self.commit_reused_receipt(receipt);
-                    outcomes.push(CanonicalTxResult {
-                        transaction_id,
-                        disposition: CanonicalTxDisposition::ReusedSpeculative,
-                        validation: Some(validation),
-                        result,
-                    });
-                } else {
-                    speculative_metrics.invalidated_results += 1;
-                    speculative_metrics.replayed_transactions += 1;
-                    let result = self
-                        .execute_request(transaction.block.clone(), transaction.request.clone());
-                    outcomes.push(CanonicalTxResult {
-                        transaction_id,
-                        disposition: CanonicalTxDisposition::Replayed,
-                        validation: Some(validation),
-                        result,
-                    });
-                }
-                canonical_cursor += 1;
-            }
-        }
-
-        if canonical_cursor != transactions.len() || !pending_receipts.is_empty() {
-            return Err(EngineError::Internal(
-                "validated speculative wave plan did not drain the complete canonical block"
-                    .to_owned(),
-            ));
-        }
-
-        Ok(ParallelSpeculativeBlockOutcome {
-            transactions: outcomes,
-            metrics: ParallelSpeculativeExecutionMetrics {
-                workers: config.workers,
-                wave_widths,
-                speculative: speculative_metrics,
-                dependency_count: 0,
-                hard_dependency_count: 0,
-            },
-        })
-    }
-
     fn ensure_receipt_belongs_to_engine(&self, result: &SpeculativeTxResult) -> EngineResult<()> {
         if !Arc::ptr_eq(&result.engine_identity, &self.core.engine_identity) {
             return Err(EngineError::InvalidConfiguration(
@@ -1234,6 +1112,29 @@ impl CosmWasmEngine {
     ) -> (EngineResult<ExecutionOutcome>, SharedTx) {
         let transaction_id = request.transaction_id();
         let tx = self.begin_transaction_on(base, transaction_id);
+        self.execute_request_in_transaction(tx, block, request, commit)
+    }
+
+    fn execute_request_on_mvcc(
+        &self,
+        base: SharedWorld,
+        view: MvccReadView,
+        block: BlockContext,
+        request: ExecutionRequest,
+    ) -> (EngineResult<ExecutionOutcome>, SharedTx) {
+        let transaction_id = request.transaction_id();
+        let tx = self.begin_transaction_on_mvcc(base, view, transaction_id);
+        self.execute_request_in_transaction(tx, block, request, false)
+    }
+
+    fn execute_request_in_transaction(
+        &self,
+        tx: SharedTx,
+        block: BlockContext,
+        request: ExecutionRequest,
+        commit: bool,
+    ) -> (EngineResult<ExecutionOutcome>, SharedTx) {
+        let transaction_id = request.transaction_id();
         let result = match request {
             ExecutionRequest::Instantiate {
                 sender,
@@ -1290,6 +1191,8 @@ impl CosmWasmEngine {
         funds: Vec<Coin>,
         msg: Binary,
     ) -> EngineResult<ExecutionOutcome> {
+        let diagnostics = tx.lock().diagnostics();
+        let setup_started = Instant::now();
         validate_public_address(&sender)?;
         if let Some(admin) = &admin {
             validate_public_address(admin)?;
@@ -1310,6 +1213,9 @@ impl CosmWasmEngine {
         })?;
         tx.lock()
             .transfer(&sender, &contract, &funds, &contract, 0)?;
+        if let Some(diagnostics) = &diagnostics {
+            diagnostics.record_precontract_setup(setup_started.elapsed());
+        }
 
         let response = invoke_contract(
             self.core.clone(),
@@ -1322,6 +1228,7 @@ impl CosmWasmEngine {
             0,
             Entrypoint::Instantiate,
         )?;
+        let response_started = Instant::now();
         let mut processed = process_response(
             self.core.clone(),
             tx.clone(),
@@ -1330,19 +1237,28 @@ impl CosmWasmEngine {
             response,
             0,
         )?;
+        if let Some(diagnostics) = &diagnostics {
+            diagnostics.record_response_processing(response_started.elapsed());
+        }
         processed.events.insert(
             0,
             Event::new("instantiate").add_attribute("_contract_address", contract.as_str()),
         );
+        let outcome_started = Instant::now();
         let state = tx.lock();
-        Ok(ExecutionOutcome {
+        let outcome = ExecutionOutcome {
             transaction_id,
             contract,
             events: processed.events,
             data: processed.data,
             accesses: state.accesses.clone(),
             created_contracts: state.created_addresses(),
-        })
+        };
+        drop(state);
+        if let Some(diagnostics) = &diagnostics {
+            diagnostics.record_outcome_assembly(outcome_started.elapsed());
+        }
+        Ok(outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1356,11 +1272,16 @@ impl CosmWasmEngine {
         funds: Vec<Coin>,
         msg: Binary,
     ) -> EngineResult<ExecutionOutcome> {
+        let diagnostics = tx.lock().diagnostics();
+        let setup_started = Instant::now();
         validate_public_address(&sender)?;
         validate_public_address(&contract)?;
         code_id_of(&tx, &contract)?;
         tx.lock()
             .transfer(&sender, &contract, &funds, &contract, 0)?;
+        if let Some(diagnostics) = &diagnostics {
+            diagnostics.record_precontract_setup(setup_started.elapsed());
+        }
 
         let response = invoke_contract(
             self.core.clone(),
@@ -1373,6 +1294,7 @@ impl CosmWasmEngine {
             0,
             Entrypoint::Execute,
         )?;
+        let response_started = Instant::now();
         let processed = process_response(
             self.core.clone(),
             tx.clone(),
@@ -1381,15 +1303,24 @@ impl CosmWasmEngine {
             response,
             0,
         )?;
+        if let Some(diagnostics) = &diagnostics {
+            diagnostics.record_response_processing(response_started.elapsed());
+        }
+        let outcome_started = Instant::now();
         let state = tx.lock();
-        Ok(ExecutionOutcome {
+        let outcome = ExecutionOutcome {
             transaction_id,
             contract,
             events: processed.events,
             data: processed.data,
             accesses: state.accesses.clone(),
             created_contracts: state.created_addresses(),
-        })
+        };
+        drop(state);
+        if let Some(diagnostics) = &diagnostics {
+            diagnostics.record_outcome_assembly(outcome_started.elapsed());
+        }
+        Ok(outcome)
     }
 
     fn begin_transaction(&self, transaction_id: TransactionId) -> SharedTx {
@@ -1399,6 +1330,19 @@ impl CosmWasmEngine {
     fn begin_transaction_on(&self, base: SharedWorld, transaction_id: TransactionId) -> SharedTx {
         Arc::new(parking_lot::Mutex::new(TransactionState::new(
             base,
+            transaction_id,
+        )))
+    }
+
+    fn begin_transaction_on_mvcc(
+        &self,
+        base: SharedWorld,
+        view: MvccReadView,
+        transaction_id: TransactionId,
+    ) -> SharedTx {
+        Arc::new(parking_lot::Mutex::new(TransactionState::new_mvcc(
+            base,
+            view,
             transaction_id,
         )))
     }
@@ -1419,9 +1363,25 @@ struct DependencyExecutionState {
     remaining_predecessors: Vec<usize>,
     successors: Vec<Vec<usize>>,
     receipts: Vec<Option<SpeculativeTxResult>>,
+    successful_completed: Vec<u64>,
     completed: usize,
     in_flight: usize,
+    max_in_flight: usize,
     failure: Option<String>,
+}
+
+#[derive(Default)]
+struct DependencyWorkerDiagnostics {
+    ready_wait: std::time::Duration,
+    visibility_capture: std::time::Duration,
+    contract_execution: std::time::Duration,
+    publish_and_unblock: std::time::Duration,
+    visibility_masks: u64,
+    visibility_words: u64,
+    published_storage_versions: u64,
+    published_balance_versions: u64,
+    published_contract_versions: u64,
+    contract: ContractExecutionDiagnostics,
 }
 
 fn validate_speculative_dependency_plan(
@@ -1569,18 +1529,6 @@ fn validate_speculative_wave_plan(
     Ok(canonical_bindings)
 }
 
-fn build_speculative_pool(config: ParallelExecutionConfig) -> EngineResult<rayon::ThreadPool> {
-    ThreadPoolBuilder::new()
-        .num_threads(config.workers)
-        .thread_name(|index| format!("acg-speculative-{index}"))
-        .build()
-        .map_err(|error| {
-            EngineError::InvalidConfiguration(format!(
-                "failed to build speculative worker pool: {error}"
-            ))
-        })
-}
-
 impl Default for CosmWasmEngine {
     fn default() -> Self {
         Self::new(EngineConfig::default())
@@ -1636,6 +1584,7 @@ fn invoke_contract(
     let code_id = code_id_of(&tx, &contract)?;
     let artifact = core.code(code_id)?.artifact;
     let env = make_env(&block, &contract);
+    let diagnostics = tx.lock().diagnostics();
 
     match artifact {
         CodeArtifact::Native(native) => {
@@ -1665,27 +1614,49 @@ fn invoke_contract(
             result.map_err(EngineError::Native)
         }
         CodeArtifact::Wasm(checksum) => {
+            let backend_started = Instant::now();
             let backend = Backend {
                 api: EngineApi,
                 storage: EngineStorage::new(contract.clone(), depth, tx.clone()),
                 querier: EngineQuerier::new(core.clone(), tx, contract, block, depth),
             };
-            let mut instance = core.wasm_cache.get_instance(
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_backend_construction(backend_started.elapsed());
+            }
+            let acquire_started = Instant::now();
+            let instance = core.wasm_cache.get_instance(
                 &checksum,
                 backend,
                 InstanceOptions {
                     gas_limit: core.config.gas_limit,
                 },
-            )?;
+            );
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_wasm_instance_acquire(acquire_started.elapsed());
+            }
+            let mut instance = instance?;
             let info = MessageInfo {
                 sender: Addr::unchecked(caller.as_str()),
                 funds,
             };
-            let result: ContractResult<Response<Empty>> = match entrypoint {
-                Entrypoint::Instantiate => call_instantiate(&mut instance, &env, &info, &msg)?,
-                Entrypoint::Execute => call_execute(&mut instance, &env, &info, &msg)?,
+            let entrypoint_started = Instant::now();
+            let result: EngineResult<ContractResult<Response<Empty>>> = match entrypoint {
+                Entrypoint::Instantiate => {
+                    call_instantiate(&mut instance, &env, &info, &msg).map_err(EngineError::from)
+                }
+                Entrypoint::Execute => {
+                    call_execute(&mut instance, &env, &info, &msg).map_err(EngineError::from)
+                }
             };
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_wasm_entrypoint(entrypoint_started.elapsed());
+            }
+            let result = result?;
+            let recycle_started = Instant::now();
             drop(instance.recycle());
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_wasm_recycle(recycle_started.elapsed());
+            }
             result.into_result().map_err(EngineError::Contract)
         }
     }
@@ -1703,6 +1674,7 @@ fn invoke_reply(
     let code_id = code_id_of(&tx, &contract)?;
     let artifact = core.code(code_id)?.artifact;
     let env = make_env(&block, &contract);
+    let diagnostics = tx.lock().diagnostics();
     match artifact {
         CodeArtifact::Native(native) => {
             let transaction_id = tx.lock().transaction_id;
@@ -1719,20 +1691,38 @@ fn invoke_reply(
                 .map_err(EngineError::Native)
         }
         CodeArtifact::Wasm(checksum) => {
+            let backend_started = Instant::now();
             let backend = Backend {
                 api: EngineApi,
                 storage: EngineStorage::new(contract.clone(), depth, tx.clone()),
                 querier: EngineQuerier::new(core.clone(), tx, contract, block, depth),
             };
-            let mut instance = core.wasm_cache.get_instance(
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_backend_construction(backend_started.elapsed());
+            }
+            let acquire_started = Instant::now();
+            let instance = core.wasm_cache.get_instance(
                 &checksum,
                 backend,
                 InstanceOptions {
                     gas_limit: core.config.gas_limit,
                 },
-            )?;
-            let result: ContractResult<Response<Empty>> = call_reply(&mut instance, &env, &reply)?;
+            );
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_wasm_instance_acquire(acquire_started.elapsed());
+            }
+            let mut instance = instance?;
+            let entrypoint_started = Instant::now();
+            let result = call_reply(&mut instance, &env, &reply).map_err(EngineError::from);
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_wasm_entrypoint(entrypoint_started.elapsed());
+            }
+            let result: ContractResult<Response<Empty>> = result?;
+            let recycle_started = Instant::now();
             drop(instance.recycle());
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_wasm_recycle(recycle_started.elapsed());
+            }
             result.into_result().map_err(EngineError::Contract)
         }
     }
@@ -1753,6 +1743,7 @@ pub(crate) fn query_contract_shared(
     let code_id = code_id_of(&tx, &contract)?;
     let artifact = core.code(code_id)?.artifact;
     let env = make_env(&block, &contract);
+    let diagnostics = tx.lock().diagnostics();
 
     let result = match artifact {
         CodeArtifact::Native(native) => {
@@ -1769,20 +1760,38 @@ pub(crate) fn query_contract_shared(
                 .map_err(EngineError::Native)
         }
         CodeArtifact::Wasm(checksum) => {
+            let backend_started = Instant::now();
             let backend = Backend {
                 api: EngineApi,
                 storage: EngineStorage::new(contract.clone(), depth, tx.clone()),
                 querier: EngineQuerier::new(core.clone(), tx.clone(), contract, block, depth),
             };
-            let mut instance = core.wasm_cache.get_instance(
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_backend_construction(backend_started.elapsed());
+            }
+            let acquire_started = Instant::now();
+            let instance = core.wasm_cache.get_instance(
                 &checksum,
                 backend,
                 InstanceOptions {
                     gas_limit: core.config.gas_limit,
                 },
-            )?;
-            let result: ContractResult<Binary> = call_query(&mut instance, &env, &msg)?;
+            );
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_wasm_instance_acquire(acquire_started.elapsed());
+            }
+            let mut instance = instance?;
+            let entrypoint_started = Instant::now();
+            let result = call_query(&mut instance, &env, &msg).map_err(EngineError::from);
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_wasm_entrypoint(entrypoint_started.elapsed());
+            }
+            let result: ContractResult<Binary> = result?;
+            let recycle_started = Instant::now();
             drop(instance.recycle());
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_wasm_recycle(recycle_started.elapsed());
+            }
             result.into_result().map_err(EngineError::Contract)
         }
     };

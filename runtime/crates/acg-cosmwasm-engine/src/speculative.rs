@@ -22,13 +22,6 @@ pub struct StateSnapshot {
 }
 
 impl StateSnapshot {
-    pub(crate) fn fork(&self) -> Self {
-        Self {
-            core: self.core.clone(),
-            state: std::sync::Arc::new(parking_lot::RwLock::new(self.state.read().clone())),
-        }
-    }
-
     /// Compare the complete contract registry, storage, and bank state of two snapshots.
     ///
     /// Engine code registries are immutable execution metadata and are intentionally not part of

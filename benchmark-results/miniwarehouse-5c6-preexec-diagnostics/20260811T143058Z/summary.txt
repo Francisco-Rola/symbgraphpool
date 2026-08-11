@@ -1,0 +1,420 @@
+=== workers=1 repeat=1 ===
+  serial-equivalent work:         228.401 ms
+  actual parallel preexecute:     868.032 ms
+  dependency-DAG lower bound:     228.227 ms
+  REALIZED preexec speedup:          0.26x
+  engine dependency total:        864.385 ms
+  dependency plan/setup:            1.781 ms
+  worker phase wall:              859.628 ms
+  successor snapshot fork:          1.082 ms
+  successor write projection:       1.848 ms
+  aggregate ready/lock wait:        0.238 ms
+  aggregate version collect:       51.227 ms
+  aggregate snapshot deep-copy:   191.583 ms
+  aggregate apply versions:       149.124 ms
+  aggregate contract+receipt:     247.925 ms
+  aggregate publish/unblock:        0.443 ms
+  aggregate measured stages:      640.539 ms
+  serial tx work sum:             228.227 ms
+  speculative contract cost / serial:   1.09x
+  effective contract concurrency:       0.29x
+  worker busy capacity:                74.5%
+  worker ready/wait capacity:           0.0%
+  validator/base-snapshot wrapper:     3.647 ms
+  executor coordinator residual:      0.045 ms
+  max in-flight transactions:            1
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        99500
+  visible versions / tx:              99.5
+  visible storage writes replayed:   800385
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           12.68x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=1 repeat=2 ===
+  serial-equivalent work:         228.946 ms
+  actual parallel preexecute:     864.810 ms
+  dependency-DAG lower bound:     228.776 ms
+  REALIZED preexec speedup:          0.26x
+  engine dependency total:        861.513 ms
+  dependency plan/setup:            1.728 ms
+  worker phase wall:              856.907 ms
+  successor snapshot fork:          1.002 ms
+  successor write projection:       1.833 ms
+  aggregate ready/lock wait:        0.289 ms
+  aggregate version collect:       50.761 ms
+  aggregate snapshot deep-copy:   194.869 ms
+  aggregate apply versions:       147.789 ms
+  aggregate contract+receipt:     243.470 ms
+  aggregate publish/unblock:        0.481 ms
+  aggregate measured stages:      637.659 ms
+  serial tx work sum:             228.776 ms
+  speculative contract cost / serial:   1.06x
+  effective contract concurrency:       0.28x
+  worker busy capacity:                74.4%
+  worker ready/wait capacity:           0.0%
+  validator/base-snapshot wrapper:     3.297 ms
+  executor coordinator residual:      0.043 ms
+  max in-flight transactions:            1
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        99500
+  visible versions / tx:              99.5
+  visible storage writes replayed:   800385
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           12.44x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=1 repeat=3 ===
+  serial-equivalent work:         228.999 ms
+  actual parallel preexecute:     855.716 ms
+  dependency-DAG lower bound:     228.811 ms
+  REALIZED preexec speedup:          0.27x
+  engine dependency total:        852.371 ms
+  dependency plan/setup:            1.701 ms
+  worker phase wall:              847.761 ms
+  successor snapshot fork:          1.012 ms
+  successor write projection:       1.853 ms
+  aggregate ready/lock wait:        0.296 ms
+  aggregate version collect:       50.253 ms
+  aggregate snapshot deep-copy:   191.152 ms
+  aggregate apply versions:       146.859 ms
+  aggregate contract+receipt:     242.456 ms
+  aggregate publish/unblock:        0.482 ms
+  aggregate measured stages:      631.499 ms
+  serial tx work sum:             228.811 ms
+  speculative contract cost / serial:   1.06x
+  effective contract concurrency:       0.29x
+  worker busy capacity:                74.5%
+  worker ready/wait capacity:           0.0%
+  validator/base-snapshot wrapper:     3.344 ms
+  executor coordinator residual:      0.043 ms
+  max in-flight transactions:            1
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        99500
+  visible versions / tx:              99.5
+  visible storage writes replayed:   800385
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           12.73x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=2 repeat=1 ===
+  serial-equivalent work:         243.417 ms
+  actual parallel preexecute:     480.315 ms
+  dependency-DAG lower bound:     145.968 ms
+  REALIZED preexec speedup:          0.51x
+  engine dependency total:        476.412 ms
+  dependency plan/setup:            1.799 ms
+  worker phase wall:              471.791 ms
+  successor snapshot fork:          1.139 ms
+  successor write projection:       1.638 ms
+  aggregate ready/lock wait:       49.447 ms
+  aggregate version collect:       61.846 ms
+  aggregate snapshot deep-copy:   201.451 ms
+  aggregate apply versions:       143.722 ms
+  aggregate contract+receipt:     258.817 ms
+  aggregate publish/unblock:        4.707 ms
+  aggregate measured stages:      719.990 ms
+  serial tx work sum:             243.120 ms
+  speculative contract cost / serial:   1.06x
+  effective contract concurrency:       0.55x
+  worker busy capacity:                71.1%
+  worker ready/wait capacity:           5.2%
+  validator/base-snapshot wrapper:     3.902 ms
+  executor coordinator residual:      0.046 ms
+  max in-flight transactions:            2
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        96258
+  visible versions / tx:              96.3
+  visible storage writes replayed:   769342
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           11.69x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=2 repeat=2 ===
+  serial-equivalent work:         223.491 ms
+  actual parallel preexecute:     464.578 ms
+  dependency-DAG lower bound:     135.562 ms
+  REALIZED preexec speedup:          0.48x
+  engine dependency total:        460.882 ms
+  dependency plan/setup:            1.755 ms
+  worker phase wall:              456.442 ms
+  successor snapshot fork:          1.121 ms
+  successor write projection:       1.515 ms
+  aggregate ready/lock wait:       48.520 ms
+  aggregate version collect:       58.392 ms
+  aggregate snapshot deep-copy:   189.898 ms
+  aggregate apply versions:       140.945 ms
+  aggregate contract+receipt:     258.384 ms
+  aggregate publish/unblock:        3.798 ms
+  aggregate measured stages:      699.938 ms
+  serial tx work sum:             223.303 ms
+  speculative contract cost / serial:   1.16x
+  effective contract concurrency:       0.57x
+  worker busy capacity:                71.4%
+  worker ready/wait capacity:           5.3%
+  validator/base-snapshot wrapper:     3.696 ms
+  executor coordinator residual:      0.048 ms
+  max in-flight transactions:            2
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        96281
+  visible versions / tx:              96.3
+  visible storage writes replayed:   769554
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           10.99x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=2 repeat=3 ===
+  serial-equivalent work:         227.676 ms
+  actual parallel preexecute:     547.351 ms
+  dependency-DAG lower bound:     134.653 ms
+  REALIZED preexec speedup:          0.42x
+  engine dependency total:        541.943 ms
+  dependency plan/setup:            2.226 ms
+  worker phase wall:              536.789 ms
+  successor snapshot fork:          1.261 ms
+  successor write projection:       1.612 ms
+  aggregate ready/lock wait:       51.942 ms
+  aggregate version collect:       68.242 ms
+  aggregate snapshot deep-copy:   226.699 ms
+  aggregate apply versions:       160.091 ms
+  aggregate contract+receipt:     301.106 ms
+  aggregate publish/unblock:        4.796 ms
+  aggregate measured stages:      812.876  ms
+  serial tx work sum:             227.482 ms
+  speculative contract cost / serial:   1.32x
+  effective contract concurrency:       0.56x
+  worker busy capacity:                70.9%
+  worker ready/wait capacity:           4.8%
+  validator/base-snapshot wrapper:     5.408 ms
+  executor coordinator residual:      0.055 ms
+  max in-flight transactions:            2
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        96215
+  visible versions / tx:              96.2
+  visible storage writes replayed:   769014
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:            6.93x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=4 repeat=1 ===
+  serial-equivalent work:         225.874 ms
+  actual parallel preexecute:     323.065 ms
+  dependency-DAG lower bound:     134.573 ms
+  REALIZED preexec speedup:          0.70x
+  engine dependency total:        319.254 ms
+  dependency plan/setup:            1.799 ms
+  worker phase wall:              314.864 ms
+  successor snapshot fork:          1.070 ms
+  successor write projection:       1.477 ms
+  aggregate ready/lock wait:      388.113 ms
+  aggregate version collect:       64.322 ms
+  aggregate snapshot deep-copy:   177.023 ms
+  aggregate apply versions:       129.823 ms
+  aggregate contract+receipt:     275.698 ms
+  aggregate publish/unblock:       13.587 ms
+  aggregate measured stages:     1048.566 ms
+  serial tx work sum:             225.701 ms
+  speculative contract cost / serial:   1.22x
+  effective contract concurrency:       0.88x
+  worker busy capacity:                52.4%
+  worker ready/wait capacity:          30.8%
+  validator/base-snapshot wrapper:     3.811 ms
+  executor coordinator residual:      0.044 ms
+  max in-flight transactions:            4
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        89540
+  visible versions / tx:              89.5
+  visible storage writes replayed:   708378
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           11.26x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=4 repeat=2 ===
+  serial-equivalent work:         221.392 ms
+  actual parallel preexecute:     333.243 ms
+  dependency-DAG lower bound:     134.536 ms
+  REALIZED preexec speedup:          0.66x
+  engine dependency total:        328.355 ms
+  dependency plan/setup:            1.856 ms
+  worker phase wall:              323.755 ms
+  successor snapshot fork:          1.171 ms
+  successor write projection:       1.525 ms
+  aggregate ready/lock wait:      391.486 ms
+  aggregate version collect:       65.999 ms
+  aggregate snapshot deep-copy:   187.441 ms
+  aggregate apply versions:       133.349 ms
+  aggregate contract+receipt:     285.393 ms
+  aggregate publish/unblock:       13.038 ms
+  aggregate measured stages:     1076.705 ms
+  serial tx work sum:             221.230 ms
+  speculative contract cost / serial:   1.29x
+  effective contract concurrency:       0.88x
+  worker busy capacity:                52.9%
+  worker ready/wait capacity:          30.2%
+  validator/base-snapshot wrapper:     4.888 ms
+  executor coordinator residual:      0.047 ms
+  max in-flight transactions:            4
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        89863
+  visible versions / tx:              89.9
+  visible storage writes replayed:   711175
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           11.10x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=4 repeat=3 ===
+  serial-equivalent work:         227.472 ms
+  actual parallel preexecute:     333.731 ms
+  dependency-DAG lower bound:     134.648 ms
+  REALIZED preexec speedup:          0.68x
+  engine dependency total:        329.817 ms
+  dependency plan/setup:            1.778 ms
+  worker phase wall:              325.443 ms
+  successor snapshot fork:          1.058 ms
+  successor write projection:       1.495 ms
+  aggregate ready/lock wait:      406.138 ms
+  aggregate version collect:       68.961 ms
+  aggregate snapshot deep-copy:   175.938 ms
+  aggregate apply versions:       131.732 ms
+  aggregate contract+receipt:     279.266 ms
+  aggregate publish/unblock:       17.382 ms
+  aggregate measured stages:     1079.416 ms
+  serial tx work sum:             227.295 ms
+  speculative contract cost / serial:   1.23x
+  effective contract concurrency:       0.86x
+  worker busy capacity:                51.7%
+  worker ready/wait capacity:          31.2%
+  validator/base-snapshot wrapper:     3.914 ms
+  executor coordinator residual:      0.043 ms
+  max in-flight transactions:            4
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        89704
+  visible versions / tx:              89.7
+  visible storage writes replayed:   709792
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           12.15x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=8 repeat=1 ===
+  serial-equivalent work:         219.679 ms
+  actual parallel preexecute:     326.255 ms
+  dependency-DAG lower bound:     133.130 ms
+  REALIZED preexec speedup:          0.67x
+  engine dependency total:        322.573 ms
+  dependency plan/setup:            1.839 ms
+  worker phase wall:              318.081 ms
+  successor snapshot fork:          1.093 ms
+  successor write projection:       1.514 ms
+  aggregate ready/lock wait:     1431.189 ms
+  aggregate version collect:       83.372 ms
+  aggregate snapshot deep-copy:   225.183 ms
+  aggregate apply versions:       140.367 ms
+  aggregate contract+receipt:     350.143 ms
+  aggregate publish/unblock:       51.592 ms
+  aggregate measured stages:     2281.846 ms
+  serial tx work sum:             219.517 ms
+  speculative contract cost / serial:   1.60x
+  effective contract concurrency:       1.10x
+  worker busy capacity:                33.4%
+  worker ready/wait capacity:          56.2%
+  validator/base-snapshot wrapper:     3.682 ms
+  executor coordinator residual:      0.047 ms
+  max in-flight transactions:            8
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        86604
+  visible versions / tx:              86.6
+  visible storage writes replayed:   683471
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           11.59x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=8 repeat=2 ===
+  serial-equivalent work:         231.032 ms
+  actual parallel preexecute:     333.638 ms
+  dependency-DAG lower bound:     137.747 ms
+  REALIZED preexec speedup:          0.69x
+  engine dependency total:        329.292 ms
+  dependency plan/setup:            1.773 ms
+  worker phase wall:              324.616 ms
+  successor snapshot fork:          1.265 ms
+  successor write projection:       1.580 ms
+  aggregate ready/lock wait:     1419.751 ms
+  aggregate version collect:       90.786 ms
+  aggregate snapshot deep-copy:   243.877 ms
+  aggregate apply versions:       148.700 ms
+  aggregate contract+receipt:     351.432 ms
+  aggregate publish/unblock:       56.206 ms
+  aggregate measured stages:     2310.752 ms
+  serial tx work sum:             230.858 ms
+  speculative contract cost / serial:   1.52x
+  effective contract concurrency:       1.08x
+  worker busy capacity:                34.3%
+  worker ready/wait capacity:          54.7%
+  validator/base-snapshot wrapper:     4.346 ms
+  executor coordinator residual:      0.058 ms
+  max in-flight transactions:            8
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        86683
+  visible versions / tx:              86.7
+  visible storage writes replayed:   684510
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:            9.94x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+
+=== workers=8 repeat=3 ===
+  serial-equivalent work:         226.805 ms
+  actual parallel preexecute:     323.164 ms
+  dependency-DAG lower bound:     135.028 ms
+  REALIZED preexec speedup:          0.70x
+  engine dependency total:        318.718 ms
+  dependency plan/setup:            1.751 ms
+  worker phase wall:              314.274 ms
+  successor snapshot fork:          1.103 ms
+  successor write projection:       1.544 ms
+  aggregate ready/lock wait:     1408.284 ms
+  aggregate version collect:       83.958 ms
+  aggregate snapshot deep-copy:   222.069 ms
+  aggregate apply versions:       140.189 ms
+  aggregate contract+receipt:     341.988 ms
+  aggregate publish/unblock:       52.145 ms
+  aggregate measured stages:     2248.633 ms
+  serial tx work sum:             226.626 ms
+  speculative contract cost / serial:   1.51x
+  effective contract concurrency:       1.09x
+  worker busy capacity:                33.4%
+  worker ready/wait capacity:          56.0%
+  validator/base-snapshot wrapper:     4.446 ms
+  executor coordinator residual:      0.047 ms
+  max in-flight transactions:            8
+  per-tx snapshot deep-copies:        1000
+  visible versions collected:        86708
+  visible versions / tx:              86.7
+  visible storage writes replayed:   684487
+  estimated base entries cloned:   4530800
+  estimated base entries/snapshot:  4530.8
+  POST-CONSENSUS SPEEDUP:           11.65x
+  reuse rate:                      100.0%
+  replay rate:                       0.0%
+

@@ -8,9 +8,9 @@ use acg_candidate_graph::{EdgeClass, RiskBoundedSchedulerConfig};
 use acg_core::{ContractCodeHash, RuntimeId};
 use acg_cosmwasm_adapter::{CosmWasmAdapterConfig, CosmWasmCandidateAdapter};
 use acg_cosmwasm_engine::{
-    Address, BlockContext, CanonicalTxDisposition, CosmWasmEngine, ExecutionOutcome,
-    ExecutionRequest, ParallelExecutionConfig, PreparedSpeculativeBlock, StateWriteSet,
-    TransactionId, ValidationConflict,
+    Address, BlockContext, CanonicalTxDisposition, CosmWasmEngine,
+    DependencyPreexecutionDiagnostics, ExecutionOutcome, ExecutionRequest, ParallelExecutionConfig,
+    PreparedSpeculativeBlock, StateWriteSet, TransactionId, ValidationConflict,
 };
 use acg_feedback::AdaptiveFeedbackConfig;
 use acg_miniwarehouse_workload::{
@@ -286,7 +286,9 @@ struct RunTotals {
     executor_wrapper_overhead: Duration,
     canonical_fallback: Duration,
     serial: Duration,
+    serial_transaction_work: Duration,
     theoretical_ideal: Duration,
+    dependency_preexecution: DependencyPreexecutionDiagnostics,
     edges: EdgeStats,
     waves: usize,
     wave_widths: Vec<usize>,
@@ -1580,6 +1582,9 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
         totals.execution_dependencies += prepared_current.prepared.metrics.dependency_count as u64;
         totals.hard_execution_dependencies +=
             prepared_current.prepared.metrics.hard_dependency_count as u64;
+        totals
+            .dependency_preexecution
+            .merge(&prepared_current.prepared.metrics.dependency_diagnostics);
         totals.theoretical_ideal += ideal_cost_time(
             &serial_tx_costs[index],
             &prepared_current.plan.speculative_execution_plan,
@@ -1593,6 +1598,10 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
             .consensus_preparation_durations
             .push(prepared_current.consensus_critical_preparation);
         totals.serial += serial_block_times[index];
+        totals.serial_transaction_work += serial_tx_costs[index]
+            .iter()
+            .copied()
+            .fold(Duration::ZERO, |total, duration| total + duration);
 
         let deadline_hit =
             prepared_current.consensus_critical_preparation <= measurement.consensus_window;
@@ -1653,6 +1662,31 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
                 "execution dependencies:       {} (hard {})",
                 prepared_current.prepared.metrics.dependency_count,
                 prepared_current.prepared.metrics.hard_dependency_count
+            );
+            let diagnostics = &prepared_current.prepared.metrics.dependency_diagnostics;
+            println!(
+                "dependency worker wall:       {:>8.3} ms",
+                diagnostics.worker_phase_wall.as_secs_f64() * 1e3
+            );
+            println!(
+                "aggregate visibility capture: {:>8.3} ms",
+                diagnostics.aggregate_visibility_capture.as_secs_f64() * 1e3
+            );
+            println!(
+                "aggregate contract execution: {:>8.3} ms",
+                diagnostics.aggregate_contract_execution.as_secs_f64() * 1e3
+            );
+            println!(
+                "aggregate publish/unblock:    {:>8.3} ms",
+                diagnostics.aggregate_publish_and_unblock.as_secs_f64() * 1e3
+            );
+            println!(
+                "visibility masks captured:    {}",
+                diagnostics.visibility_masks_captured
+            );
+            println!(
+                "max in-flight txs:            {}",
+                diagnostics.max_in_flight
             );
             println!(
                 "consensus-critical prep:      {:>8.3} ms",
@@ -1840,6 +1874,78 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
     } else {
         0.0
     };
+    let dependency_diagnostics = &totals.dependency_preexecution;
+    let contract_diagnostics = &dependency_diagnostics.contract;
+    let contract_outer_accounted = contract_diagnostics.aggregate_request_execution
+        + contract_diagnostics.aggregate_receipt_finalization;
+    let contract_outer_residual = dependency_diagnostics
+        .aggregate_contract_execution
+        .saturating_sub(contract_outer_accounted);
+    let wasm_runtime_total = contract_diagnostics.aggregate_wasm_instance_acquire
+        + contract_diagnostics.aggregate_wasm_entrypoint
+        + contract_diagnostics.aggregate_wasm_recycle;
+    let host_storage_operations = contract_diagnostics.host_storage_gets
+        + contract_diagnostics.host_storage_scans
+        + contract_diagnostics.host_storage_nexts
+        + contract_diagnostics.host_storage_sets
+        + contract_diagnostics.host_storage_removes;
+    let wasm_calls_per_tx = if totals.speculative_results == 0 {
+        0.0
+    } else {
+        contract_diagnostics.wasm_entrypoint_calls as f64 / totals.speculative_results as f64
+    };
+    let host_storage_ops_per_tx = if totals.speculative_results == 0 {
+        0.0
+    } else {
+        host_storage_operations as f64 / totals.speculative_results as f64
+    };
+    let speculative_contract_cost_inflation = if totals.serial_transaction_work.is_zero() {
+        0.0
+    } else {
+        dependency_diagnostics
+            .aggregate_contract_execution
+            .as_secs_f64()
+            / totals.serial_transaction_work.as_secs_f64()
+    };
+    let effective_contract_concurrency = if dependency_diagnostics.worker_phase_wall.is_zero() {
+        0.0
+    } else {
+        dependency_diagnostics
+            .aggregate_contract_execution
+            .as_secs_f64()
+            / dependency_diagnostics.worker_phase_wall.as_secs_f64()
+    };
+    let worker_capacity = dependency_diagnostics.worker_phase_wall.as_secs_f64()
+        * measurement.preexecution_workers as f64;
+    let aggregate_worker_busy = dependency_diagnostics
+        .aggregate_worker_stage_time()
+        .saturating_sub(dependency_diagnostics.aggregate_ready_wait);
+    let measured_worker_busy_fraction = if worker_capacity == 0.0 {
+        0.0
+    } else {
+        aggregate_worker_busy.as_secs_f64() / worker_capacity
+    };
+    let measured_worker_wait_fraction = if worker_capacity == 0.0 {
+        0.0
+    } else {
+        dependency_diagnostics.aggregate_ready_wait.as_secs_f64() / worker_capacity
+    };
+    let preexecution_wrapper_overhead = totals
+        .preexecution
+        .saturating_sub(dependency_diagnostics.executor_total);
+    let executor_wall_accounted =
+        dependency_diagnostics.dependency_plan_setup + dependency_diagnostics.worker_phase_wall;
+    let executor_coordinator_residual = dependency_diagnostics
+        .executor_total
+        .saturating_sub(executor_wall_accounted);
+    let visibility_words_per_tx = if totals.speculative_results == 0 {
+        0.0
+    } else {
+        dependency_diagnostics.visibility_words_copied as f64 / totals.speculative_results as f64
+    };
+    let published_mvcc_versions = dependency_diagnostics.published_storage_versions
+        + dependency_diagnostics.published_balance_versions
+        + dependency_diagnostics.published_contract_versions;
     let post_consensus_speedup = if totals.post_consensus.is_zero() {
         0.0
     } else {
@@ -1884,7 +1990,7 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
 
     println!();
     println!("============================================================");
-    println!(" MiniWarehouse Brick-5C.6 dependency/versioned-state measurement");
+    println!(" MiniWarehouse Brick-5C.7 block-local MVCC measurement");
     println!("============================================================");
     println!("runtime model:                 real MiniWarehouse CosmWasm Wasm");
     println!("Wasm artifact:                 {}", wasm_path.display());
@@ -1920,7 +2026,7 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
         "post-commit preexec workers:   {}",
         measurement.preexecution_workers
     );
-    println!("dependency executor:           READY-DAG / versioned snapshots");
+    println!("dependency executor:           READY-DAG / block-local MVCC");
     println!(
         "symbolic hard soften after:    {} concrete observations",
         measurement.symbolic_hard_soften_after
@@ -2194,6 +2300,311 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
         total_consensus_critical.as_secs_f64() * 1e3
     );
     println!();
+    println!("Block-local MVCC dependency executor cost diagnosis");
+    println!(
+        "  NOTE: worker-stage times below are aggregate across workers and overlap in wall time."
+    );
+    println!(
+        "  engine dependency total:     {:>10.3} ms",
+        dependency_diagnostics.executor_total.as_secs_f64() * 1e3
+    );
+    println!(
+        "  dependency plan/setup:       {:>10.3} ms",
+        dependency_diagnostics.dependency_plan_setup.as_secs_f64() * 1e3
+    );
+    println!(
+        "  worker phase wall:           {:>10.3} ms",
+        dependency_diagnostics.worker_phase_wall.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate ready/lock wait:   {:>10.3} ms",
+        dependency_diagnostics.aggregate_ready_wait.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate visibility capture:{:>10.3} ms",
+        dependency_diagnostics
+            .aggregate_visibility_capture
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate contract+receipt:  {:>10.3} ms",
+        dependency_diagnostics
+            .aggregate_contract_execution
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate publish/unblock:   {:>10.3} ms",
+        dependency_diagnostics
+            .aggregate_publish_and_unblock
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate measured stages:   {:>10.3} ms",
+        dependency_diagnostics
+            .aggregate_worker_stage_time()
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  serial tx work sum:          {:>10.3} ms",
+        totals.serial_transaction_work.as_secs_f64() * 1e3
+    );
+    println!(
+        "  speculative contract cost / serial: {:>6.2}x",
+        speculative_contract_cost_inflation
+    );
+    println!(
+        "  effective contract concurrency:     {:>6.2}x",
+        effective_contract_concurrency
+    );
+    println!(
+        "  worker busy capacity:               {:>5.1}%",
+        100.0 * measured_worker_busy_fraction
+    );
+    println!(
+        "  worker ready/wait capacity:         {:>5.1}%",
+        100.0 * measured_worker_wait_fraction
+    );
+    println!(
+        "  validator/base-snapshot wrapper:{:>10.3} ms",
+        preexecution_wrapper_overhead.as_secs_f64() * 1e3
+    );
+    println!(
+        "  executor coordinator residual: {:>10.3} ms",
+        executor_coordinator_residual.as_secs_f64() * 1e3
+    );
+    println!(
+        "  max in-flight transactions:   {:>10}",
+        dependency_diagnostics.max_in_flight
+    );
+    println!("  per-tx full-world deep copies:{:>10}", 0);
+    println!("  historical write-set replays: {:>10}", 0);
+    println!(
+        "  visibility masks captured:    {:>10}",
+        dependency_diagnostics.visibility_masks_captured
+    );
+    println!(
+        "  visibility words copied:      {:>10}",
+        dependency_diagnostics.visibility_words_copied
+    );
+    println!(
+        "  visibility words / tx:        {:>10.2}",
+        visibility_words_per_tx
+    );
+    println!(
+        "  MVCC storage versions published:{:>8}",
+        dependency_diagnostics.published_storage_versions
+    );
+    println!(
+        "  MVCC balance versions published:{:>8}",
+        dependency_diagnostics.published_balance_versions
+    );
+    println!(
+        "  MVCC contract versions published:{:>7}",
+        dependency_diagnostics.published_contract_versions
+    );
+    println!(
+        "  total MVCC versions published: {:>10}",
+        published_mvcc_versions
+    );
+    println!();
+    println!("Contract/runtime hot-path diagnosis");
+    println!("  NOTE: nested times below overlap; host/MVCC callbacks occur inside Wasm entrypoint time.");
+    println!(
+        "  aggregate request execution:   {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_request_execution
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate receipt finalization: {:>9.3} ms",
+        contract_diagnostics
+            .aggregate_receipt_finalization
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  outer contract timing residual: {:>9.3} ms",
+        contract_outer_residual.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate pre-contract setup:   {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_precontract_setup
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate response processing:  {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_response_processing
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate outcome assembly:     {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_outcome_assembly
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate backend construction: {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_backend_construction
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate Wasm instance acquire:{:>10.3} ms",
+        contract_diagnostics
+            .aggregate_wasm_instance_acquire
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate Wasm entrypoint:      {:>10.3} ms",
+        contract_diagnostics.aggregate_wasm_entrypoint.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate Wasm recycle:         {:>10.3} ms",
+        contract_diagnostics.aggregate_wasm_recycle.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate Wasm runtime total:   {:>10.3} ms",
+        wasm_runtime_total.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate host storage callbacks:{:>9.3} ms",
+        contract_diagnostics.aggregate_host_storage.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate host queries:         {:>10.3} ms",
+        contract_diagnostics.aggregate_host_query.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate tx-lock wait in host: {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_transaction_lock_wait
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate MVCC storage point:   {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_mvcc_storage_point
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate MVCC storage range:   {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_mvcc_storage_range
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate MVCC balance point:   {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_mvcc_balance_point
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate MVCC all balances:    {:>10.3} ms",
+        contract_diagnostics
+            .aggregate_mvcc_all_balances
+            .as_secs_f64()
+            * 1e3
+    );
+    println!(
+        "  aggregate MVCC contract lookup: {:>10.3} ms",
+        contract_diagnostics.aggregate_mvcc_contract.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate MVCC lock wait:       {:>10.3} ms",
+        contract_diagnostics.aggregate_mvcc_lock_wait.as_secs_f64() * 1e3
+    );
+    println!(
+        "  aggregate MVCC publish:         {:>10.3} ms",
+        contract_diagnostics.aggregate_mvcc_publish.as_secs_f64() * 1e3
+    );
+    println!(
+        "  Wasm instance acquires:         {:>10}",
+        contract_diagnostics.wasm_instance_acquires
+    );
+    println!(
+        "  Wasm entrypoint calls:          {:>10} ({:.2}/tx)",
+        contract_diagnostics.wasm_entrypoint_calls, wasm_calls_per_tx
+    );
+    println!(
+        "  Wasm instance recycles:         {:>10}",
+        contract_diagnostics.wasm_instance_recycles
+    );
+    println!(
+        "  Wasm cache pinned/mem/fs/miss:  {} / {} / {} / {}",
+        contract_diagnostics.wasm_cache_pinned_hits,
+        contract_diagnostics.wasm_cache_memory_hits,
+        contract_diagnostics.wasm_cache_fs_hits,
+        contract_diagnostics.wasm_cache_misses
+    );
+    println!(
+        "  host storage get/scan/next/set/remove: {} / {} / {} / {} / {}",
+        contract_diagnostics.host_storage_gets,
+        contract_diagnostics.host_storage_scans,
+        contract_diagnostics.host_storage_nexts,
+        contract_diagnostics.host_storage_sets,
+        contract_diagnostics.host_storage_removes
+    );
+    println!(
+        "  host storage ops / tx:          {:>10.2}",
+        host_storage_ops_per_tx
+    );
+    println!(
+        "  host query calls:               {:>10}",
+        contract_diagnostics.host_queries
+    );
+    println!(
+        "  MVCC storage point reads:       {:>10}",
+        contract_diagnostics.mvcc_storage_point_reads
+    );
+    println!(
+        "  MVCC point version hits:        {:>10}",
+        contract_diagnostics.mvcc_storage_point_hits
+    );
+    println!(
+        "  MVCC point base fallbacks:      {:>10}",
+        contract_diagnostics.mvcc_storage_base_fallbacks
+    );
+    println!(
+        "  MVCC storage range reads:       {:>10}",
+        contract_diagnostics.mvcc_storage_range_reads
+    );
+    println!(
+        "  MVCC balance/all/contract reads: {} / {} / {}",
+        contract_diagnostics.mvcc_balance_reads,
+        contract_diagnostics.mvcc_all_balances_reads,
+        contract_diagnostics.mvcc_contract_reads
+    );
+    println!(
+        "  receipt access records:         {:>10}",
+        contract_diagnostics.receipt_access_records
+    );
+    println!(
+        "  receipt read dependencies:      {:>10}",
+        contract_diagnostics.receipt_read_dependencies
+    );
+    println!(
+        "  receipt storage/balance/contract writes: {} / {} / {}",
+        contract_diagnostics.receipt_storage_writes,
+        contract_diagnostics.receipt_balance_writes,
+        contract_diagnostics.receipt_created_contracts
+    );
+    println!();
     println!("Prediction quality");
     println!("  predicted receipts:          {:>10}", totals.predicted);
     println!("  matched decided txs:         {:>10}", totals.matched);
@@ -2427,7 +2838,8 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
     println!("NOTE: pre-consensus speculative-execution speedup and post-consensus critical-path speedup are separate metrics and are not divided into one another.");
     println!("NOTE: invalidation predecessor attribution selects the nearest canonical predecessor whose prepared write set touches the concrete failed dependency.");
     println!("NOTE: an explicit execution dependency guarantees that predecessor completed before the victim launched; a replayed guarded predecessor is therefore reported as a cascade candidate.");
-    println!("NOTE: scheduler waves are diagnostic dependency levels only. The executor launches ready transactions across levels without global barriers and exposes only completed earlier-canonical versions.");
+    println!("NOTE: scheduler waves are diagnostic dependency levels only. The executor launches ready transactions across levels without global barriers and resolves completed earlier-canonical versions lazily through block-local MVCC.");
+    println!("NOTE: dependency cost diagnostics intentionally measure the current implementation's per-transaction deep snapshot clone plus replay of completed earlier versions; aggregate worker-stage times overlap and must not be summed as wall-clock components.");
     println!("NOTE: the current post-consensus validator is intentionally single-threaded. Parallel validation remains a future Brick-5 optimization; these diagnostics come first.");
     println!();
 }

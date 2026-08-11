@@ -100,7 +100,7 @@ fn make_block(contract: &Address, count: usize) -> acg_validator_sim::ProducedBl
 }
 
 #[test]
-fn validator_executor_accepts_wide_plan_and_preserves_serial_counter_semantics() {
+fn validator_executor_uses_split_phase_path_and_preserves_serial_counter_semantics() {
     let (engine, contract) = setup_engine();
     let block = make_block(&contract, 4);
     let plan = ExecutionPlan {
@@ -115,13 +115,12 @@ fn validator_executor_accepts_wide_plan_and_preserves_serial_counter_semantics()
         ParallelExecutionConfig { workers: 4 },
     );
 
-    let report = executor.execute_with_metrics(&block, &plan).unwrap();
+    let report = executor.execute(&block, &plan).unwrap();
 
-    assert_eq!(report.block.transactions.len(), 4);
-    assert_eq!(report.block.successful(), 4);
+    assert_eq!(report.transactions.len(), 4);
+    assert_eq!(report.successful(), 4);
     assert_eq!(
         report
-            .block
             .transactions
             .iter()
             .map(|execution| execution.transaction_id.0)
@@ -132,9 +131,6 @@ fn validator_executor_accepts_wide_plan_and_preserves_serial_counter_semantics()
         engine.raw_storage(&contract, b"count"),
         Some(4_u64.to_be_bytes().to_vec())
     );
-    assert_eq!(report.metrics.speculative.reused_results, 1);
-    assert_eq!(report.metrics.speculative.replayed_transactions, 3);
-    assert_eq!(report.metrics.wave_widths, vec![4]);
 }
 
 #[test]
@@ -151,7 +147,7 @@ fn validator_executor_rejects_plan_block_transaction_count_mismatch() {
     let executor =
         SpeculativeParallelBlockExecutor::new(engine, ParallelExecutionConfig { workers: 2 });
 
-    assert!(executor.execute_with_metrics(&block, &plan).is_err());
+    assert!(executor.execute(&block, &plan).is_err());
 }
 
 #[test]

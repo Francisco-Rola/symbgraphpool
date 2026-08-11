@@ -8,6 +8,7 @@ mod api;
 mod cache;
 mod engine;
 mod error;
+mod mvcc;
 mod native;
 mod parallel;
 mod querier;
@@ -22,10 +23,10 @@ pub use crate::engine::{CosmWasmEngine, EngineConfig};
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::native::{NativeCallContext, NativeContract};
 pub use crate::parallel::{
-    ParallelExecutionConfig, ParallelSpeculativeBlockOutcome, ParallelSpeculativeExecutionMetrics,
-    PostConsensusTimings, PredictionMatchMetrics, PreparedSpeculativeBlock,
-    ReconciliationDependencyEvidence, SpeculativeDependency, SpeculativeDependencyClass,
-    SpeculativeWave, SplitPhaseSpeculativeBlockOutcome,
+    ContractExecutionDiagnostics, DependencyPreexecutionDiagnostics, ParallelExecutionConfig,
+    ParallelSpeculativeExecutionMetrics, PostConsensusTimings, PredictionMatchMetrics,
+    PreparedSpeculativeBlock, ReconciliationDependencyEvidence, SpeculativeDependency,
+    SpeculativeDependencyClass, SpeculativeWave, SplitPhaseSpeculativeBlockOutcome,
 };
 pub use crate::speculative::{
     BalanceWrite, CanonicalTransaction, CanonicalTxDisposition, CanonicalTxResult, ReadDependency,

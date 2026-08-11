@@ -1,10 +1,9 @@
 use acg_cosmwasm_engine::{
     CanonicalTransaction, CanonicalTxDisposition, CosmWasmEngine, EngineError, ExecutionOutcome,
-    ParallelExecutionConfig, ParallelSpeculativeExecutionMetrics, PostConsensusTimings,
-    PredictionMatchMetrics, PreparedSpeculativeBlock, ReconciliationDependencyEvidence,
-    SpeculativeDependency, SpeculativeDependencyClass, SpeculativeExecutionMetrics,
-    SpeculativeWave, SplitPhaseSpeculativeBlockOutcome, StateSnapshot, TransactionId,
-    ValidationOutcome,
+    ParallelExecutionConfig, PostConsensusTimings, PredictionMatchMetrics,
+    PreparedSpeculativeBlock, ReconciliationDependencyEvidence, SpeculativeDependency,
+    SpeculativeDependencyClass, SpeculativeExecutionMetrics, SpeculativeWave,
+    SplitPhaseSpeculativeBlockOutcome, StateSnapshot, TransactionId, ValidationOutcome,
 };
 use thiserror::Error;
 
@@ -102,14 +101,6 @@ impl SerialBlockExecutor {
     }
 }
 
-/// Runtime report for a block whose Brick-4 waves were actually launched speculatively in
-/// parallel and then validated/committed through the Brick-5B canonical coordinator.
-#[derive(Debug)]
-pub struct SpeculativeParallelExecutionReport {
-    pub block: BlockExecutionReport,
-    pub metrics: ParallelSpeculativeExecutionMetrics,
-}
-
 /// Per-transaction reconciliation metadata retained for benchmark diagnostics.
 ///
 /// This is observational only: canonical correctness remains entirely inside the engine's
@@ -123,7 +114,7 @@ pub struct ReconciliationTransactionDiagnostic {
     pub validation: Option<ValidationOutcome>,
 }
 
-/// Post-consensus report for split-phase Brick-5C.6 reconciliation.
+/// Post-consensus report for split-phase dependency/MVCC reconciliation.
 #[derive(Debug)]
 pub struct SplitPhaseSpeculativeExecutionReport {
     pub block: BlockExecutionReport,
@@ -245,80 +236,13 @@ impl SpeculativeParallelBlockExecutor {
         Ok(split_phase_report(block, outcome))
     }
 
-    pub fn execute_with_metrics(
-        &self,
-        block: &ProducedBlock,
-        plan: &ExecutionPlan,
-    ) -> Result<SpeculativeParallelExecutionReport, BlockExecutionError> {
-        plan.validate()?;
-        if plan.transaction_count != block.transactions.len() {
-            return Err(BlockExecutionError::TransactionCountMismatch {
-                plan: plan.transaction_count,
-                block: block.transactions.len(),
-            });
-        }
-
-        let canonical_transactions = block
-            .transactions
-            .iter()
-            .enumerate()
-            .map(|(transaction_index, pending)| {
-                let mut context = block.context.clone();
-                context.transaction_index =
-                    Some(u32::try_from(transaction_index).map_err(|_| {
-                        BlockExecutionError::TransactionIndexOverflow(transaction_index)
-                    })?);
-                Ok(CanonicalTransaction::new(context, pending.request.clone()))
-            })
-            .collect::<Result<Vec<_>, BlockExecutionError>>()?;
-
-        let speculative_waves = plan
-            .waves
-            .iter()
-            .map(|wave| {
-                SpeculativeWave::new(
-                    wave.transaction_indices
-                        .iter()
-                        .map(|&transaction_index| {
-                            block.transactions[transaction_index].transaction_id()
-                        })
-                        .collect(),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let outcome = self.engine.execute_parallel_waves(
-            self.config,
-            canonical_transactions,
-            speculative_waves,
-        )?;
-        let transactions = outcome
-            .transactions
-            .into_iter()
-            .enumerate()
-            .map(|(transaction_index, result)| TransactionExecution {
-                transaction_index,
-                transaction_id: result.transaction_id,
-                result: result.result,
-            })
-            .collect();
-
-        Ok(SpeculativeParallelExecutionReport {
-            block: BlockExecutionReport {
-                block_height: block.context.height,
-                block_time_nanos: block.context.time_nanos,
-                transactions,
-            },
-            metrics: outcome.metrics,
-        })
-    }
-
     pub fn execute(
         &self,
         block: &ProducedBlock,
         plan: &ExecutionPlan,
     ) -> Result<BlockExecutionReport, BlockExecutionError> {
-        Ok(self.execute_with_metrics(block, plan)?.block)
+        let prepared = self.prepare(block, plan)?;
+        Ok(self.validate_prepared(block, prepared)?.block)
     }
 }
 
