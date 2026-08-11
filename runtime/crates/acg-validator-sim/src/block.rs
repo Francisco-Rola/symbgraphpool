@@ -67,6 +67,21 @@ impl BlockProducer<FifoSelectionPolicy> {
     pub fn fifo(config: BlockProducerConfig) -> Result<Self, BlockProducerError> {
         Self::new(config, FifoSelectionPolicy)
     }
+
+    /// Preview the exact FIFO prefix and block context that `produce_next` would use, without
+    /// draining the mempool or advancing height/time.
+    pub fn preview_next(&self, mempool: &Mempool) -> ProducedBlock {
+        let limit = self.config.max_transactions_per_block.unwrap_or(usize::MAX);
+        ProducedBlock {
+            context: BlockContext {
+                height: self.next_height,
+                time_nanos: self.next_time_nanos,
+                chain_id: self.config.chain_id.clone(),
+                transaction_index: None,
+            },
+            transactions: mempool.peek_fifo(limit),
+        }
+    }
 }
 
 impl<P: BlockSelectionPolicy> BlockProducer<P> {
@@ -89,6 +104,10 @@ impl<P: BlockSelectionPolicy> BlockProducer<P> {
 
     pub fn next_block_time_nanos(&self) -> u64 {
         self.next_time_nanos
+    }
+
+    pub fn config(&self) -> &BlockProducerConfig {
+        &self.config
     }
 
     pub fn produce_next(&mut self, mempool: &Mempool) -> ProducedBlock {

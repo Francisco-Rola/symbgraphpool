@@ -116,7 +116,7 @@ fn weighted_static_edge_carries_posterior_confidence_kinds_and_provenance() {
 }
 
 #[test]
-fn weighted_materialization_threshold_is_inclusive_and_uses_unquantized_posterior() {
+fn symbolic_true_edge_remains_materialized_above_adaptive_threshold() {
     let graph = graph();
     let edge_index = static_edge(&graph, "execute::Credit", "execute::Credit");
     let store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
@@ -150,7 +150,8 @@ fn weighted_materialization_threshold_is_inclusive_and_uses_unquantized_posterio
             weighted_config(0, probability + (1.0 - probability) / 2.0),
         )
         .unwrap();
-    assert!(above.edges().is_empty());
+    assert_eq!(above.edges().len(), 1);
+    assert_eq!(above.edges()[0].predicate_result, PredicateResult::True);
 }
 
 #[test]
@@ -186,6 +187,25 @@ fn weighted_unknown_predicate_is_materialized_with_the_adaptive_posterior() {
     assert_eq!(edge.profile_edge_index(), Some(edge_index));
     assert!((edge.probability() - estimate.probability).abs() <= Q16_EPSILON);
     assert!(!edge.is_historical_override());
+
+    let pruned = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            vec![
+                tx(
+                    &graph,
+                    1,
+                    "execute::ResetAllBalances",
+                    1,
+                    json!({"info":{"sender":"admin"}}),
+                ),
+                tx(&graph, 2, "execute::Credit", 1, json!({"account":"alice"})),
+            ],
+            &store,
+            &feedback_config,
+            weighted_config(0, estimate.probability + (1.0 - estimate.probability) / 2.0),
+        )
+        .unwrap();
+    assert!(pruned.edges().is_empty());
 }
 
 #[test]
@@ -257,6 +277,19 @@ fn concrete_candidate_miss_overrides_false_predicate_and_same_instance_fast_path
     assert!(edge.is_historical_override());
     assert_eq!(edge.profile_edge_index(), Some(edge_index));
     assert!((edge.probability() - estimate.probability).abs() <= Q16_EPSILON);
+
+    let retained = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            vec![
+                tx(&graph, 1, "execute::Credit", 1, json!({"account":"alice"})),
+                tx(&graph, 2, "execute::Credit", 2, json!({"account":"bob"})),
+            ],
+            &store,
+            &feedback_config,
+            weighted_config(1, estimate.probability + (1.0 - estimate.probability) / 2.0),
+        )
+        .unwrap();
+    assert!(retained.edges()[0].is_historical_override());
 }
 
 #[test]
@@ -319,7 +352,7 @@ fn runtime_discovered_fallback_becomes_a_weighted_future_candidate_edge() {
     assert!((edge.probability() - estimate.probability).abs() <= Q16_EPSILON);
     assert!((edge.confidence() - estimate.confidence).abs() <= Q16_EPSILON);
 
-    let pruned = CandidateGraphBuilder::new(&graph)
+    let retained = CandidateGraphBuilder::new(&graph)
         .build_weighted(
             transactions(),
             &store,
@@ -327,7 +360,8 @@ fn runtime_discovered_fallback_becomes_a_weighted_future_candidate_edge() {
             weighted_config(1, estimate.probability + (1.0 - estimate.probability) / 2.0),
         )
         .unwrap();
-    assert!(pruned.edges().is_empty());
+    let retained_edge = retained.edge_between(TxIndex(0), TxIndex(1)).unwrap();
+    assert_eq!(retained_edge.runtime_edge_id(), Some(fallback.id));
 }
 
 #[test]

@@ -2,7 +2,8 @@
 //!
 //! Networking and consensus are deliberately modeled as timing/admission components rather than
 //! real protocols. All submitted transactions are accepted, block production is FIFO by default,
-//! and execution is serial until speculative validation is introduced.
+//! while split-phase Brick-5 execution can use dependency-driven speculative pre-execution with
+//! canonical validation/replay as the correctness boundary.
 
 mod block;
 mod executor;
@@ -16,8 +17,9 @@ pub use crate::block::{
     FifoSelectionPolicy, ProducedBlock,
 };
 pub use crate::executor::{
-    BlockExecutionError, BlockExecutionReport, BlockExecutor, SerialBlockExecutor,
-    TransactionExecution,
+    BlockExecutionError, BlockExecutionReport, BlockExecutor, ReconciliationTransactionDiagnostic,
+    SerialBlockExecutor, SpeculativeParallelBlockExecutor, SpeculativeParallelExecutionReport,
+    SplitPhaseSpeculativeExecutionReport, TransactionExecution,
 };
 pub use crate::ingress::{
     IngressConfig, IngressError, RateControlledIngress, DEFAULT_BENCHMARK_INGRESS_TPS,
@@ -25,5 +27,6 @@ pub use crate::ingress::{
 pub use crate::mempool::{AdmissionReceipt, Mempool, PendingTransaction};
 pub use crate::pipeline::{PipelineError, SingleValidatorRuntime};
 pub use crate::scheduler::{
-    BlockScheduler, ExecutionPlan, ExecutionWave, FifoScheduler, SchedulingError,
+    BlockScheduler, ExecutionDependency, ExecutionDependencyClass, ExecutionPlan, ExecutionWave,
+    FifoScheduler, SchedulingError,
 };

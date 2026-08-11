@@ -123,6 +123,7 @@ impl BlockScheduler for ReverseScheduler {
                     transaction_indices: vec![index],
                 })
                 .collect(),
+            dependencies: Vec::new(),
         })
     }
 }
@@ -287,6 +288,7 @@ fn serial_executor_rejects_parallel_waves_until_validation_exists() {
         waves: vec![ExecutionWave {
             transaction_indices: vec![0, 1],
         }],
+        dependencies: Vec::new(),
     };
 
     let error = SerialBlockExecutor::new(engine)
@@ -342,4 +344,30 @@ fn ingress_can_fill_the_mempool_up_to_the_next_block_boundary() {
     let report = runtime.produce_and_execute().unwrap();
     assert_eq!(report.successful(), 4);
     assert_eq!(ingress.queued(), 1);
+}
+
+#[test]
+fn fifo_block_preview_is_non_destructive_and_matches_next_produced_batch() {
+    let mempool = Mempool::default();
+    for id in 1_u64..=5 {
+        mempool.admit(placeholder_request(id), id * 10);
+    }
+    let config = BlockProducerConfig {
+        block_interval: std::time::Duration::from_millis(700),
+        first_block_time_nanos: 700_000_000,
+        max_transactions_per_block: Some(3),
+        ..BlockProducerConfig::default()
+    };
+    let mut producer = BlockProducer::fifo(config).unwrap();
+
+    let preview = producer.preview_next(&mempool);
+    assert_eq!(mempool.len(), 5);
+    assert_eq!(preview.context.height, 1);
+    assert_eq!(preview.context.time_nanos, 700_000_000);
+    assert_eq!(preview.transactions.len(), 3);
+
+    let produced = producer.produce_next(&mempool);
+    assert_eq!(preview, produced);
+    assert_eq!(mempool.len(), 2);
+    assert_eq!(producer.next_block_time_nanos(), 1_400_000_000);
 }

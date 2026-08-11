@@ -66,6 +66,21 @@ impl Mempool {
         self.state.lock().queue.iter().cloned().collect()
     }
 
+    /// Return up to `limit` FIFO transactions without removing them.
+    ///
+    /// This is the deterministic next-block prediction used by the Brick-5C.5 pre-consensus
+    /// pipeline. With the default FIFO admission policy, a later `produce_next` call will select
+    /// the same prefix unless the selection policy itself changes.
+    pub fn peek_fifo(&self, limit: usize) -> Vec<PendingTransaction> {
+        self.state
+            .lock()
+            .queue
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn drain_fifo(&self, limit: usize) -> Vec<PendingTransaction> {
         let mut state = self.state.lock();
         let count = limit.min(state.queue.len());

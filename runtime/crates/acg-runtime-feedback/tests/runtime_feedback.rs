@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use acg_candidate_graph::{
     CandidateGraph, CandidateGraphBuilder, CandidateTransaction, WeightedCandidateGraphConfig,
 };
@@ -940,6 +942,75 @@ fn speculative_pre_execution_uses_lower_default_weight_than_canonical_evidence()
     );
     assert_eq!(pre.observations()[0].weight, 1.0);
     assert_eq!(canonical.observations()[0].weight, 3.0);
+}
+
+#[test]
+fn replay_execution_compares_replayed_with_reused_without_double_counting_reused_pairs() {
+    let graph = profile_graph();
+    let candidate = candidate_graph(
+        &graph,
+        vec![
+            candidate_tx(&graph, 1, "execute::Credit", json!({"account":"alice"})),
+            candidate_tx(&graph, 2, "execute::Credit", json!({"account":"alice"})),
+            candidate_tx(&graph, 3, "execute::Credit", json!({"account":"alice"})),
+        ],
+    );
+    let store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let replay_report = report(vec![
+        successful_execution(
+            0,
+            1,
+            vec![access(
+                1,
+                "contract-a",
+                AccessKind::StorageWrite,
+                b"left",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            1,
+            2,
+            vec![access(
+                2,
+                "contract-a",
+                AccessKind::StorageRead,
+                b"right",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            2,
+            3,
+            vec![access(
+                3,
+                "contract-a",
+                AccessKind::StorageRead,
+                b"other",
+                None,
+                false,
+            )],
+        ),
+    ]);
+
+    let observations = collector()
+        .collect_replay_execution(
+            &graph,
+            &candidate,
+            &replay_report,
+            &BTreeSet::from([TxIndex(0)]),
+            &store,
+            4,
+        )
+        .unwrap();
+    assert_eq!(observations.len(), 2);
+    assert!(observations.observations().iter().all(|observation| {
+        observation.observation_source == ObservationSource::Replay
+            && observation.outcome == ObservationOutcome::Independent
+            && observation.weight == 4.0
+    }));
 }
 
 #[test]

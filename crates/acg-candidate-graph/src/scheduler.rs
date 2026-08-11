@@ -1,34 +1,57 @@
-//! Runtime-independent hard/soft edge classification and risk-bounded wave scheduling.
+//! Runtime-independent adaptive edge classification and dependency-aware scheduling.
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::BTreeMap};
 
 use acg_core::TxIndex;
+use acg_predicate::PredicateResult;
 use thiserror::Error;
 
-use crate::{CandidateGraph, CandidateTransaction, TransactionEdge};
+use crate::{CandidateGraph, EdgeProvenance, TransactionEdge};
 
-/// Scheduling treatment derived from a concrete transaction-edge probability.
+/// Scheduling treatment derived from symbolic/runtime evidence plus adaptive probability.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum EdgeClass {
     /// Below the soft threshold; ignored by the primary scheduler.
     Low,
-    /// Contributes probabilistic risk when two transactions share a wave.
+    /// May execute concurrently when the aggregate risk budget allows it.
     Soft,
-    /// Oriented by predicted-order-compatible priority and enforced as a predecessor constraint.
+    /// Must execute after its canonical predecessor has completed and published its version.
     Hard,
 }
 
-/// Scheduler parameters for Brick 4's first adaptive wave scheduler.
+/// One ordering dependency emitted by the scheduler.
+///
+/// Hard dependencies are always present. Soft dependencies are emitted when the scheduler chose
+/// to separate a soft pair into different waves; soft pairs intentionally co-scheduled in one wave
+/// remain speculative and therefore have no execution dependency.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ScheduledDependency {
+    pub predecessor: TxIndex,
+    pub successor: TxIndex,
+    pub class: EdgeClass,
+}
+
+/// Scheduler parameters for adaptive dependency scheduling.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RiskBoundedSchedulerConfig {
-    /// Probability at or above which an edge contributes same-wave risk.
+    /// Probability at or above which an ordinary adaptive edge contributes same-wave risk.
     pub soft_threshold: f64,
-    /// Probability at or above which an edge becomes a hard predecessor dependency.
+    /// Probability at or above which an evidence-mature edge remains a hard predecessor dependency.
     pub hard_threshold: f64,
     /// Maximum combined soft-conflict risk accepted for one transaction placement.
     pub risk_budget: f64,
-    /// Optional upper bound on transactions in one wave.
+    /// Optional upper bound on transactions in one reported wave.
     pub max_wave_width: Option<usize>,
+    /// Concrete independence observations required before a symbolic/runtime-discovered hard
+    /// relationship may be demoted to soft by its adaptive probability. `0` disables hard-to-soft
+    /// demotion.
+    ///
+    /// Fresh `PredicateResult::True`, historical false-overrides, and runtime-discovered edges are
+    /// hard regardless of their prior probability. Repeated observed conflicts do not mature the
+    /// softening gate; only executions that did *not* observe the relationship do. After this many
+    /// independence observations, the edge remains hard only while its posterior probability is
+    /// at least `hard_threshold`; otherwise it becomes soft.
+    pub independent_observations_before_softening: u32,
 }
 
 impl Default for RiskBoundedSchedulerConfig {
@@ -38,6 +61,7 @@ impl Default for RiskBoundedSchedulerConfig {
             hard_threshold: 0.80,
             risk_budget: 0.20,
             max_wave_width: None,
+            independent_observations_before_softening: 8,
         }
     }
 }
@@ -61,21 +85,41 @@ impl RiskBoundedSchedulerConfig {
 
     /// Classifies one already-materialized candidate edge.
     ///
-    /// Thresholds are inclusive: `p == hard_threshold` is hard and
-    /// `p == soft_threshold` is soft unless it is also hard.
+    /// Proven symbolic conflicts and concrete runtime-discovered relationships begin Hard. Once
+    /// enough concrete evidence exists, their posterior may demote them to Soft. This implements
+    /// "hard until disproved by execution" without letting a symbolic prior alone soften a known
+    /// relationship. Ordinary Unknown edges retain probability-threshold classification.
     pub fn classify(&self, edge: &TransactionEdge) -> EdgeClass {
-        let probability = edge.probability();
-        if probability >= self.hard_threshold {
-            EdgeClass::Hard
-        } else if probability >= self.soft_threshold {
-            EdgeClass::Soft
+        let initially_hard = edge.predicate_result == PredicateResult::True
+            || edge.is_historical_override()
+            || matches!(edge.provenance, EdgeProvenance::RuntimeDiscovered { .. });
+
+        if initially_hard {
+            let evidence_mature = self.independent_observations_before_softening != 0
+                && edge.concrete_independent_observations
+                    >= self.independent_observations_before_softening;
+            if !evidence_mature || edge.probability() >= self.hard_threshold {
+                EdgeClass::Hard
+            } else {
+                EdgeClass::Soft
+            }
         } else {
-            EdgeClass::Low
+            let probability = edge.probability();
+            if probability >= self.hard_threshold {
+                EdgeClass::Hard
+            } else if probability >= self.soft_threshold {
+                EdgeClass::Soft
+            } else {
+                EdgeClass::Low
+            }
         }
     }
 }
 
-/// One parallel execution wave. Transactions in different waves retain wave ordering.
+/// One dependency level retained for diagnostics/theoretical scheduling metrics.
+///
+/// The Brick-5 executor no longer treats these as global barriers. Actual launch eligibility is
+/// driven by [`RiskBoundedSchedule::ordering_dependencies`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduledWave {
     pub transaction_indices: Vec<TxIndex>,
@@ -86,6 +130,7 @@ pub struct ScheduledWave {
 pub struct RiskBoundedSchedule {
     pub transaction_count: usize,
     pub waves: Vec<ScheduledWave>,
+    pub ordering_dependencies: Vec<ScheduledDependency>,
 }
 
 impl RiskBoundedSchedule {
@@ -95,7 +140,17 @@ impl RiskBoundedSchedule {
             .position(|wave| wave.transaction_indices.contains(&tx_index))
     }
 
-    /// Checks both structural validity and the Brick 4C scheduling constraints against `graph`.
+    pub fn predecessors(
+        &self,
+        tx_index: TxIndex,
+    ) -> impl Iterator<Item = ScheduledDependency> + '_ {
+        self.ordering_dependencies
+            .iter()
+            .copied()
+            .filter(move |dependency| dependency.successor == tx_index)
+    }
+
+    /// Checks structural validity and dependency/risk constraints against `graph`.
     pub fn validate_against(
         &self,
         graph: &CandidateGraph,
@@ -114,15 +169,14 @@ impl RiskBoundedSchedule {
             if wave.transaction_indices.is_empty() {
                 return Err(SchedulingError::EmptyWave);
             }
-            match config.max_wave_width {
-                Some(max_width) if wave.transaction_indices.len() > max_width => {
+            if let Some(max_width) = config.max_wave_width {
+                if wave.transaction_indices.len() > max_width {
                     return Err(SchedulingError::WaveCapacityExceeded {
                         wave_index,
                         actual: wave.transaction_indices.len(),
                         maximum: max_width,
                     });
                 }
-                Some(_) | None => {}
             }
             for &tx_index in &wave.transaction_indices {
                 let offset = tx_index.0 as usize;
@@ -138,44 +192,41 @@ impl RiskBoundedSchedule {
             return Err(SchedulingError::MissingTransactions);
         }
 
-        let analysis = SchedulingAnalysis::from_graph(graph, config);
-        let mut priority_order = (0..graph.transactions().len())
+        let expected = SchedulingAnalysis::from_graph(graph, config);
+        let expected_dependencies = expected.dependencies_for_assignment(&assigned_wave)?;
+        if expected_dependencies != self.ordering_dependencies {
+            return Err(SchedulingError::DependencySetMismatch);
+        }
+
+        let mut placed_wave = vec![None; graph.transactions().len()];
+        let mut canonical_order = (0..graph.transactions().len())
             .map(|offset| TxIndex(offset as u32))
             .collect::<Vec<_>>();
-        priority_order.sort_by(|left, right| analysis.compare_priority(*left, *right));
-        let mut placed_wave = vec![None; graph.transactions().len()];
+        canonical_order.sort_by(|left, right| expected.compare_canonical_order(*left, *right));
 
-        for tx_index in priority_order {
-            let successor_wave = assigned_wave[tx_index.0 as usize].expect("completeness checked");
-            for &predecessor in &analysis.hard_predecessors[tx_index.0 as usize] {
-                let predecessor_wave =
-                    assigned_wave[predecessor.0 as usize].expect("completeness checked");
-                if predecessor_wave >= successor_wave {
-                    return Err(SchedulingError::HardDependencyViolation {
-                        predecessor,
-                        successor: tx_index,
-                        predecessor_wave,
-                        successor_wave,
-                    });
-                }
-            }
-
-            let risk = analysis.soft_risk(tx_index, successor_wave, &placed_wave);
+        for tx_index in canonical_order {
+            let wave_index = assigned_wave[tx_index.0 as usize].expect("completeness checked");
+            let risk = expected.soft_risk(tx_index, wave_index, &placed_wave);
             if risk > config.risk_budget {
                 return Err(SchedulingError::RiskBudgetExceeded {
                     tx_index,
-                    wave_index: successor_wave,
+                    wave_index,
                     risk,
                     budget: config.risk_budget,
                 });
             }
-            placed_wave[tx_index.0 as usize] = Some(successor_wave);
+            placed_wave[tx_index.0 as usize] = Some(wave_index);
         }
         Ok(())
     }
 }
 
-/// Bounded greedy scheduler over a Brick 4B weighted candidate graph.
+/// Greedy scheduler that preserves canonical orientation for every materialized non-Low edge.
+///
+/// Hard edges must be in an earlier wave. Soft edges may share a wave if the risk budget allows;
+/// otherwise they are canonically ordered and emitted as execution dependencies. This makes the
+/// reported waves a useful levelization while allowing the runtime executor to launch successors
+/// immediately when their actual predecessor set completes instead of imposing global barriers.
 #[derive(Clone, Copy, Debug)]
 pub struct RiskBoundedScheduler {
     config: RiskBoundedSchedulerConfig,
@@ -203,6 +254,7 @@ impl RiskBoundedScheduler {
             return Ok(RiskBoundedSchedule {
                 transaction_count: 0,
                 waves: Vec::new(),
+                ordering_dependencies: Vec::new(),
             });
         }
 
@@ -210,14 +262,17 @@ impl RiskBoundedScheduler {
         let mut order = (0..transaction_count)
             .map(|offset| TxIndex(offset as u32))
             .collect::<Vec<_>>();
-        order.sort_by(|left, right| analysis.compare_priority(*left, *right));
+        order.sort_by(|left, right| analysis.compare_canonical_order(*left, *right));
 
         let mut waves = Vec::<ScheduledWave>::new();
         let mut assigned_wave = vec![None::<usize>; transaction_count];
 
         for tx_index in order {
+            let offset = tx_index.0 as usize;
             let mut minimum_wave = 0;
-            for &predecessor in &analysis.hard_predecessors[tx_index.0 as usize] {
+
+            // Hard dependencies must complete in a strictly earlier level.
+            for &predecessor in &analysis.hard_predecessors[offset] {
                 let predecessor_wave = assigned_wave[predecessor.0 as usize].ok_or(
                     SchedulingError::UnscheduledHardPredecessor {
                         predecessor,
@@ -225,6 +280,15 @@ impl RiskBoundedScheduler {
                     },
                 )?;
                 minimum_wave = minimum_wave.max(predecessor_wave + 1);
+            }
+
+            // A soft neighbor that precedes this transaction canonically may either share its
+            // wave (accepted speculation) or appear earlier, never later. This prevents arbitrary
+            // reordering of known soft relationships while still allowing risk-bounded overlap.
+            for &(neighbor, _) in &analysis.soft_neighbors[offset] {
+                if let Some(neighbor_wave) = assigned_wave[neighbor.0 as usize] {
+                    minimum_wave = minimum_wave.max(neighbor_wave);
+                }
             }
 
             let mut selected_wave = None;
@@ -243,7 +307,6 @@ impl RiskBoundedScheduler {
                 Some(wave_index) => wave_index,
                 None => {
                     let wave_index = waves.len();
-                    debug_assert!(wave_index >= minimum_wave);
                     waves.push(ScheduledWave {
                         transaction_indices: Vec::new(),
                     });
@@ -251,12 +314,14 @@ impl RiskBoundedScheduler {
                 }
             };
             waves[wave_index].transaction_indices.push(tx_index);
-            assigned_wave[tx_index.0 as usize] = Some(wave_index);
+            assigned_wave[offset] = Some(wave_index);
         }
 
+        let ordering_dependencies = analysis.dependencies_for_assignment(&assigned_wave)?;
         let schedule = RiskBoundedSchedule {
             transaction_count,
             waves,
+            ordering_dependencies,
         };
         debug_assert!(schedule.validate_against(graph, &self.config).is_ok());
         Ok(schedule)
@@ -268,29 +333,25 @@ struct SchedulingAnalysis<'graph> {
     graph: &'graph CandidateGraph,
     hard_predecessors: Vec<Vec<TxIndex>>,
     soft_neighbors: Vec<Vec<(TxIndex, f64)>>,
-    conflict_degree: Vec<usize>,
+    edge_classes: BTreeMap<(TxIndex, TxIndex), EdgeClass>,
 }
 
 impl<'graph> SchedulingAnalysis<'graph> {
     fn from_graph(graph: &'graph CandidateGraph, config: &RiskBoundedSchedulerConfig) -> Self {
         let transaction_count = graph.transactions().len();
-        let mut conflict_degree = vec![0usize; transaction_count];
-        for edge in graph.edges() {
-            if config.classify(edge) != EdgeClass::Low {
-                conflict_degree[edge.source.0 as usize] += 1;
-                conflict_degree[edge.target.0 as usize] += 1;
-            }
-        }
-
         let mut analysis = Self {
             graph,
             hard_predecessors: vec![Vec::new(); transaction_count],
             soft_neighbors: vec![Vec::new(); transaction_count],
-            conflict_degree,
+            edge_classes: BTreeMap::new(),
         };
 
         for edge in graph.edges() {
-            match config.classify(edge) {
+            let class = config.classify(edge);
+            analysis
+                .edge_classes
+                .insert((edge.source, edge.target), class);
+            match class {
                 EdgeClass::Low => {}
                 EdgeClass::Soft => {
                     let probability = edge.probability();
@@ -301,12 +362,7 @@ impl<'graph> SchedulingAnalysis<'graph> {
                 }
                 EdgeClass::Hard => {
                     let (predecessor, successor) =
-                        if analysis.compare_priority(edge.source, edge.target) != Ordering::Greater
-                        {
-                            (edge.source, edge.target)
-                        } else {
-                            (edge.target, edge.source)
-                        };
+                        analysis.canonical_pair(edge.source, edge.target);
                     analysis.hard_predecessors[successor.0 as usize].push(predecessor);
                 }
             }
@@ -322,17 +378,72 @@ impl<'graph> SchedulingAnalysis<'graph> {
         analysis
     }
 
-    fn compare_priority(&self, left: TxIndex, right: TxIndex) -> Ordering {
+    fn canonical_pair(&self, left: TxIndex, right: TxIndex) -> (TxIndex, TxIndex) {
+        if self.compare_canonical_order(left, right) != Ordering::Greater {
+            (left, right)
+        } else {
+            (right, left)
+        }
+    }
+
+    fn compare_canonical_order(&self, left: TxIndex, right: TxIndex) -> Ordering {
         let left_tx = &self.graph.transactions()[left.0 as usize];
         let right_tx = &self.graph.transactions()[right.0 as usize];
-        compare_transactions(
-            left,
-            left_tx,
-            self.conflict_degree[left.0 as usize],
-            right,
-            right_tx,
-            self.conflict_degree[right.0 as usize],
-        )
+        left_tx
+            .predicted_position
+            .cmp(&right_tx.predicted_position)
+            .then_with(|| left.cmp(&right))
+    }
+
+    fn dependencies_for_assignment(
+        &self,
+        assigned_wave: &[Option<usize>],
+    ) -> Result<Vec<ScheduledDependency>, SchedulingError> {
+        let mut dependencies = Vec::new();
+        for edge in self.graph.edges() {
+            let class = self
+                .edge_classes
+                .get(&(edge.source, edge.target))
+                .copied()
+                .unwrap_or(EdgeClass::Low);
+            if class == EdgeClass::Low {
+                continue;
+            }
+            let (predecessor, successor) = self.canonical_pair(edge.source, edge.target);
+            let predecessor_wave = assigned_wave[predecessor.0 as usize]
+                .ok_or(SchedulingError::MissingTransactions)?;
+            let successor_wave =
+                assigned_wave[successor.0 as usize].ok_or(SchedulingError::MissingTransactions)?;
+            match class {
+                EdgeClass::Hard => {
+                    if predecessor_wave >= successor_wave {
+                        return Err(SchedulingError::HardDependencyViolation {
+                            predecessor,
+                            successor,
+                            predecessor_wave,
+                            successor_wave,
+                        });
+                    }
+                    dependencies.push(ScheduledDependency {
+                        predecessor,
+                        successor,
+                        class,
+                    });
+                }
+                EdgeClass::Soft if predecessor_wave < successor_wave => {
+                    dependencies.push(ScheduledDependency {
+                        predecessor,
+                        successor,
+                        class,
+                    });
+                }
+                EdgeClass::Soft => {}
+                EdgeClass::Low => unreachable!(),
+            }
+        }
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        Ok(dependencies)
     }
 
     fn soft_risk(
@@ -349,30 +460,6 @@ impl<'graph> SchedulingAnalysis<'graph> {
         }
         1.0 - independence_probability
     }
-}
-
-fn compare_transactions(
-    left_index: TxIndex,
-    left: &CandidateTransaction,
-    left_degree: usize,
-    right_index: TxIndex,
-    right: &CandidateTransaction,
-    right_degree: usize,
-) -> Ordering {
-    left.predicted_position
-        .cmp(&right.predicted_position)
-        .then_with(|| {
-            right
-                .inclusion_probability
-                .total_cmp(&left.inclusion_probability)
-        })
-        .then_with(|| {
-            right
-                .estimated_execution_cost
-                .cmp(&left.estimated_execution_cost)
-        })
-        .then_with(|| right_degree.cmp(&left_degree))
-        .then_with(|| left_index.cmp(&right_index))
 }
 
 fn wave_has_capacity(wave: &ScheduledWave, max_wave_width: Option<usize>) -> bool {
@@ -424,18 +511,16 @@ pub enum SchedulingError {
         actual: usize,
         maximum: usize,
     },
-    #[error(
-        "hard dependency {predecessor:?} -> {successor:?} is violated by waves {predecessor_wave} and {successor_wave}"
-    )]
+    #[error("hard dependency {predecessor:?} -> {successor:?} is violated by waves {predecessor_wave} and {successor_wave}")]
     HardDependencyViolation {
         predecessor: TxIndex,
         successor: TxIndex,
         predecessor_wave: usize,
         successor_wave: usize,
     },
-    #[error(
-        "transaction {tx_index:?} has soft risk {risk} in wave {wave_index}, exceeding budget {budget}"
-    )]
+    #[error("schedule dependency set does not match candidate-graph classes and wave placement")]
+    DependencySetMismatch,
+    #[error("transaction {tx_index:?} has soft risk {risk} in wave {wave_index}, exceeding budget {budget}")]
     RiskBudgetExceeded {
         tx_index: TxIndex,
         wave_index: usize,
@@ -447,6 +532,7 @@ pub enum SchedulingError {
 #[cfg(test)]
 mod tests {
     use acg_core::{ConflictKinds, InstanceId, ProfileEdgeIndex, ProfileId, TxId, TxIndex};
+    use acg_feedback::RuntimeEdgeId;
     use acg_predicate::{InputBindings, PredicateResult};
 
     use super::*;
@@ -454,34 +540,66 @@ mod tests {
         finish_graph, quantize_q16, CandidateTransaction, EdgeProvenance, TransactionEdge,
     };
 
-    fn tx(
-        id: u64,
-        predicted_position: u32,
-        inclusion_probability: f32,
-        estimated_execution_cost: u32,
-    ) -> CandidateTransaction {
+    fn tx(id: u64, predicted_position: u32) -> CandidateTransaction {
         CandidateTransaction {
             tx_id: TxId(id),
             predicted_position,
-            inclusion_probability,
+            inclusion_probability: 1.0,
             profile_id: ProfileId(0),
             instance_id: InstanceId(0),
             input_bindings: InputBindings::empty(),
-            estimated_execution_cost,
+            estimated_execution_cost: 10,
         }
     }
 
-    fn edge(source: u32, target: u32, probability: f64) -> TransactionEdge {
+    fn edge_with(
+        source: u32,
+        target: u32,
+        probability: f64,
+        predicate_result: PredicateResult,
+        observations: u32,
+    ) -> TransactionEdge {
         TransactionEdge {
             source: TxIndex(source),
             target: TxIndex(target),
             provenance: EdgeProvenance::Static {
                 profile_edge_index: ProfileEdgeIndex(0),
             },
-            predicate_result: PredicateResult::True,
+            predicate_result,
             conflict_kinds: ConflictKinds::WRITE_WRITE,
             probability_q16: quantize_q16(probability),
             confidence_q16: 0,
+            concrete_conflict_observations: 0,
+            concrete_independent_observations: observations,
+        }
+    }
+
+    fn true_edge(source: u32, target: u32, probability: f64) -> TransactionEdge {
+        edge_with(source, target, probability, PredicateResult::True, 0)
+    }
+
+    fn soft_unknown(source: u32, target: u32, probability: f64) -> TransactionEdge {
+        edge_with(source, target, probability, PredicateResult::Unknown, 0)
+    }
+
+    fn runtime_edge(
+        source: u32,
+        target: u32,
+        probability: f64,
+        observations: u32,
+    ) -> TransactionEdge {
+        TransactionEdge {
+            source: TxIndex(source),
+            target: TxIndex(target),
+            provenance: EdgeProvenance::RuntimeDiscovered {
+                runtime_edge_id: RuntimeEdgeId(0),
+            },
+            predicate_result: PredicateResult::Unknown,
+            conflict_kinds: ConflictKinds::WRITE_WRITE,
+            probability_q16: quantize_q16(probability),
+            confidence_q16: 0,
+            concrete_conflict_observations: 0,
+            concrete_independent_observations: observations,
         }
     }
 
@@ -498,183 +616,153 @@ mod tests {
             hard_threshold: hard,
             risk_budget: risk,
             max_wave_width: None,
+            independent_observations_before_softening: 8,
         }
     }
 
     #[test]
-    fn classification_thresholds_are_inclusive() {
+    fn symbolic_true_starts_hard_even_with_soft_prior() {
         let cfg = config(0.2, 0.8, 0.2);
-        assert_eq!(cfg.classify(&edge(0, 1, 0.1)), EdgeClass::Low);
-        assert_eq!(cfg.classify(&edge(0, 1, 0.2)), EdgeClass::Soft);
-        assert_eq!(cfg.classify(&edge(0, 1, 0.799)), EdgeClass::Soft);
-        assert_eq!(cfg.classify(&edge(0, 1, 0.8)), EdgeClass::Hard);
-        assert_eq!(cfg.classify(&edge(0, 1, 1.0)), EdgeClass::Hard);
+        assert_eq!(cfg.classify(&true_edge(0, 1, 0.25)), EdgeClass::Hard);
     }
 
     #[test]
-    fn confidence_does_not_change_brick4c_probability_classification() {
+    fn repeated_concrete_conflicts_do_not_mature_symbolic_softening_gate() {
         let cfg = config(0.2, 0.8, 0.2);
-        let low_confidence = edge(0, 1, 0.5);
-        let mut high_confidence = low_confidence;
-        high_confidence.confidence_q16 = u16::MAX;
-        assert_eq!(cfg.classify(&low_confidence), EdgeClass::Soft);
-        assert_eq!(cfg.classify(&high_confidence), EdgeClass::Soft);
+        let mut edge = true_edge(0, 1, 0.10);
+        edge.concrete_conflict_observations = 100;
+        edge.concrete_independent_observations = 0;
+        assert_eq!(cfg.classify(&edge), EdgeClass::Hard);
     }
 
     #[test]
-    fn invalid_configuration_is_rejected() {
-        for (name, cfg) in [
-            ("soft", config(f64::NAN, 0.8, 0.2)),
-            ("hard", config(0.2, 1.1, 0.2)),
-            ("risk", config(0.2, 0.8, -0.1)),
-        ] {
-            assert!(
-                matches!(
-                    RiskBoundedScheduler::new(cfg),
-                    Err(SchedulingError::InvalidProbability { .. })
-                ),
-                "{name}"
-            );
-        }
-        assert!(matches!(
-            RiskBoundedScheduler::new(config(0.9, 0.8, 0.2)),
-            Err(SchedulingError::ThresholdOrder { .. })
-        ));
-        let mut zero_width = config(0.2, 0.8, 0.2);
-        zero_width.max_wave_width = Some(0);
-        assert_eq!(
-            RiskBoundedScheduler::new(zero_width).unwrap_err(),
-            SchedulingError::ZeroWaveWidth
-        );
+    fn symbolic_true_softens_after_concrete_negative_evidence_lowers_probability() {
+        let cfg = config(0.2, 0.8, 0.2);
+        let edge = edge_with(0, 1, 0.25, PredicateResult::True, 8);
+        assert_eq!(cfg.classify(&edge), EdgeClass::Soft);
+
+        let still_hard = edge_with(0, 1, 0.85, PredicateResult::True, 8);
+        assert_eq!(cfg.classify(&still_hard), EdgeClass::Hard);
     }
 
     #[test]
-    fn independent_transactions_share_the_earliest_wave() {
-        let graph = graph(
-            vec![tx(1, 0, 1.0, 10), tx(2, 1, 1.0, 10), tx(3, 2, 1.0, 10)],
-            vec![],
-        );
+    fn zero_softening_threshold_keeps_known_topology_hard() {
+        let mut cfg = config(0.2, 0.8, 0.2);
+        cfg.independent_observations_before_softening = 0;
+        let edge = edge_with(0, 1, 0.01, PredicateResult::True, 10_000);
+        assert_eq!(cfg.classify(&edge), EdgeClass::Hard);
+    }
+
+    #[test]
+    fn runtime_discovered_relationship_starts_hard_and_can_soften_after_evidence() {
+        let cfg = config(0.2, 0.8, 0.2);
+        assert_eq!(cfg.classify(&runtime_edge(0, 1, 0.10, 0)), EdgeClass::Hard);
+        assert_eq!(cfg.classify(&runtime_edge(0, 1, 0.10, 8)), EdgeClass::Soft);
+    }
+
+    #[test]
+    fn historical_false_override_is_known_topology_and_starts_hard() {
+        let cfg = config(0.2, 0.8, 0.2);
+        let edge = edge_with(0, 1, 0.10, PredicateResult::False, 1);
+        assert!(edge.is_historical_override());
+        assert_eq!(cfg.classify(&edge), EdgeClass::Hard);
+    }
+
+    #[test]
+    fn ordinary_unknown_edges_use_probability_thresholds() {
+        let cfg = config(0.2, 0.8, 0.2);
+        assert_eq!(cfg.classify(&soft_unknown(0, 1, 0.1)), EdgeClass::Low);
+        assert_eq!(cfg.classify(&soft_unknown(0, 1, 0.2)), EdgeClass::Soft);
+        assert_eq!(cfg.classify(&soft_unknown(0, 1, 0.8)), EdgeClass::Hard);
+    }
+
+    #[test]
+    fn independent_transactions_share_the_first_level() {
+        let graph = graph(vec![tx(1, 0), tx(2, 1), tx(3, 2)], vec![]);
         let scheduler = RiskBoundedScheduler::new(config(0.2, 0.8, 0.2)).unwrap();
         let schedule = scheduler.schedule(&graph).unwrap();
-        assert_eq!(
-            schedule.waves,
-            vec![ScheduledWave {
-                transaction_indices: vec![TxIndex(0), TxIndex(1), TxIndex(2)]
-            }]
-        );
+        assert_eq!(schedule.waves.len(), 1);
+        assert!(schedule.ordering_dependencies.is_empty());
         schedule
             .validate_against(&graph, scheduler.config())
             .unwrap();
     }
 
     #[test]
-    fn hard_edge_is_oriented_by_predicted_order_and_forces_a_later_wave() {
-        let graph = graph(
-            vec![tx(1, 20, 1.0, 10), tx(2, 10, 1.0, 10)],
-            vec![edge(0, 1, 0.95)],
-        );
+    fn hard_edge_uses_canonical_predicted_order_and_emits_dependency() {
+        let graph = graph(vec![tx(1, 20), tx(2, 10)], vec![true_edge(0, 1, 0.25)]);
         let scheduler = RiskBoundedScheduler::new(config(0.2, 0.8, 0.2)).unwrap();
         let schedule = scheduler.schedule(&graph).unwrap();
         assert_eq!(schedule.wave_for(TxIndex(1)), Some(0));
         assert_eq!(schedule.wave_for(TxIndex(0)), Some(1));
-        schedule
-            .validate_against(&graph, scheduler.config())
-            .unwrap();
+        assert_eq!(
+            schedule.ordering_dependencies,
+            vec![ScheduledDependency {
+                predecessor: TxIndex(1),
+                successor: TxIndex(0),
+                class: EdgeClass::Hard,
+            }]
+        );
     }
 
     #[test]
-    fn single_soft_edge_respects_the_risk_budget_boundary() {
-        let graph = graph(
-            vec![tx(1, 0, 1.0, 10), tx(2, 1, 1.0, 10)],
-            vec![edge(0, 1, 0.25)],
-        );
-        let probability = graph.edges()[0].probability();
-        let at_boundary = RiskBoundedScheduler::new(config(0.2, 0.8, probability))
+    fn soft_pair_can_share_a_level_at_the_risk_boundary() {
+        let edge = soft_unknown(0, 1, 0.25);
+        let probability = edge.probability();
+        let graph = graph(vec![tx(1, 0), tx(2, 1)], vec![edge]);
+        let schedule = RiskBoundedScheduler::new(config(0.2, 0.8, probability))
             .unwrap()
             .schedule(&graph)
             .unwrap();
-        assert_eq!(at_boundary.waves.len(), 1);
-
-        let below_boundary = RiskBoundedScheduler::new(config(0.2, 0.8, probability / 2.0))
-            .unwrap()
-            .schedule(&graph)
-            .unwrap();
-        assert_eq!(below_boundary.waves.len(), 2);
-    }
-
-    #[test]
-    fn cumulative_soft_risk_can_reject_a_wave_when_each_edge_alone_fits() {
-        let graph = graph(
-            vec![tx(1, 0, 1.0, 10), tx(2, 1, 1.0, 10), tx(3, 2, 1.0, 10)],
-            vec![edge(0, 2, 0.2), edge(1, 2, 0.2)],
-        );
-        let scheduler = RiskBoundedScheduler::new(config(0.15, 0.8, 0.30)).unwrap();
-        let schedule = scheduler.schedule(&graph).unwrap();
-        // tx0 and tx1 are independent. tx2 sees 1 - (0.8 * 0.8) = 0.36 risk in wave 0.
-        assert_eq!(schedule.wave_for(TxIndex(0)), Some(0));
-        assert_eq!(schedule.wave_for(TxIndex(1)), Some(0));
-        assert_eq!(schedule.wave_for(TxIndex(2)), Some(1));
-        schedule
-            .validate_against(&graph, scheduler.config())
-            .unwrap();
-    }
-
-    #[test]
-    fn low_edges_do_not_contribute_to_wave_risk() {
-        let graph = graph(
-            vec![tx(1, 0, 1.0, 10), tx(2, 1, 1.0, 10)],
-            vec![edge(0, 1, 0.19)],
-        );
-        let scheduler = RiskBoundedScheduler::new(config(0.2, 0.8, 0.0)).unwrap();
-        let schedule = scheduler.schedule(&graph).unwrap();
         assert_eq!(schedule.waves.len(), 1);
-        schedule
-            .validate_against(&graph, scheduler.config())
-            .unwrap();
+        assert!(schedule.ordering_dependencies.is_empty());
     }
 
     #[test]
-    fn scheduler_chooses_the_earliest_wave_satisfying_hard_and_soft_constraints() {
-        let graph = graph(
-            vec![
-                tx(1, 0, 1.0, 10),
-                tx(2, 1, 1.0, 10),
-                tx(3, 2, 1.0, 10),
-                tx(4, 3, 1.0, 10),
-            ],
-            vec![
-                edge(0, 1, 0.95), // tx1 must be after tx0.
-                edge(1, 3, 0.30), // tx3 cannot join tx1's wave at budget 0.20.
-            ],
-        );
-        let scheduler = RiskBoundedScheduler::new(config(0.2, 0.8, 0.20)).unwrap();
-        let schedule = scheduler.schedule(&graph).unwrap();
+    fn separated_soft_pair_becomes_an_execution_dependency() {
+        let graph = graph(vec![tx(1, 0), tx(2, 1)], vec![soft_unknown(0, 1, 0.30)]);
+        let schedule = RiskBoundedScheduler::new(config(0.2, 0.8, 0.20))
+            .unwrap()
+            .schedule(&graph)
+            .unwrap();
         assert_eq!(schedule.wave_for(TxIndex(0)), Some(0));
         assert_eq!(schedule.wave_for(TxIndex(1)), Some(1));
-        assert_eq!(schedule.wave_for(TxIndex(2)), Some(0));
-        // Wave 0 is earlier and has no edge to tx3, so it is the earliest valid placement.
-        assert_eq!(schedule.wave_for(TxIndex(3)), Some(0));
-        schedule
-            .validate_against(&graph, scheduler.config())
-            .unwrap();
+        assert_eq!(
+            schedule.ordering_dependencies,
+            vec![ScheduledDependency {
+                predecessor: TxIndex(0),
+                successor: TxIndex(1),
+                class: EdgeClass::Soft,
+            }]
+        );
     }
 
     #[test]
-    fn max_wave_width_bounds_parallel_placement() {
+    fn soft_relationship_never_inverts_canonical_order() {
         let graph = graph(
-            vec![
-                tx(1, 0, 1.0, 10),
-                tx(2, 1, 1.0, 10),
-                tx(3, 2, 1.0, 10),
-                tx(4, 3, 1.0, 10),
-                tx(5, 4, 1.0, 10),
-            ],
+            vec![tx(1, 0), tx(2, 1), tx(3, 2)],
+            vec![true_edge(0, 1, 0.1), soft_unknown(1, 2, 0.30)],
+        );
+        let schedule = RiskBoundedScheduler::new(config(0.2, 0.8, 0.20))
+            .unwrap()
+            .schedule(&graph)
+            .unwrap();
+        assert!(schedule.wave_for(TxIndex(0)) < schedule.wave_for(TxIndex(1)));
+        assert!(schedule.wave_for(TxIndex(1)) < schedule.wave_for(TxIndex(2)));
+    }
+
+    #[test]
+    fn max_wave_width_still_bounds_reported_levels() {
+        let graph = graph(
+            vec![tx(1, 0), tx(2, 1), tx(3, 2), tx(4, 3), tx(5, 4)],
             vec![],
         );
         let mut cfg = config(0.2, 0.8, 0.2);
         cfg.max_wave_width = Some(2);
-        let scheduler = RiskBoundedScheduler::new(cfg).unwrap();
-        let schedule = scheduler.schedule(&graph).unwrap();
+        let schedule = RiskBoundedScheduler::new(cfg)
+            .unwrap()
+            .schedule(&graph)
+            .unwrap();
         assert_eq!(
             schedule
                 .waves
@@ -683,81 +771,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 2, 1]
         );
-        schedule
-            .validate_against(&graph, scheduler.config())
-            .unwrap();
     }
 
     #[test]
-    fn tied_predicted_positions_use_inclusion_cost_degree_then_index_deterministically() {
-        let graph = graph(
-            vec![
-                tx(1, 7, 0.8, 10), // lower inclusion than tx1
-                tx(2, 7, 0.9, 10),
-                tx(3, 7, 0.9, 20), // higher cost than tx1
-                tx(4, 7, 0.9, 20), // same as tx2 but has conflict degree 1
-            ],
-            vec![edge(0, 3, 0.3)],
-        );
-        let scheduler = RiskBoundedScheduler::new(config(0.2, 0.8, 1.0)).unwrap();
-        let schedule = scheduler.schedule(&graph).unwrap();
-        assert_eq!(schedule.waves.len(), 1);
+    fn invalid_configuration_is_rejected() {
+        assert!(matches!(
+            RiskBoundedScheduler::new(config(f64::NAN, 0.8, 0.2)),
+            Err(SchedulingError::InvalidProbability { .. })
+        ));
+        assert!(matches!(
+            RiskBoundedScheduler::new(config(0.9, 0.8, 0.2)),
+            Err(SchedulingError::ThresholdOrder { .. })
+        ));
+        let mut zero = config(0.2, 0.8, 0.2);
+        zero.max_wave_width = Some(0);
         assert_eq!(
-            schedule.waves[0].transaction_indices,
-            vec![TxIndex(3), TxIndex(2), TxIndex(1), TxIndex(0)]
+            RiskBoundedScheduler::new(zero).unwrap_err(),
+            SchedulingError::ZeroWaveWidth
         );
-    }
-
-    #[test]
-    fn semantic_validator_detects_hard_and_risk_violations() {
-        let graph = graph(
-            vec![tx(1, 0, 1.0, 10), tx(2, 1, 1.0, 10), tx(3, 2, 1.0, 10)],
-            vec![edge(0, 1, 0.95), edge(0, 2, 0.3)],
-        );
-        let cfg = config(0.2, 0.8, 0.2);
-
-        let hard_violation = RiskBoundedSchedule {
-            transaction_count: 3,
-            waves: vec![
-                ScheduledWave {
-                    transaction_indices: vec![TxIndex(0), TxIndex(1)],
-                },
-                ScheduledWave {
-                    transaction_indices: vec![TxIndex(2)],
-                },
-            ],
-        };
-        assert!(matches!(
-            hard_violation.validate_against(&graph, &cfg),
-            Err(SchedulingError::HardDependencyViolation { .. })
-        ));
-
-        let risk_violation = RiskBoundedSchedule {
-            transaction_count: 3,
-            waves: vec![
-                ScheduledWave {
-                    transaction_indices: vec![TxIndex(0), TxIndex(2)],
-                },
-                ScheduledWave {
-                    transaction_indices: vec![TxIndex(1)],
-                },
-            ],
-        };
-        assert!(matches!(
-            risk_violation.validate_against(&graph, &cfg),
-            Err(SchedulingError::RiskBudgetExceeded { .. })
-        ));
-    }
-
-    #[test]
-    fn empty_graph_has_an_empty_valid_schedule() {
-        let graph = graph(vec![], vec![]);
-        let scheduler = RiskBoundedScheduler::new(config(0.2, 0.8, 0.2)).unwrap();
-        let schedule = scheduler.schedule(&graph).unwrap();
-        assert_eq!(schedule.transaction_count, 0);
-        assert!(schedule.waves.is_empty());
-        schedule
-            .validate_against(&graph, scheduler.config())
-            .unwrap();
     }
 }

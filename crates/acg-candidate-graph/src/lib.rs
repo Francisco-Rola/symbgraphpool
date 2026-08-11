@@ -4,7 +4,7 @@ pub mod scheduler;
 
 pub use scheduler::{
     EdgeClass, RiskBoundedSchedule, RiskBoundedScheduler, RiskBoundedSchedulerConfig,
-    ScheduledWave, SchedulingError,
+    ScheduledDependency, ScheduledWave, SchedulingError,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,6 +71,16 @@ pub struct TransactionEdge {
     pub probability_q16: u16,
     /// Operational confidence quantized to `[0, 65535]`.
     pub confidence_q16: u16,
+    /// Concrete executions that observed a real conflict for this relationship.
+    #[serde(default)]
+    pub concrete_conflict_observations: u32,
+    /// Concrete executions that observed the candidate relationship to be independent.
+    ///
+    /// Known symbolic/runtime topology starts hard. The scheduler uses this counter, rather than
+    /// total observations, as the maturity gate for hard-to-soft demotion: a relationship only
+    /// becomes eligible for speculation after repeated executions *did not* observe the conflict.
+    #[serde(default)]
+    pub concrete_independent_observations: u32,
 }
 
 impl TransactionEdge {
@@ -154,7 +164,11 @@ impl CandidateGraph {
 pub struct WeightedCandidateGraphConfig {
     /// Epoch at which adaptive edge statistics are projected for this candidate block.
     pub epoch: u64,
-    /// Profile relationships below this posterior probability are not materialized.
+    /// Posterior floor for ordinary unresolved (`Unknown`) static relationships.
+    ///
+    /// Concrete `True` predicate matches, historical candidate-miss overrides, and persisted
+    /// runtime-discovered topology stay materialized so learning can demote them from Hard to
+    /// Soft without silently deleting a known dependency relationship.
     pub edge_materialization_threshold: f64,
 }
 
@@ -272,9 +286,6 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                     config.epoch,
                     feedback_config,
                 )?;
-                if estimate.probability < config.edge_materialization_threshold {
-                    continue;
-                }
                 let profile_edge = &self.profile_graph.edges()[adjacency.edge_index.0 as usize];
                 materialize_static_profile_edge(
                     &transactions,
@@ -283,7 +294,10 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                     &self.compiled_predicates,
                     &mut edges,
                     profile_edge,
-                    StaticMaterialization::Adaptive { estimate },
+                    StaticMaterialization::Adaptive {
+                        estimate,
+                        edge_materialization_threshold: config.edge_materialization_threshold,
+                    },
                 )?;
             }
 
@@ -304,9 +318,6 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                     config.epoch,
                     feedback_config,
                 )?;
-                if estimate.probability < config.edge_materialization_threshold {
-                    continue;
-                }
                 materialize_runtime_fallback_edge(&buckets, &mut edges, fallback, estimate);
             }
         }
@@ -349,23 +360,47 @@ type PreparedBuckets = (Vec<Vec<TxIndex>>, Vec<BTreeMap<InstanceId, Vec<TxIndex>
 #[derive(Clone, Copy)]
 enum StaticMaterialization {
     Binary,
-    Adaptive { estimate: EdgeEstimate },
+    Adaptive {
+        estimate: EdgeEstimate,
+        edge_materialization_threshold: f64,
+    },
 }
 
 impl StaticMaterialization {
     fn has_candidate_miss_history(self) -> bool {
         match self {
             Self::Binary => false,
-            Self::Adaptive { estimate } => estimate.has_candidate_miss_history(),
+            Self::Adaptive { estimate, .. } => estimate.has_candidate_miss_history(),
         }
     }
 
-    fn probability_and_confidence(self) -> (u16, u16) {
+    fn should_materialize(self, predicate_result: PredicateResult) -> bool {
         match self {
-            Self::Binary => (u16::MAX, 0),
-            Self::Adaptive { estimate } => (
+            Self::Binary => predicate_result != PredicateResult::False,
+            Self::Adaptive {
+                estimate,
+                edge_materialization_threshold,
+            } => match predicate_result {
+                // A concrete predicate match is known symbolic topology. Keep it present so
+                // concrete execution can soften the relationship rather than erase it.
+                PredicateResult::True => true,
+                // A False predicate is normally pruned, unless runtime execution has already
+                // demonstrated that this static pruning rule can miss a real dependency.
+                PredicateResult::False => estimate.has_candidate_miss_history(),
+                // Only unresolved static topology remains subject to the generic materialization
+                // floor.
+                PredicateResult::Unknown => estimate.probability >= edge_materialization_threshold,
+            },
+        }
+    }
+    fn probability_confidence_and_observations(self) -> (u16, u16, u32, u32) {
+        match self {
+            Self::Binary => (u16::MAX, 0, 0, 0),
+            Self::Adaptive { estimate, .. } => (
                 quantize_q16(estimate.probability),
                 quantize_q16(estimate.confidence),
+                u32::try_from(estimate.positive_observations).unwrap_or(u32::MAX),
+                u32::try_from(estimate.negative_observations).unwrap_or(u32::MAX),
             ),
         }
     }
@@ -509,10 +544,15 @@ fn maybe_materialize_static_edge(
         right.instance_id,
         &right.input_bindings,
     );
-    if result == PredicateResult::False && !mode.has_candidate_miss_history() {
+    if !mode.should_materialize(result) {
         return Ok(());
     }
-    let (probability_q16, confidence_q16) = mode.probability_and_confidence();
+    let (
+        probability_q16,
+        confidence_q16,
+        concrete_conflict_observations,
+        concrete_independent_observations,
+    ) = mode.probability_confidence_and_observations();
     push_edge(
         edges,
         left_index,
@@ -524,6 +564,8 @@ fn maybe_materialize_static_edge(
         profile_edge.conflict_kinds,
         probability_q16,
         confidence_q16,
+        concrete_conflict_observations,
+        concrete_independent_observations,
     );
     Ok(())
 }
@@ -538,6 +580,10 @@ fn materialize_runtime_fallback_edge(
     let target_bucket = &buckets[fallback.target.0 as usize];
     let probability_q16 = quantize_q16(estimate.probability);
     let confidence_q16 = quantize_q16(estimate.confidence);
+    let concrete_conflict_observations =
+        u32::try_from(estimate.positive_observations).unwrap_or(u32::MAX);
+    let concrete_independent_observations =
+        u32::try_from(estimate.negative_observations).unwrap_or(u32::MAX);
     if fallback.source == fallback.target {
         for (left_offset, &left_index) in source_bucket.iter().enumerate() {
             for &right_index in source_bucket.iter().skip(left_offset + 1) {
@@ -552,6 +598,8 @@ fn materialize_runtime_fallback_edge(
                     fallback.conflict_kinds,
                     probability_q16,
                     confidence_q16,
+                    concrete_conflict_observations,
+                    concrete_independent_observations,
                 );
             }
         }
@@ -569,6 +617,8 @@ fn materialize_runtime_fallback_edge(
                     fallback.conflict_kinds,
                     probability_q16,
                     confidence_q16,
+                    concrete_conflict_observations,
+                    concrete_independent_observations,
                 );
             }
         }
@@ -585,6 +635,8 @@ fn push_edge(
     conflict_kinds: ConflictKinds,
     probability_q16: u16,
     confidence_q16: u16,
+    concrete_conflict_observations: u32,
+    concrete_independent_observations: u32,
 ) {
     let (source, target) = if left_index <= right_index {
         (left_index, right_index)
@@ -599,6 +651,8 @@ fn push_edge(
         conflict_kinds,
         probability_q16,
         confidence_q16,
+        concrete_conflict_observations,
+        concrete_independent_observations,
     });
 }
 

@@ -34,9 +34,9 @@ transaction overlays and never commit into the snapshot.
 
 ## Remaining Brick 5 stages
 
-- **5C:** bounded parallel worker pool for wave execution.
-- **5D:** validation/replay evidence fed into adaptive statistics without double counting.
-- **5E:** theoretical versus realized parallelism and execution-efficiency metrics.
+- **5D:** broader validation/replay-driven adaptive policy beyond the narrow hard-to-soft evidence
+  loop introduced by Brick 5C.6.
+- **5E:** cost-aware theoretical versus realized parallelism and execution-efficiency metrics.
 - **5F:** ConflictLab/MiniWarehouse serial-equivalence and performance acceptance.
 
 ## Brick 5B: canonical validation, reuse, and selective replay
@@ -56,3 +56,164 @@ A valid successful receipt commits its detached `StateWriteSet` atomically under
 Blind writes deliberately do not create read dependencies. Therefore a later canonical blind write can reuse its speculative receipt even when an earlier predecessor wrote the same key: canonical ordering still makes the later write authoritative.
 
 Brick 5B also introduces reuse/validation/replay metrics. Actual worker parallelism and wall-clock speedup remain Brick 5C/5E concerns.
+
+
+## Brick 5C: bounded parallel wave execution
+
+Brick 5C places a bounded Rayon worker pool underneath the 5A speculative receipt API and the 5B
+validator/replay coordinator. `CosmWasmEngine::execute_parallel_waves` consumes the canonical block
+transaction list plus Brick-4-style waves expressed as transaction IDs. It validates the complete
+plan before execution, captures one immutable snapshot per wave, executes every transaction in that
+wave concurrently up to the configured worker bound, and then drains every available receipt in
+canonical block order.
+
+The launch model intentionally has a strict wave barrier: all speculative tasks in wave N finish
+before wave N+1 is launched. A receipt from an earlier wave may remain pending when an earlier
+canonical predecessor has not been launched yet; once that predecessor becomes available, the 5B
+validator either reuses or replays the pending receipt against the now-canonical predecessor state.
+Worker completion order therefore has no consensus effect.
+
+`ParallelSpeculativeExecutionMetrics` records worker count, wave widths, 5B reuse/replay counters,
+and two early equal-cost planning bounds: exposed parallelism (`transactions / waves`) and a
+worker-aware strict-barrier theoretical speedup based on `sum(ceil(wave_width / workers))`. These are
+not wall-clock speedup claims. Brick 5E will add cost-aware theoretical bounds, worker busy/idle
+time, actual execution timings, realization efficiency, and replay tax.
+
+Brick 5C deliberately does not yet feed validation/replay evidence back into the adaptive graph;
+that remains Brick 5D.
+
+## Brick 5C.5: split-phase consensus timeline with post-commit speculation
+
+Brick 5C.5 separates three different activities that were previously bundled together:
+
+1. **next-block prediction and graph/schedule planning**;
+2. **parallel speculative execution**;
+3. **post-consensus validation/replay/commit**.
+
+The important state rule is now stricter: block N+1 may be predicted and its graph/schedule may be
+constructed while block N is being validated, but **N+1 transaction execution does not start until
+block N has canonically committed**. `SpeculativeParallelBlockExecutor::prepare` snapshots the
+canonical engine at that point, so N+1 receipts are always based on the actual post-N world state,
+not a guessed successor state. This intentionally trades some speculative lead time for much better
+receipt freshness and a cleaner correctness/performance model.
+
+With more than one configured worker, the MiniWarehouse harness overlaps only N+1
+graph/schedule planning with the single-threaded post-consensus validation of N. Once N commits,
+the full configured worker budget becomes available for N+1 pre-execution because validation and
+pre-execution no longer overlap. With one worker, planning is simply performed after N commits.
+
+The consensus window is independently configurable with `ACG_MW_CONSENSUS_MS` and is no longer
+constrained to be less than or equal to the mempool block-batching interval. In this benchmark it
+represents the design window available, after the predecessor commit, to finish any planning
+overhang plus parallel pre-execution before the next block decision. This is a deliberate research
+assumption: the benchmark measures whether the implementation fits the configured window rather
+than deriving that window from consensus internals. By default
+`ACG_MW_REQUIRE_PREEXEC_WITHIN_CONSENSUS=1`; a miss fails the measurement and asks the caller to
+increase the window. Setting it to `0` keeps the safe canonical-fallback path for stress tests.
+
+The mempool model remains FIFO and batched. Transaction arrival rate, initial backlog, block size,
+block interval, consensus window, worker count, and scheduler thresholds are all configurable. The
+benchmark reports admission-to-proposal and admission-to-decision latency, but those are virtual
+protocol timestamps; wall-clock `Instant` measurements are reserved for actual planning,
+pre-execution, validation, replay, and commit work.
+
+Planning overlap is accounted for explicitly. If planning N+1 takes 5 ms and validation N takes
+3 ms, only 3 ms are hidden; the remaining 2 ms of planning overhang plus N+1 pre-execution must fit
+inside the configured consensus window. The first block has no predecessor validation phase, so its
+full planning plus pre-execution cost is charged to the initial window.
+
+The benchmark continues to report adapter, candidate-graph, scheduler, schedule-validation and
+plan-conversion timings separately; within-block pair counts, materialized edge density, predicate
+True/Unknown/learned-False counts, top profile-pair expansions, wave widths and cost-aware
+parallelism; prediction precision/coverage; deadline hit rate; and post-consensus receipt matching,
+validation, replay/missing execution, reused-commit time, and speedup over a serial post-consensus
+baseline.
+
+
+## Brick 5C.6: dependency-driven versioned pre-execution
+
+Brick 5C.6 replaces the split-phase strict-wave launch model with a dependency-driven ready DAG.
+The scheduler still emits levels for diagnostics and theoretical analysis, but those levels are no
+longer global execution barriers. A transaction becomes runnable as soon as every explicit
+predecessor has completed. Independent chains can therefore overlap continuously across scheduler
+levels.
+
+Known topology starts conservatively. A concrete symbolic predicate result of `True`, a persisted
+historical candidate-miss override, or a runtime-discovered relationship is initially classified
+`Hard` regardless of its prior probability. Hard edges are oriented according to predicted/canonical
+block position and emitted as execution dependencies, so the successor cannot start before the
+predecessor has produced its speculative version. After
+`independent_observations_before_softening` concrete *independence* observations, the relationship
+may demote to `Soft` when its adaptive posterior falls below the hard threshold. A known relationship is not
+demoted directly to `Low`; softening means it becomes eligible for explicit risk-bounded
+speculation. Ordinary unresolved `Unknown` relationships continue to use Low/Soft/Hard probability
+thresholds.
+
+Known topology is also retained through candidate materialization. The generic materialization
+threshold applies to unresolved `Unknown` static relationships; a concrete symbolic `True`, a
+historical false-predicate override, and persisted runtime-discovered topology remain materialized
+even when their posterior falls below that threshold. This lets execution evidence soften a known
+dependency without silently deleting it from the graph.
+
+The speculative executor publishes each completed successful receipt as a temporary state version
+tagged by canonical transaction index. When transaction `i` launches, it forks the committed block
+base and applies every *completed* successful version with canonical index `< i` in canonical order.
+Consequently:
+
+- a future-canonical transaction can finish physically before `i` without leaking its writes
+  backward into `i`;
+- a completed hard predecessor becomes visible immediately even if unrelated earlier-canonical
+  transactions are still running;
+- unrelated earlier-canonical work is allowed to race, which is deliberate speculation rather than
+  a global-prefix barrier; and
+- final prepared state projection remains deterministic because detached receipts are applied in
+  canonical order.
+
+Soft edges have two outcomes during scheduling. If the risk budget accepts a same-level placement,
+the pair executes speculatively with no dependency. If the scheduler separates the pair, it emits a
+Soft execution dependency so the later transaction consumes the predecessor's completed version.
+Hard edges always emit a dependency and must occupy increasing diagnostic levels. The predictive
+graph therefore controls readiness, but it never authorizes canonical reuse: post-consensus concrete
+read-dependency validation remains the correctness authority and stale/missing receipts still replay
+canonically.
+
+Brick 5C.6 also feeds concrete execution evidence into the adaptive store before the broader Brick
+5D policy work. Successful pre-consensus receipts contribute actual read/write overlap and
+independence evidence. Transactions that replay post-consensus contribute their corrected concrete access traces against
+the final outcomes of the decided block, and the validation dependency that forced each replay
+contributes targeted positive evidence. Replay-vs-reused pairs are therefore observed after the
+replay, while reused-vs-reused pairs are not counted a second time because both traces were already
+observed during pre-execution. This is the evidence loop that allows initially Hard symbolic/runtime
+relationships to soften only after repeated concrete independence.
+
+The MiniWarehouse benchmark exposes `ACG_MW_SYMBOLIC_HARD_SOFTEN_AFTER` (default `8`; `0` disables
+softening) and now reports dependency counts, pre-execution/replay-feedback time, dependency-DAG theoretical lower
+bounds, and invalidation attribution in terms of guarded versus unguarded predecessors.
+
+### TODO before Brick 5D
+
+- **Validate the dependency/versioned executor on real MiniWarehouse Wasm.** Re-run the 4/16
+  warehouse block-size and worker sweeps. The first acceptance target is that known symbolic hard
+  predecessors stop producing stale receipts merely because an unrelated canonical prefix is
+  incomplete.
+- **Profile version construction and worker utilization.** The first implementation forks the
+  committed base and reapplies completed earlier-canonical write sets at transaction launch. This is
+  deliberately simple and correctness-oriented; replace it with a more efficient MVCC/version
+  index or persistent state overlay if snapshot reconstruction dominates pre-execution cost.
+- **Investigate residual `Unknown` predicates.** In particular, explain MiniWarehouse
+  `NewOrder <-> NewOrder` and Delivery-related Unknowns after dependency-order replay has been
+  removed as a confounder. Predicate improvements should target graph precision/parallel exposure,
+  not mask executor-ordering bugs.
+- **Parallel post-consensus validation/replay.** Keep concrete receipt dependencies as the
+  correctness authority. The predictive graph may partition or prioritize work but may never skip a
+  concrete dependency check.
+- **Snapshot-aware planning metadata.** Generalize adapter/binding so N+1 planning can safely
+  overlap N validation even when N creates or removes contract instances. MiniWarehouse uses one
+  stable contract instance.
+- **Persistent shared worker pool.** Remove per-block/thread-pool construction overhead after the
+  ready-DAG behavior is validated.
+- **Partial deadline completion.** Preserve receipts completed by the decision deadline rather than
+  treating the whole predicted block as all-or-nothing when deadline enforcement is disabled.
+- **Only then broaden Brick 5D learning policy.** The 5C.6 hard-to-soft loop is intentionally narrow:
+  known topology starts Hard and concrete execution may soften it. Broader adaptive policy should be
+  evaluated only after this execution model has stable correctness and performance numbers.

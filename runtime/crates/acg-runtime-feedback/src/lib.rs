@@ -4,7 +4,7 @@ mod adaptive_pipeline;
 
 pub use adaptive_pipeline::{
     AdaptiveBlockPlan, AdaptiveBlockRun, AdaptivePipelineError, AdaptivePlanningConfig,
-    AdaptiveSerialPipeline,
+    AdaptivePlanningMetrics, AdaptiveSerialPipeline,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +36,7 @@ pub struct RuntimeFeedbackWeights {
     pub validation_conflict: f64,
     pub validation_independent: f64,
     pub replay_conflict: f64,
+    pub replay_independent: f64,
 }
 
 impl Default for RuntimeFeedbackWeights {
@@ -48,6 +49,7 @@ impl Default for RuntimeFeedbackWeights {
             validation_conflict: 3.0,
             validation_independent: 3.0,
             replay_conflict: 4.0,
+            replay_independent: 4.0,
         }
     }
 }
@@ -62,6 +64,7 @@ impl RuntimeFeedbackWeights {
             ("validation_conflict", self.validation_conflict),
             ("validation_independent", self.validation_independent),
             ("replay_conflict", self.replay_conflict),
+            ("replay_independent", self.replay_independent),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(RuntimeFeedbackError::InvalidWeight {
@@ -367,6 +370,7 @@ impl BlockFeedbackCollector {
             ObservationSource::PreExecution,
             self.weights.pre_execution_conflict,
             self.weights.pre_execution_independent,
+            None,
         )
     }
 
@@ -387,6 +391,38 @@ impl BlockFeedbackCollector {
             ObservationSource::CanonicalExecution,
             self.weights.canonical_conflict,
             self.weights.canonical_independent,
+            None,
+        )
+    }
+
+    /// Collect concrete accesses for post-consensus replay evidence.
+    ///
+    /// `report` contains the final canonical outcomes for the whole decided block, while
+    /// `replayed_transactions` scopes observations to pairs with at least one transaction that
+    /// actually re-executed. This includes replay-vs-reused evidence without double-counting
+    /// reused-vs-reused pairs already observed during pre-execution.
+    pub fn collect_replay_execution(
+        &self,
+        profile_graph: &ProfileGraph,
+        candidate_graph: &CandidateGraph,
+        report: &BlockExecutionReport,
+        replayed_transactions: &BTreeSet<TxIndex>,
+        feedback_store: &AdaptiveFeedbackStore,
+        epoch: u64,
+    ) -> Result<ObservationBuffer, RuntimeFeedbackError> {
+        if replayed_transactions.is_empty() {
+            return Ok(ObservationBuffer::default());
+        }
+        self.collect_access_report(
+            profile_graph,
+            candidate_graph,
+            report,
+            feedback_store,
+            epoch,
+            ObservationSource::Replay,
+            self.weights.replay_conflict,
+            self.weights.replay_independent,
+            Some(replayed_transactions),
         )
     }
 
@@ -401,6 +437,7 @@ impl BlockFeedbackCollector {
         observation_source: ObservationSource,
         conflict_weight: f64,
         independent_weight: f64,
+        evidence_participants: Option<&BTreeSet<TxIndex>>,
     ) -> Result<ObservationBuffer, RuntimeFeedbackError> {
         let successful = successful_transactions(report)?;
         validate_report_candidate_alignment(candidate_graph, report)?;
@@ -414,6 +451,10 @@ impl BlockFeedbackCollector {
         let mut compared_pairs = BTreeSet::<(TxIndex, TxIndex)>::new();
 
         for conflict in observed {
+            let pair = canonical_tx_pair(conflict.left, conflict.right);
+            if !pair_in_evidence_scope(pair, evidence_participants) {
+                continue;
+            }
             let left = candidate_transaction(candidate_graph, conflict.left)?;
             let right = candidate_transaction(candidate_graph, conflict.right)?;
             let candidate_edge = candidate_graph.edge_between(conflict.left, conflict.right);
@@ -435,7 +476,8 @@ impl BlockFeedbackCollector {
 
         for edge in candidate_graph.edges() {
             let pair = canonical_tx_pair(edge.source, edge.target);
-            if !successful.contains(&pair.0)
+            if !pair_in_evidence_scope(pair, evidence_participants)
+                || !successful.contains(&pair.0)
                 || !successful.contains(&pair.1)
                 || observed_map.contains_key(&pair)
                 || !compared_pairs.insert(pair)
@@ -483,6 +525,7 @@ impl BlockFeedbackCollector {
                             observation_source,
                             independent_weight,
                             epoch,
+                            evidence_participants,
                         )?;
                     }
                 }
@@ -499,6 +542,7 @@ impl BlockFeedbackCollector {
                             observation_source,
                             independent_weight,
                             epoch,
+                            evidence_participants,
                         )?;
                     }
                 }
@@ -672,6 +716,16 @@ fn bucket_successful_by_profile(
     Ok(buckets)
 }
 
+fn pair_in_evidence_scope(
+    pair: (TxIndex, TxIndex),
+    evidence_participants: Option<&BTreeSet<TxIndex>>,
+) -> bool {
+    match evidence_participants {
+        Some(participants) => participants.contains(&pair.0) || participants.contains(&pair.1),
+        None => true,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn maybe_add_fallback_negative(
     graph: &CandidateGraph,
@@ -683,9 +737,13 @@ fn maybe_add_fallback_negative(
     observation_source: ObservationSource,
     weight: f64,
     epoch: u64,
+    evidence_participants: Option<&BTreeSet<TxIndex>>,
 ) -> Result<(), RuntimeFeedbackError> {
     let pair = canonical_tx_pair(left_index, right_index);
-    if observed.contains_key(&pair) || !compared.insert(pair) {
+    if !pair_in_evidence_scope(pair, evidence_participants)
+        || observed.contains_key(&pair)
+        || !compared.insert(pair)
+    {
         return Ok(());
     }
     let left = candidate_transaction(graph, pair.0)?;
@@ -781,6 +839,27 @@ impl RuntimeFeedbackEngine {
             profile_graph,
             candidate_graph,
             report,
+            &self.store,
+            epoch,
+        )?;
+        Ok(self
+            .store
+            .apply_batch(profile_graph, observations, &self.adaptive_config)?)
+    }
+
+    pub fn process_replay_execution(
+        &mut self,
+        profile_graph: &ProfileGraph,
+        candidate_graph: &CandidateGraph,
+        report: &BlockExecutionReport,
+        replayed_transactions: &BTreeSet<TxIndex>,
+        epoch: u64,
+    ) -> Result<ApplySummary, RuntimeFeedbackError> {
+        let observations = self.collector.collect_replay_execution(
+            profile_graph,
+            candidate_graph,
+            report,
+            replayed_transactions,
             &self.store,
             epoch,
         )?;

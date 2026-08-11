@@ -192,6 +192,78 @@ pub(crate) fn validate_dependencies(
     ValidationOutcome { conflicts }
 }
 
+pub(crate) fn write_set_touches_conflict(
+    write_set: &StateWriteSet,
+    conflict: &ValidationConflict,
+) -> bool {
+    match conflict {
+        ValidationConflict::ContractMetadata { address, .. } => write_set
+            .created_contracts
+            .iter()
+            .any(|metadata| &metadata.address == address),
+        ValidationConflict::Storage { contract, key, .. } => write_set
+            .storage
+            .iter()
+            .any(|write| &write.contract == contract && &write.key == key),
+        ValidationConflict::StorageRange {
+            contract,
+            expected,
+            actual,
+            ..
+        } => write_set.storage.iter().any(|write| {
+            &write.contract == contract
+                && range_conflict_changed_key(expected, actual, write.key.as_slice())
+        }),
+        ValidationConflict::BankBalance { address, denom, .. } => write_set
+            .balances
+            .iter()
+            .any(|write| &write.address == address && &write.denom == denom),
+        ValidationConflict::BankAllBalances {
+            address,
+            expected,
+            actual,
+            ..
+        } => write_set.balances.iter().any(|write| {
+            &write.address == address
+                && balance_conflict_changed_denom(expected, actual, write.denom.as_str())
+        }),
+    }
+}
+
+fn range_conflict_changed_key(
+    expected: &[(Vec<u8>, Vec<u8>)],
+    actual: &[(Vec<u8>, Vec<u8>)],
+    key: &[u8],
+) -> bool {
+    let expected_value = expected
+        .iter()
+        .find(|(candidate, _)| candidate.as_slice() == key)
+        .map(|(_, value)| value.as_slice());
+    let actual_value = actual
+        .iter()
+        .find(|(candidate, _)| candidate.as_slice() == key)
+        .map(|(_, value)| value.as_slice());
+    expected_value != actual_value
+}
+
+fn balance_conflict_changed_denom(
+    expected: &[(String, u128)],
+    actual: &[(String, u128)],
+    denom: &str,
+) -> bool {
+    let expected_amount = expected
+        .iter()
+        .find(|(candidate, _)| candidate == denom)
+        .map(|(_, amount)| *amount)
+        .unwrap_or_default();
+    let actual_amount = actual
+        .iter()
+        .find(|(candidate, _)| candidate == denom)
+        .map(|(_, amount)| *amount)
+        .unwrap_or_default();
+    expected_amount != actual_amount
+}
+
 pub(crate) fn apply_write_set(world: &SharedWorld, write_set: &StateWriteSet) {
     let mut world = world.write();
 

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use cosmwasm_std::{
     Addr, Attribute, BankMsg, Binary, BlockInfo, Coin, ContractInfo, ContractResult, CosmosMsg,
@@ -10,13 +11,21 @@ use cosmwasm_std::{
 use cosmwasm_vm::{
     call_execute, call_instantiate, call_query, call_reply, Backend, InstanceOptions,
 };
-use parking_lot::RwLock;
+use parking_lot::{Condvar, Mutex, RwLock};
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use sha2::{Digest, Sha256};
 
 use crate::api::{validate_address, EngineApi};
 use crate::cache::{WasmCacheConfig, WasmCacheMetrics, WasmModuleCache};
 use crate::error::{EngineError, EngineResult};
 use crate::native::{NativeCallContext, NativeContract};
+use crate::parallel::{
+    ParallelExecutionConfig, ParallelSpeculativeBlockOutcome, ParallelSpeculativeExecutionMetrics,
+    PostConsensusTimings, PredictionMatchMetrics, PreparedSpeculativeBlock,
+    ReconciliationDependencyEvidence, SpeculativeDependency, SpeculativeDependencyClass,
+    SpeculativeWave, SplitPhaseSpeculativeBlockOutcome,
+};
 use crate::querier::EngineQuerier;
 use crate::speculative::{
     CanonicalTransaction, CanonicalTxDisposition, CanonicalTxResult, SpeculativeBlockOutcome,
@@ -29,7 +38,9 @@ use crate::types::{
     AccessKind, Address, BlockContext, CodeChecksum, CodeId, CodeKind, CodeMetadata,
     ContractMetadata, ExecutionOutcome, ExecutionRequest, QueryOutcome, TransactionId,
 };
-use crate::validation::{apply_write_set, validate_dependencies, ValidationOutcome};
+use crate::validation::{
+    apply_write_set, validate_dependencies, write_set_touches_conflict, ValidationOutcome,
+};
 
 const EXECUTE_RESPONSE_TYPE_URL: &str = "/cosmwasm.wasm.v1.MsgExecuteContractResponse";
 const INSTANTIATE_RESPONSE_TYPE_URL: &str = "/cosmwasm.wasm.v1.MsgInstantiateContractResponse";
@@ -435,6 +446,664 @@ impl CosmWasmEngine {
         })
     }
 
+    /// Pre-execute a predicted block without mutating canonical state.
+    ///
+    /// This is the speculative half of the Brick-5C.5 split-phase pipeline. Every wave runs
+    /// through a bounded worker pool. As receipts become available, successful write sets are
+    /// applied only to a detached provisional snapshot in canonical-prefix order so later waves of
+    /// the *same block* can observe predicted predecessor effects. The MiniWarehouse 5C.5 pipeline
+    /// invokes this only after the previous block has canonically committed.
+    pub fn preexecute_parallel_waves(
+        &self,
+        config: ParallelExecutionConfig,
+        transactions: Vec<CanonicalTransaction>,
+        waves: Vec<SpeculativeWave>,
+    ) -> EngineResult<PreparedSpeculativeBlock> {
+        let base = self.snapshot();
+        self.preexecute_parallel_waves_from_snapshot(&base, config, transactions, waves)
+    }
+
+    /// Same as [`Self::preexecute_parallel_waves`], but starts from an explicit detached snapshot.
+    ///
+    /// This explicit-snapshot overload remains useful for deterministic tests and controlled
+    /// experiments. The default 5C.5 pipeline does not execute block `N + 1` from block `N`'s
+    /// predicted successor; it waits for canonical commit and calls [`Self::preexecute_parallel_waves`].
+    pub fn preexecute_parallel_waves_from_snapshot(
+        &self,
+        base: &StateSnapshot,
+        config: ParallelExecutionConfig,
+        transactions: Vec<CanonicalTransaction>,
+        waves: Vec<SpeculativeWave>,
+    ) -> EngineResult<PreparedSpeculativeBlock> {
+        if !Arc::ptr_eq(&self.core, &base.core) {
+            return Err(EngineError::InvalidConfiguration(
+                "state snapshot belongs to a different CosmWasm engine".to_owned(),
+            ));
+        }
+        let canonical_bindings = validate_speculative_wave_plan(config, &transactions, &waves)?;
+        let pool = build_speculative_pool(config)?;
+        let wave_widths = waves.iter().map(SpeculativeWave::len).collect::<Vec<_>>();
+        let predicted_successor = base.fork();
+        let mut receipts = BTreeMap::new();
+        let mut provisional_cursor = 0_usize;
+
+        for wave in waves {
+            let wave_snapshot = predicted_successor.fork();
+            let wave_transactions = wave
+                .transaction_ids
+                .iter()
+                .map(|transaction_id| {
+                    canonical_bindings
+                        .get(transaction_id)
+                        .expect("wave plan was validated before execution")
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+
+            let wave_receipts = pool.install(|| {
+                wave_transactions
+                    .into_par_iter()
+                    .map(|transaction| {
+                        self.execute_speculative(
+                            &wave_snapshot,
+                            transaction.block,
+                            transaction.request,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            for receipt in wave_receipts {
+                let receipt = receipt?;
+                let transaction_id = receipt.transaction_id;
+                if receipts.insert(transaction_id, receipt).is_some() {
+                    return Err(EngineError::Internal(format!(
+                        "duplicate speculative receipt for transaction ID {}",
+                        transaction_id.0
+                    )));
+                }
+            }
+
+            // Advance only the canonical prefix whose receipts are available. This avoids making
+            // a later canonical transaction visible to an earlier one merely because the scheduler
+            // placed the later transaction in an earlier speculative wave.
+            while provisional_cursor < transactions.len() {
+                let transaction_id = transactions[provisional_cursor].transaction_id();
+                let Some(receipt) = receipts.get(&transaction_id) else {
+                    break;
+                };
+                if receipt.is_success() {
+                    apply_write_set(&predicted_successor.state, &receipt.write_set);
+                }
+                provisional_cursor += 1;
+            }
+        }
+
+        if provisional_cursor != transactions.len() || receipts.len() != transactions.len() {
+            return Err(EngineError::Internal(
+                "validated speculative wave plan did not produce the complete predicted block"
+                    .to_owned(),
+            ));
+        }
+
+        let ordered_receipts = transactions
+            .iter()
+            .map(|transaction| {
+                receipts
+                    .remove(&transaction.transaction_id())
+                    .expect("every canonical transaction produced one receipt")
+            })
+            .collect::<Vec<_>>();
+
+        Ok(PreparedSpeculativeBlock {
+            predicted_transactions: transactions,
+            receipts: ordered_receipts,
+            metrics: ParallelSpeculativeExecutionMetrics {
+                workers: config.workers,
+                wave_widths,
+                speculative: SpeculativeExecutionMetrics {
+                    speculative_results: canonical_bindings.len() as u64,
+                    ..SpeculativeExecutionMetrics::default()
+                },
+                dependency_count: 0,
+                hard_dependency_count: 0,
+            },
+            predicted_successor,
+        })
+    }
+
+    /// Pre-execute a predicted block with pairwise dependency-driven readiness and versioned
+    /// speculative visibility.
+    ///
+    /// Unlike the legacy strict-wave path, scheduler waves are only diagnostic levels. A
+    /// transaction becomes runnable as soon as every explicit predecessor completes. Each
+    /// successful receipt is immediately published as a canonical-index-tagged speculative
+    /// version. A transaction at canonical index `i` builds its snapshot from all completed
+    /// successful versions with index `< i`, so future-canonical writes can never flow backward
+    /// while completed independent predecessors become visible without waiting for a contiguous
+    /// global prefix.
+    pub fn preexecute_dependency_plan(
+        &self,
+        config: ParallelExecutionConfig,
+        transactions: Vec<CanonicalTransaction>,
+        waves: Vec<SpeculativeWave>,
+        dependencies: Vec<SpeculativeDependency>,
+    ) -> EngineResult<PreparedSpeculativeBlock> {
+        let base = self.snapshot();
+        self.preexecute_dependency_plan_from_snapshot(
+            &base,
+            config,
+            transactions,
+            waves,
+            dependencies,
+        )
+    }
+
+    /// Explicit-snapshot variant of [`Self::preexecute_dependency_plan`].
+    pub fn preexecute_dependency_plan_from_snapshot(
+        &self,
+        base: &StateSnapshot,
+        config: ParallelExecutionConfig,
+        transactions: Vec<CanonicalTransaction>,
+        waves: Vec<SpeculativeWave>,
+        dependencies: Vec<SpeculativeDependency>,
+    ) -> EngineResult<PreparedSpeculativeBlock> {
+        if !Arc::ptr_eq(&self.core, &base.core) {
+            return Err(EngineError::InvalidConfiguration(
+                "state snapshot belongs to a different CosmWasm engine".to_owned(),
+            ));
+        }
+
+        let validated =
+            validate_speculative_dependency_plan(config, &transactions, &waves, &dependencies)?;
+        let wave_widths = waves.iter().map(SpeculativeWave::len).collect::<Vec<_>>();
+        let transaction_count = transactions.len();
+        if transaction_count == 0 {
+            return Ok(PreparedSpeculativeBlock {
+                predicted_transactions: transactions,
+                receipts: Vec::new(),
+                metrics: ParallelSpeculativeExecutionMetrics {
+                    workers: config.workers,
+                    wave_widths,
+                    speculative: SpeculativeExecutionMetrics::default(),
+                    dependency_count: dependencies.len(),
+                    hard_dependency_count: validated.hard_dependency_count,
+                },
+                predicted_successor: base.fork(),
+            });
+        }
+
+        let mut ready = BTreeSet::new();
+        for (index, remaining) in validated.remaining_predecessors.iter().enumerate() {
+            if *remaining == 0 {
+                ready.insert(index);
+            }
+        }
+        let shared = Arc::new((
+            Mutex::new(DependencyExecutionState {
+                ready,
+                remaining_predecessors: validated.remaining_predecessors,
+                successors: validated.successors,
+                receipts: (0..transaction_count).map(|_| None).collect(),
+                completed: 0,
+                in_flight: 0,
+                failure: None,
+            }),
+            Condvar::new(),
+        ));
+        let transactions = Arc::new(transactions);
+        let worker_count = config.workers.min(transaction_count).max(1);
+
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count {
+                let shared = shared.clone();
+                let transactions = transactions.clone();
+                scope.spawn(move || loop {
+                    let transaction_index = {
+                        let (state_lock, ready_changed) = &*shared;
+                        let mut state = state_lock.lock();
+                        loop {
+                            if state.failure.is_some() || state.completed == transaction_count {
+                                return;
+                            }
+                            if let Some(index) = state.ready.pop_first() {
+                                state.in_flight += 1;
+                                break index;
+                            }
+                            if state.in_flight == 0 {
+                                state.failure = Some(
+                                    "dependency-driven speculative execution reached a readiness deadlock"
+                                        .to_owned(),
+                                );
+                                ready_changed.notify_all();
+                                return;
+                            }
+                            ready_changed.wait(&mut state);
+                        }
+                    };
+
+                    // Snapshot all completed earlier-canonical versions at launch time. Hard and
+                    // scheduler-separated soft predecessors are guaranteed complete before the
+                    // transaction becomes ready; unrelated earlier transactions may still race,
+                    // which is intentional speculation and remains protected by concrete replay.
+                    let visible_write_sets = {
+                        let (state_lock, _) = &*shared;
+                        let state = state_lock.lock();
+                        state.receipts[..transaction_index]
+                            .iter()
+                            .filter_map(|receipt| receipt.as_ref())
+                            .filter(|receipt| receipt.is_success())
+                            .map(|receipt| receipt.write_set.clone())
+                            .collect::<Vec<_>>()
+                    };
+                    let snapshot = base.fork();
+                    for write_set in &visible_write_sets {
+                        apply_write_set(&snapshot.state, write_set);
+                    }
+
+                    let transaction = transactions[transaction_index].clone();
+                    let execution = self.execute_speculative(
+                        &snapshot,
+                        transaction.block,
+                        transaction.request,
+                    );
+
+                    let (state_lock, ready_changed) = &*shared;
+                    let mut state = state_lock.lock();
+                    state.in_flight = state.in_flight.saturating_sub(1);
+                    match execution {
+                        Ok(receipt) => {
+                            state.receipts[transaction_index] = Some(receipt);
+                            state.completed += 1;
+                            let successors = state.successors[transaction_index].clone();
+                            for successor in successors {
+                                let remaining = &mut state.remaining_predecessors[successor];
+                                *remaining = remaining.saturating_sub(1);
+                                if *remaining == 0 {
+                                    state.ready.insert(successor);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            state.failure = Some(format!(
+                                "dependency-driven speculative transaction {} failed at API level: {error}",
+                                transaction_index
+                            ));
+                        }
+                    }
+                    ready_changed.notify_all();
+                });
+            }
+        });
+
+        let (state_lock, _) = &*shared;
+        let mut state = state_lock.lock();
+        if let Some(failure) = state.failure.take() {
+            return Err(EngineError::Internal(failure));
+        }
+        if state.completed != transaction_count {
+            return Err(EngineError::Internal(format!(
+                "dependency-driven speculative execution completed {} of {} transactions",
+                state.completed, transaction_count
+            )));
+        }
+        let mut ordered_receipts = Vec::with_capacity(transaction_count);
+        for (index, receipt) in state.receipts.iter_mut().enumerate() {
+            ordered_receipts.push(receipt.take().ok_or_else(|| {
+                EngineError::Internal(format!(
+                    "dependency-driven speculative execution did not produce receipt {index}"
+                ))
+            })?);
+        }
+        drop(state);
+
+        // Advisory complete predicted successor. Applying detached receipts in canonical order
+        // preserves deterministic projection even though physical execution completed out of order.
+        let predicted_successor = base.fork();
+        for receipt in &ordered_receipts {
+            if receipt.is_success() {
+                apply_write_set(&predicted_successor.state, &receipt.write_set);
+            }
+        }
+
+        Ok(PreparedSpeculativeBlock {
+            predicted_transactions: Arc::try_unwrap(transactions)
+                .unwrap_or_else(|transactions| (*transactions).clone()),
+            receipts: ordered_receipts,
+            metrics: ParallelSpeculativeExecutionMetrics {
+                workers: config.workers,
+                wave_widths,
+                speculative: SpeculativeExecutionMetrics {
+                    speculative_results: transaction_count as u64,
+                    ..SpeculativeExecutionMetrics::default()
+                },
+                dependency_count: dependencies.len(),
+                hard_dependency_count: validated.hard_dependency_count,
+            },
+            predicted_successor,
+        })
+    }
+
+    /// Reconcile a post-consensus canonical block against receipts prepared before consensus.
+    ///
+    /// Matching receipts are validated strictly in canonical block order. Missing/mismatched
+    /// predictions execute canonically, stale receipts replay, and predictions absent from the
+    /// decided block are discarded. No predictive graph decision is trusted as a correctness
+    /// boundary; only concrete read-dependency validation can authorize reuse.
+    pub fn reconcile_prepared_block(
+        &self,
+        transactions: Vec<CanonicalTransaction>,
+        prepared: PreparedSpeculativeBlock,
+    ) -> EngineResult<SplitPhaseSpeculativeBlockOutcome> {
+        let mut canonical_ids = BTreeSet::new();
+        for transaction in &transactions {
+            let transaction_id = transaction.transaction_id();
+            if !canonical_ids.insert(transaction_id) {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "duplicate canonical transaction ID {}",
+                    transaction_id.0
+                )));
+            }
+        }
+
+        let predicted_count = prepared.predicted_transactions.len();
+        let canonical_order_ids = transactions
+            .iter()
+            .map(CanonicalTransaction::transaction_id)
+            .collect::<Vec<_>>();
+        let mut receipts = BTreeMap::new();
+        for receipt in prepared.receipts {
+            self.ensure_receipt_belongs_to_engine(&receipt)?;
+            let transaction_id = receipt.transaction_id;
+            if receipts.insert(transaction_id, receipt).is_some() {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "duplicate speculative receipt for transaction ID {}",
+                    transaction_id.0
+                )));
+            }
+        }
+
+        let mut metrics = SpeculativeExecutionMetrics {
+            speculative_results: predicted_count as u64,
+            ..SpeculativeExecutionMetrics::default()
+        };
+        let mut prediction = PredictionMatchMetrics {
+            predicted_transactions: predicted_count as u64,
+            decided_transactions: transactions.len() as u64,
+            ..PredictionMatchMetrics::default()
+        };
+        let prepared_write_sets = receipts
+            .iter()
+            .map(|(transaction_id, receipt)| (*transaction_id, receipt.write_set.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut outcomes = Vec::with_capacity(transactions.len());
+        let mut dependency_evidence = Vec::new();
+        let reconciliation_started = Instant::now();
+        let mut timings = PostConsensusTimings::default();
+
+        for (transaction_index, transaction) in transactions.into_iter().enumerate() {
+            let transaction_id = transaction.transaction_id();
+            let started = Instant::now();
+            let matching_receipt = receipts.remove(&transaction_id).and_then(|receipt| {
+                if receipt.block == transaction.block && receipt.request == transaction.request {
+                    Some(receipt)
+                } else {
+                    prediction.discarded_predictions += 1;
+                    None
+                }
+            });
+            timings.receipt_matching += started.elapsed();
+
+            let Some(receipt) = matching_receipt else {
+                prediction.missing_predictions += 1;
+                metrics.canonical_transactions += 1;
+                let started = Instant::now();
+                let result = self.execute_request(transaction.block, transaction.request);
+                timings.replay_or_missing_execution += started.elapsed();
+                outcomes.push(CanonicalTxResult {
+                    transaction_id,
+                    disposition: CanonicalTxDisposition::Canonical,
+                    validation: None,
+                    result,
+                });
+                continue;
+            };
+
+            prediction.matched_transactions += 1;
+            let started = Instant::now();
+            let validation = validate_dependencies(&self.core.state, &receipt.read_dependencies);
+            timings.validation += started.elapsed();
+            if validation.is_valid() {
+                metrics.reused_results += 1;
+                let started = Instant::now();
+                let result = self.commit_reused_receipt(receipt);
+                timings.commit_reused += started.elapsed();
+                outcomes.push(CanonicalTxResult {
+                    transaction_id,
+                    disposition: CanonicalTxDisposition::ReusedSpeculative,
+                    validation: Some(validation),
+                    result,
+                });
+            } else {
+                metrics.invalidated_results += 1;
+                metrics.replayed_transactions += 1;
+                for (conflict_index, conflict) in validation.conflicts().iter().enumerate() {
+                    if let Some(predecessor_index) = (0..transaction_index).rev().find(|index| {
+                        prepared_write_sets
+                            .get(&canonical_order_ids[*index])
+                            .is_some_and(|write_set| {
+                                write_set_touches_conflict(write_set, conflict)
+                            })
+                    }) {
+                        dependency_evidence.push(ReconciliationDependencyEvidence {
+                            predecessor_index,
+                            transaction_index,
+                            conflict_index,
+                        });
+                    }
+                }
+                let started = Instant::now();
+                let result = self.execute_request(transaction.block, transaction.request);
+                timings.replay_or_missing_execution += started.elapsed();
+                outcomes.push(CanonicalTxResult {
+                    transaction_id,
+                    disposition: CanonicalTxDisposition::Replayed,
+                    validation: Some(validation),
+                    result,
+                });
+            }
+        }
+
+        prediction.discarded_predictions = prediction
+            .discarded_predictions
+            .saturating_add(receipts.len() as u64);
+        timings.total = reconciliation_started.elapsed();
+
+        Ok(SplitPhaseSpeculativeBlockOutcome {
+            transactions: outcomes,
+            speculative: metrics,
+            prediction,
+            timings,
+            dependency_evidence,
+        })
+    }
+
+    /// Execute Brick-4 waves through a bounded Rayon worker pool, then validate and commit
+    /// receipts strictly in canonical block order.
+    ///
+    /// Every wave is launched against one immutable snapshot captured after the canonical prefix
+    /// made available by previous waves has been drained. The method waits for all speculative
+    /// executions in a wave to finish before launching the next wave. Physical worker completion
+    /// order never affects canonical commit order.
+    pub fn execute_parallel_waves(
+        &self,
+        config: ParallelExecutionConfig,
+        transactions: Vec<CanonicalTransaction>,
+        waves: Vec<SpeculativeWave>,
+    ) -> EngineResult<ParallelSpeculativeBlockOutcome> {
+        if config.workers == 0 {
+            return Err(EngineError::InvalidConfiguration(
+                "parallel speculative worker count must be greater than zero".to_owned(),
+            ));
+        }
+
+        let mut canonical_bindings = BTreeMap::new();
+        for transaction in &transactions {
+            let transaction_id = transaction.transaction_id();
+            if canonical_bindings
+                .insert(transaction_id, transaction.clone())
+                .is_some()
+            {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "duplicate canonical transaction ID {}",
+                    transaction_id.0
+                )));
+            }
+        }
+
+        let mut scheduled = BTreeSet::new();
+        for (wave_index, wave) in waves.iter().enumerate() {
+            if wave.is_empty() {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "speculative wave {wave_index} is empty"
+                )));
+            }
+            for transaction_id in &wave.transaction_ids {
+                if !canonical_bindings.contains_key(transaction_id) {
+                    return Err(EngineError::InvalidConfiguration(format!(
+                        "speculative wave {wave_index} references transaction ID {} that is not in the canonical block",
+                        transaction_id.0
+                    )));
+                }
+                if !scheduled.insert(*transaction_id) {
+                    return Err(EngineError::InvalidConfiguration(format!(
+                        "transaction ID {} appears in more than one speculative wave",
+                        transaction_id.0
+                    )));
+                }
+            }
+        }
+
+        if scheduled.len() != transactions.len() {
+            let missing = transactions
+                .iter()
+                .filter_map(|transaction| {
+                    let transaction_id = transaction.transaction_id();
+                    (!scheduled.contains(&transaction_id)).then_some(transaction_id.0)
+                })
+                .collect::<Vec<_>>();
+            return Err(EngineError::InvalidConfiguration(format!(
+                "speculative wave plan does not cover canonical transaction IDs {missing:?}"
+            )));
+        }
+
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(config.workers)
+            .thread_name(|index| format!("acg-speculative-{index}"))
+            .build()
+            .map_err(|error| {
+                EngineError::InvalidConfiguration(format!(
+                    "failed to build speculative worker pool: {error}"
+                ))
+            })?;
+
+        let wave_widths = waves.iter().map(SpeculativeWave::len).collect::<Vec<_>>();
+        let mut speculative_metrics = SpeculativeExecutionMetrics {
+            speculative_results: transactions.len() as u64,
+            ..SpeculativeExecutionMetrics::default()
+        };
+        let mut pending_receipts = BTreeMap::new();
+        let mut outcomes = Vec::with_capacity(transactions.len());
+        let mut canonical_cursor = 0_usize;
+
+        for wave in waves {
+            // Snapshot capture occurs after the previous wave's available canonical prefix was
+            // drained. Every transaction in this wave sees exactly the same immutable base state.
+            let snapshot = self.snapshot();
+            let wave_transactions = wave
+                .transaction_ids
+                .iter()
+                .map(|transaction_id| {
+                    canonical_bindings
+                        .get(transaction_id)
+                        .expect("wave plan was validated before execution")
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+
+            let receipts = pool.install(|| {
+                wave_transactions
+                    .into_par_iter()
+                    .map(|transaction| {
+                        self.execute_speculative(&snapshot, transaction.block, transaction.request)
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            for receipt in receipts {
+                let receipt = receipt?;
+                let transaction_id = receipt.transaction_id;
+                if pending_receipts.insert(transaction_id, receipt).is_some() {
+                    return Err(EngineError::Internal(format!(
+                        "duplicate speculative receipt for transaction ID {}",
+                        transaction_id.0
+                    )));
+                }
+            }
+
+            while canonical_cursor < transactions.len() {
+                let transaction = &transactions[canonical_cursor];
+                let transaction_id = transaction.transaction_id();
+                let Some(receipt) = pending_receipts.remove(&transaction_id) else {
+                    break;
+                };
+
+                let validation =
+                    validate_dependencies(&self.core.state, &receipt.read_dependencies);
+                if validation.is_valid() {
+                    speculative_metrics.reused_results += 1;
+                    let result = self.commit_reused_receipt(receipt);
+                    outcomes.push(CanonicalTxResult {
+                        transaction_id,
+                        disposition: CanonicalTxDisposition::ReusedSpeculative,
+                        validation: Some(validation),
+                        result,
+                    });
+                } else {
+                    speculative_metrics.invalidated_results += 1;
+                    speculative_metrics.replayed_transactions += 1;
+                    let result = self
+                        .execute_request(transaction.block.clone(), transaction.request.clone());
+                    outcomes.push(CanonicalTxResult {
+                        transaction_id,
+                        disposition: CanonicalTxDisposition::Replayed,
+                        validation: Some(validation),
+                        result,
+                    });
+                }
+                canonical_cursor += 1;
+            }
+        }
+
+        if canonical_cursor != transactions.len() || !pending_receipts.is_empty() {
+            return Err(EngineError::Internal(
+                "validated speculative wave plan did not drain the complete canonical block"
+                    .to_owned(),
+            ));
+        }
+
+        Ok(ParallelSpeculativeBlockOutcome {
+            transactions: outcomes,
+            metrics: ParallelSpeculativeExecutionMetrics {
+                workers: config.workers,
+                wave_widths,
+                speculative: speculative_metrics,
+                dependency_count: 0,
+                hard_dependency_count: 0,
+            },
+        })
+    }
+
     fn ensure_receipt_belongs_to_engine(&self, result: &SpeculativeTxResult) -> EngineResult<()> {
         if !Arc::ptr_eq(&result.engine_identity, &self.core.engine_identity) {
             return Err(EngineError::InvalidConfiguration(
@@ -737,6 +1406,179 @@ impl CosmWasmEngine {
     fn code(&self, code_id: CodeId) -> EngineResult<CodeRecord> {
         self.core.code(code_id)
     }
+}
+
+struct ValidatedDependencyPlan {
+    remaining_predecessors: Vec<usize>,
+    successors: Vec<Vec<usize>>,
+    hard_dependency_count: usize,
+}
+
+struct DependencyExecutionState {
+    ready: BTreeSet<usize>,
+    remaining_predecessors: Vec<usize>,
+    successors: Vec<Vec<usize>>,
+    receipts: Vec<Option<SpeculativeTxResult>>,
+    completed: usize,
+    in_flight: usize,
+    failure: Option<String>,
+}
+
+fn validate_speculative_dependency_plan(
+    config: ParallelExecutionConfig,
+    transactions: &[CanonicalTransaction],
+    waves: &[SpeculativeWave],
+    dependencies: &[SpeculativeDependency],
+) -> EngineResult<ValidatedDependencyPlan> {
+    let canonical_bindings = validate_speculative_wave_plan(config, transactions, waves)?;
+    let index_by_id = transactions
+        .iter()
+        .enumerate()
+        .map(|(index, transaction)| (transaction.transaction_id(), index))
+        .collect::<BTreeMap<_, _>>();
+    debug_assert_eq!(canonical_bindings.len(), index_by_id.len());
+
+    let wave_by_id = waves
+        .iter()
+        .enumerate()
+        .flat_map(|(wave_index, wave)| {
+            wave.transaction_ids
+                .iter()
+                .copied()
+                .map(move |transaction_id| (transaction_id, wave_index))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut remaining_predecessors = vec![0_usize; transactions.len()];
+    let mut successors = vec![Vec::new(); transactions.len()];
+    let mut seen = BTreeSet::new();
+    let mut hard_dependency_count = 0;
+
+    for dependency in dependencies {
+        let predecessor = *index_by_id.get(&dependency.predecessor).ok_or_else(|| {
+            EngineError::InvalidConfiguration(format!(
+                "speculative dependency references unknown predecessor transaction ID {}",
+                dependency.predecessor.0
+            ))
+        })?;
+        let successor = *index_by_id.get(&dependency.successor).ok_or_else(|| {
+            EngineError::InvalidConfiguration(format!(
+                "speculative dependency references unknown successor transaction ID {}",
+                dependency.successor.0
+            ))
+        })?;
+        if predecessor >= successor {
+            return Err(EngineError::InvalidConfiguration(format!(
+                "speculative dependency {} -> {} does not follow canonical block order",
+                dependency.predecessor.0, dependency.successor.0
+            )));
+        }
+        if !seen.insert((predecessor, successor)) {
+            return Err(EngineError::InvalidConfiguration(format!(
+                "duplicate speculative dependency {} -> {}",
+                dependency.predecessor.0, dependency.successor.0
+            )));
+        }
+        let predecessor_wave = wave_by_id[&dependency.predecessor];
+        let successor_wave = wave_by_id[&dependency.successor];
+        if predecessor_wave >= successor_wave {
+            return Err(EngineError::InvalidConfiguration(format!(
+                "speculative dependency {} -> {} is not represented by increasing scheduler levels ({predecessor_wave} -> {successor_wave})",
+                dependency.predecessor.0, dependency.successor.0
+            )));
+        }
+        remaining_predecessors[successor] += 1;
+        successors[predecessor].push(successor);
+        if dependency.class == SpeculativeDependencyClass::Hard {
+            hard_dependency_count += 1;
+        }
+    }
+    for next in &mut successors {
+        next.sort_unstable();
+        next.dedup();
+    }
+
+    Ok(ValidatedDependencyPlan {
+        remaining_predecessors,
+        successors,
+        hard_dependency_count,
+    })
+}
+
+fn validate_speculative_wave_plan(
+    config: ParallelExecutionConfig,
+    transactions: &[CanonicalTransaction],
+    waves: &[SpeculativeWave],
+) -> EngineResult<BTreeMap<TransactionId, CanonicalTransaction>> {
+    if config.workers == 0 {
+        return Err(EngineError::InvalidConfiguration(
+            "parallel speculative worker count must be greater than zero".to_owned(),
+        ));
+    }
+
+    let mut canonical_bindings = BTreeMap::new();
+    for transaction in transactions {
+        let transaction_id = transaction.transaction_id();
+        if canonical_bindings
+            .insert(transaction_id, transaction.clone())
+            .is_some()
+        {
+            return Err(EngineError::InvalidConfiguration(format!(
+                "duplicate canonical transaction ID {}",
+                transaction_id.0
+            )));
+        }
+    }
+
+    let mut scheduled = BTreeSet::new();
+    for (wave_index, wave) in waves.iter().enumerate() {
+        if wave.is_empty() {
+            return Err(EngineError::InvalidConfiguration(format!(
+                "speculative wave {wave_index} is empty"
+            )));
+        }
+        for transaction_id in &wave.transaction_ids {
+            if !canonical_bindings.contains_key(transaction_id) {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "speculative wave {wave_index} references transaction ID {} that is not in the canonical block",
+                    transaction_id.0
+                )));
+            }
+            if !scheduled.insert(*transaction_id) {
+                return Err(EngineError::InvalidConfiguration(format!(
+                    "transaction ID {} appears in more than one speculative wave",
+                    transaction_id.0
+                )));
+            }
+        }
+    }
+
+    if scheduled.len() != transactions.len() {
+        let missing = transactions
+            .iter()
+            .filter_map(|transaction| {
+                let transaction_id = transaction.transaction_id();
+                (!scheduled.contains(&transaction_id)).then_some(transaction_id.0)
+            })
+            .collect::<Vec<_>>();
+        return Err(EngineError::InvalidConfiguration(format!(
+            "speculative wave plan does not cover canonical transaction IDs {missing:?}"
+        )));
+    }
+
+    Ok(canonical_bindings)
+}
+
+fn build_speculative_pool(config: ParallelExecutionConfig) -> EngineResult<rayon::ThreadPool> {
+    ThreadPoolBuilder::new()
+        .num_threads(config.workers)
+        .thread_name(|index| format!("acg-speculative-{index}"))
+        .build()
+        .map_err(|error| {
+            EngineError::InvalidConfiguration(format!(
+                "failed to build speculative worker pool: {error}"
+            ))
+        })
 }
 
 impl Default for CosmWasmEngine {

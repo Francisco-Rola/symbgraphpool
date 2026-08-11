@@ -162,6 +162,7 @@ fn setup() -> (
                 hard_threshold: 0.70,
                 risk_budget: 0.40,
                 max_wave_width: None,
+                independent_observations_before_softening: 1,
             },
         },
     )

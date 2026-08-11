@@ -559,19 +559,21 @@ fn all_balances_masked_denomination_is_ignored_by_range_validation() {
             json!({"action":"observe_all_balances","owner":"bob"}),
         ),
     );
-    receipt.read_dependencies.retain_mut(|dependency| match dependency {
-        ReadDependency::BankAllBalances {
-            base_balances,
-            masked_denoms,
-            ..
-        } => {
-            base_balances.retain(|(denom, _)| denom != "utest");
-            masked_denoms.push("utest".to_owned());
-            true
-        }
-        ReadDependency::ContractMetadata { .. } => true,
-        _ => false,
-    });
+    receipt
+        .read_dependencies
+        .retain_mut(|dependency| match dependency {
+            ReadDependency::BankAllBalances {
+                base_balances,
+                masked_denoms,
+                ..
+            } => {
+                base_balances.retain(|(denom, _)| denom != "utest");
+                masked_denoms.push("utest".to_owned());
+                true
+            }
+            ReadDependency::ContractMetadata { .. } => true,
+            _ => false,
+        });
 
     engine
         .set_balance("bob", &[Coin::new(99_u128, "utest")])

@@ -123,6 +123,7 @@ fn weighted_candidate_edges_drive_hard_wave_dependencies_through_the_public_api(
         hard_threshold: probability,
         risk_budget: 0.0,
         max_wave_width: None,
+        independent_observations_before_softening: 8,
     })
     .unwrap();
     assert_eq!(scheduler.classify_edge(credit_edge), EdgeClass::Hard);
@@ -137,7 +138,7 @@ fn weighted_candidate_edges_drive_hard_wave_dependencies_through_the_public_api(
 }
 
 #[test]
-fn learned_negative_evidence_can_change_a_future_pair_from_hard_to_low() {
+fn learned_negative_evidence_can_change_a_future_pair_from_hard_to_soft() {
     let graph = graph();
     let credit = profile_id(&graph, "execute::Credit");
     let edge_index = graph.edge_between_profiles(credit, credit).unwrap();
@@ -180,10 +181,11 @@ fn learned_negative_evidence_can_change_a_future_pair_from_hard_to_low() {
 
     let threshold = (before_probability + after_probability) / 2.0;
     let scheduler = RiskBoundedScheduler::new(RiskBoundedSchedulerConfig {
-        soft_threshold: threshold,
+        soft_threshold: 0.0,
         hard_threshold: threshold,
-        risk_budget: 0.0,
+        risk_budget: 1.0,
         max_wave_width: None,
+        independent_observations_before_softening: 8,
     })
     .unwrap();
 
@@ -193,8 +195,43 @@ fn learned_negative_evidence_can_change_a_future_pair_from_hard_to_low() {
     );
     assert_eq!(
         scheduler.classify_edge(after_graph.edge_between(TxIndex(0), TxIndex(1)).unwrap()),
-        EdgeClass::Low
+        EdgeClass::Soft
     );
+
+    // A proven symbolic relationship is softened by concrete evidence, not deleted by the generic
+    // materialization floor.
+    let retained_after_softening = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            vec![
+                candidate(
+                    &graph,
+                    1,
+                    0,
+                    "execute::Credit",
+                    1,
+                    json!({"account":"alice"}),
+                ),
+                candidate(
+                    &graph,
+                    2,
+                    1,
+                    "execute::Credit",
+                    1,
+                    json!({"account":"alice"}),
+                ),
+            ],
+            &store,
+            &feedback_config,
+            WeightedCandidateGraphConfig {
+                epoch: 1,
+                edge_materialization_threshold: threshold,
+            },
+        )
+        .unwrap();
+    let retained_edge = retained_after_softening
+        .edge_between(TxIndex(0), TxIndex(1))
+        .unwrap();
+    assert_eq!(scheduler.classify_edge(retained_edge), EdgeClass::Soft);
 
     let before_schedule = scheduler.schedule(&before_graph).unwrap();
     let after_schedule = scheduler.schedule(&after_graph).unwrap();
