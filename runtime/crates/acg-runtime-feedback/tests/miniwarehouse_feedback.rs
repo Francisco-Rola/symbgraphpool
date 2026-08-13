@@ -76,6 +76,7 @@ fn execution(
     TransactionExecution {
         transaction_index,
         transaction_id: TransactionId(transaction_id),
+        timing: Default::default(),
         result: Ok(ExecutionOutcome {
             transaction_id: TransactionId(transaction_id),
             contract: Address::new("miniwarehouse"),

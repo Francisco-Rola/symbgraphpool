@@ -22,7 +22,8 @@ The repository currently implements:
 - Brick 4 adaptive weighted candidate graphs and risk-bounded scheduling;
 - Brick 5A/5B speculative receipts with canonical validation/reuse/replay;
 - Brick 5C.7 dependency-driven READY-DAG pre-execution over block-local persistent MVCC;
-- Brick 5D replay attribution, decayed replay-cost/fan-out feedback, and cost-adjusted scheduling risk.
+- Brick 5D replay attribution, decayed replay-cost/fan-out feedback, and cost-adjusted scheduling risk;
+- Brick 5E learned marginal serialization cost and stable machine-readable experiment records.
 
 ## Repository layout
 
@@ -37,7 +38,7 @@ crates/acg-cli             `acg-profilec` compiler and inspector
 benchmarks/contracts       Single-file CosmWasm benchmark contracts
 benchmarks/symbolic        Analyzer-compatible symbolic profile JSON
 benchmarks/README.md       Benchmark build, inspection, and debugging guide
-runtime/                   CosmWasm engine, adapter, MiniWarehouse workload generator, and validator simulation
+runtime/                   CosmWasm engine, adapter, feedback/evaluation, workloads, and validator simulation
 docs/audits/               Audit records for imported or replaced prototypes
 ```
 
@@ -164,7 +165,10 @@ dense `ProfileId` reassignment. See [`docs/brick-3.md`](docs/brick-3.md).
 
 Brick 5D extends that feedback with exact reconciliation causes, measured replay cost/fan-out, and a
 separate cost-adjusted scheduling risk while keeping canonical validation/replay as the correctness
-authority. See [`docs/brick-5d.md`](docs/brick-5d.md).
+authority. Brick 5E learns the marginal READY delay imposed by scheduled dependencies, persists
+that serialization-cost evidence, and provides schema-versioned deterministic JSON/JSONL experiment
+records through `runtime/crates/acg-evaluation`. See [`docs/brick-5d.md`](docs/brick-5d.md) and
+[`docs/brick-5e.md`](docs/brick-5e.md).
 
 
 ## Publication checklist

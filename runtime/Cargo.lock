@@ -67,6 +67,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "acg-evaluation"
+version = "0.1.0"
+dependencies = [
+ "acg-candidate-graph",
+ "acg-core",
+ "acg-cosmwasm-adapter",
+ "acg-cosmwasm-engine",
+ "acg-feedback",
+ "acg-profile-graph",
+ "acg-runtime-feedback",
+ "acg-symbolic-json",
+ "acg-validator-sim",
+ "cosmwasm-std",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "acg-feedback"
 version = "0.1.0"
 dependencies = [

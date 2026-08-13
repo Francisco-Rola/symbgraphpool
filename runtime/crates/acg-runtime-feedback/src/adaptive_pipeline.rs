@@ -5,7 +5,7 @@ use std::{
 
 use acg_candidate_graph::{
     CandidateGraph, CandidateGraphBuilder, CandidateGraphError, CostAwareEdgePolicyConfig,
-    RiskBoundedSchedule, RiskBoundedScheduler, RiskBoundedSchedulerConfig,
+    EdgeClass, RiskBoundedSchedule, RiskBoundedScheduler, RiskBoundedSchedulerConfig,
     SchedulingError as GraphSchedulingError, WeightedCandidateGraphConfig,
 };
 use acg_core::{ConflictKinds, TxIndex};
@@ -21,7 +21,8 @@ use acg_validator_sim::{
 use thiserror::Error;
 
 use crate::{
-    RuntimeFeedbackEngine, RuntimeFeedbackError, ValidationEvidence, ValidationEvidenceKind,
+    RuntimeFeedbackEngine, RuntimeFeedbackError, SerializationCostEvidence, ValidationEvidence,
+    ValidationEvidenceKind,
 };
 
 /// Runtime-facing configuration for Brick 4D adaptive block planning.
@@ -94,6 +95,18 @@ pub struct ReplayAttribution {
     pub invalidated_descendants: u32,
     /// Whether the candidate graph contained the relationship that caused the replay.
     pub candidate_edge_present: bool,
+}
+
+/// Brick 5E realized marginal dependency-ready delay for one scheduled edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SerializationAttribution {
+    pub predecessor: TxIndex,
+    pub transaction: TxIndex,
+    pub class: EdgeClass,
+    pub predecessor_completed_nanos: u64,
+    pub alternate_ready_nanos: u64,
+    pub successor_started_nanos: u64,
+    pub marginal_ready_delay_nanos: u64,
 }
 
 /// One Brick 4D planning result before any speculative parallel executor exists.
@@ -181,12 +194,27 @@ impl AdaptiveSerialPipeline {
         report: &BlockExecutionReport,
         epoch: u64,
     ) -> Result<ApplySummary, AdaptivePipelineError> {
-        Ok(self.feedback.process_pre_execution(
+        let access_summary = self.feedback.process_pre_execution(
             profile_graph,
             &plan.candidate_graph,
             report,
             epoch,
-        )?)
+        )?;
+        let serialization = serialization_attributions(plan, report)?;
+        let serialization_evidence = serialization
+            .iter()
+            .map(|item| SerializationCostEvidence {
+                predecessor: item.predecessor,
+                transaction: item.transaction,
+                marginal_ready_delay_nanos: item.marginal_ready_delay_nanos,
+            })
+            .collect::<Vec<_>>();
+        let serialization_summary = self.feedback.process_serialization_costs(
+            &plan.candidate_graph,
+            &serialization_evidence,
+            epoch,
+        )?;
+        Ok(merge_apply_summaries(access_summary, serialization_summary))
     }
 
     /// Apply replay evidence from post-consensus reconciliation.
@@ -259,6 +287,15 @@ impl AdaptiveSerialPipeline {
         report: &SplitPhaseSpeculativeExecutionReport,
     ) -> Result<Vec<ReplayAttribution>, AdaptivePipelineError> {
         reconciliation_attributions(plan, report)
+    }
+
+    /// Return Brick 5E dependency-ready delay attributions without mutating feedback state.
+    pub fn serialization_attributions(
+        &self,
+        plan: &AdaptiveBlockPlan,
+        report: &BlockExecutionReport,
+    ) -> Result<Vec<SerializationAttribution>, AdaptivePipelineError> {
+        serialization_attributions(plan, report)
     }
 
     /// Creates the weighted transaction graph and risk-bounded waves for `block` without executing
@@ -358,6 +395,93 @@ impl AdaptiveSerialPipeline {
             feedback_summary,
         })
     }
+}
+
+fn serialization_attributions(
+    plan: &AdaptiveBlockPlan,
+    report: &BlockExecutionReport,
+) -> Result<Vec<SerializationAttribution>, AdaptivePipelineError> {
+    let transaction_count = plan.candidate_graph.transactions().len();
+    let mut timings = vec![None; transaction_count];
+    for execution in &report.transactions {
+        if execution.transaction_index >= transaction_count {
+            return Err(RuntimeFeedbackError::ExecutionIndexOutOfBounds {
+                index: execution.transaction_index,
+                candidate_count: transaction_count,
+            }
+            .into());
+        }
+        if timings[execution.transaction_index]
+            .replace(execution.timing)
+            .is_some()
+        {
+            return Err(
+                RuntimeFeedbackError::DuplicateExecutionIndex(execution.transaction_index).into(),
+            );
+        }
+    }
+
+    let mut predecessors_by_successor = BTreeMap::<TxIndex, Vec<TxIndex>>::new();
+    for dependency in &plan.schedule.ordering_dependencies {
+        predecessors_by_successor
+            .entry(dependency.successor)
+            .or_default()
+            .push(dependency.predecessor);
+    }
+
+    let mut attributions = Vec::new();
+    for dependency in &plan.schedule.ordering_dependencies {
+        let predecessor_index = dependency.predecessor.0 as usize;
+        let successor_index = dependency.successor.0 as usize;
+        let (Some(predecessor_timing), Some(successor_timing)) =
+            (timings[predecessor_index], timings[successor_index])
+        else {
+            continue;
+        };
+        let Some(predecessors) = predecessors_by_successor.get(&dependency.successor) else {
+            continue;
+        };
+        if predecessors
+            .iter()
+            .any(|index| timings[index.0 as usize].is_none())
+        {
+            continue;
+        }
+        if predecessor_timing.completed_after_phase > successor_timing.started_after_phase {
+            return Err(AdaptivePipelineError::SerializationTimingViolation {
+                predecessor: dependency.predecessor,
+                transaction: dependency.successor,
+                predecessor_completed_nanos: duration_to_u64_nanos(
+                    predecessor_timing.completed_after_phase,
+                ),
+                successor_started_nanos: duration_to_u64_nanos(
+                    successor_timing.started_after_phase,
+                ),
+            });
+        }
+        let alternate_ready = predecessors
+            .iter()
+            .filter(|index| **index != dependency.predecessor)
+            .filter_map(|index| timings[index.0 as usize])
+            .map(|timing| timing.completed_after_phase)
+            .max()
+            .unwrap_or(Duration::ZERO);
+        let marginal = predecessor_timing
+            .completed_after_phase
+            .saturating_sub(alternate_ready);
+        attributions.push(SerializationAttribution {
+            predecessor: dependency.predecessor,
+            transaction: dependency.successor,
+            class: dependency.class,
+            predecessor_completed_nanos: duration_to_u64_nanos(
+                predecessor_timing.completed_after_phase,
+            ),
+            alternate_ready_nanos: duration_to_u64_nanos(alternate_ready),
+            successor_started_nanos: duration_to_u64_nanos(successor_timing.started_after_phase),
+            marginal_ready_delay_nanos: duration_to_u64_nanos(marginal),
+        });
+    }
+    Ok(attributions)
 }
 
 fn reconciliation_attributions(
@@ -537,6 +661,12 @@ fn merge_apply_summaries(left: ApplySummary, right: ApplySummary) -> ApplySummar
         attributed_invalidated_descendants: left
             .attributed_invalidated_descendants
             .saturating_add(right.attributed_invalidated_descendants),
+        serialization_cost_observations: left
+            .serialization_cost_observations
+            .saturating_add(right.serialization_cost_observations),
+        attributed_serialization_cost_nanos: left
+            .attributed_serialization_cost_nanos
+            .saturating_add(right.attributed_serialization_cost_nanos),
     }
 }
 
@@ -553,6 +683,15 @@ fn conflict_kinds_for_validation(conflict: &ValidationConflict) -> ConflictKinds
 
 #[derive(Debug, Error)]
 pub enum AdaptivePipelineError {
+    #[error(
+        "scheduled dependency {predecessor:?} -> {transaction:?} completed at {predecessor_completed_nanos}ns after successor started at {successor_started_nanos}ns"
+    )]
+    SerializationTimingViolation {
+        predecessor: TxIndex,
+        transaction: TxIndex,
+        predecessor_completed_nanos: u64,
+        successor_started_nanos: u64,
+    },
     #[error(transparent)]
     Adapter(#[from] AdapterError),
     #[error(transparent)]

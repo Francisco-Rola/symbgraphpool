@@ -99,6 +99,7 @@ fn successful_execution(
     TransactionExecution {
         transaction_index: index,
         transaction_id: TransactionId(transaction_id),
+        timing: Default::default(),
         result: Ok(ExecutionOutcome {
             transaction_id: TransactionId(transaction_id),
             contract: Address::new("contract-a"),
@@ -617,6 +618,7 @@ fn failed_transactions_do_not_become_false_negative_evidence() {
         TransactionExecution {
             transaction_index: 1,
             transaction_id: TransactionId(2),
+            timing: Default::default(),
             result: Err(EngineError::Contract("failed".to_owned())),
         },
     ]);

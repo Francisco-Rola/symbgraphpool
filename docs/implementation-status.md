@@ -1,6 +1,6 @@
 # Implementation status
 
-This document is the repository checkpoint after Brick 5D, with Brick 5C.7 as the production execution substrate and VM-lifecycle work preserved as research.
+This document is the repository checkpoint after Brick 5E, with Brick 5C.7 as the production execution substrate and VM-lifecycle work preserved as research.
 
 ## Production implementation
 
@@ -120,7 +120,7 @@ See `research/vm-lifecycle/README.md` for the archived VM work.
 ### Brick 5D — cost-aware validation/replay policy — implemented
 
 - 5D.1: concrete reconciliation attribution retains the exact stale validation dependency, responsible canonical predecessor, measured direct replay cost, candidate-edge presence, and transitive replay fan-out;
-- 5D.2: decayed replay-cost/fan-out statistics are persisted beside conflict probability; checkpoint format v2 remains backward-compatible with v1;
+- 5D.2: decayed replay-cost/fan-out statistics are persisted beside conflict probability; Brick 5E checkpoint v3 remains backward-compatible with v1/v2;
 - 5D.3: candidate edges retain raw conflict probability separately from cost-adjusted scheduling risk, and the risk-bounded scheduler uses the latter;
 - 5D.4: closed-loop phase-change tests prove expensive replay evidence hardens future scheduling and later independence/decay relaxes it again.
 
@@ -128,9 +128,15 @@ Measured wall time remains validator-local optimization evidence and never becom
 
 ## Remaining proposed Brick 5 work
 
-### Brick 5E — cost-aware theoretical versus realized parallelism — partially implemented / still to productize
+### Brick 5E — learned serialization cost + stable evaluation records — implemented
 
-The research instrumentation established useful metrics (serial-equivalent work, DAG lower bounds, observed-service bounds, scheduler realization, service inflation). The production-facing metric/API design still needs to be selected and stabilized.
+- READY-DAG transactions expose validator-local start/completion/service timing for performance attribution;
+- each scheduled edge learns decayed marginal dependency-ready delay as its serialization cost;
+- 5D's configured 250 us serialization reference is now only a low-confidence fallback and is blended toward learned per-relationship cost;
+- feedback checkpoints are v3 with v1/v2 backward-compatible restore;
+- the `acg-evaluation` runtime crate defines schema-v1 deterministic JSON/JSONL experiment records spanning planning, scheduling, DAG bounds, VM/host/MVCC execution, replay, feedback overhead, and correctness digests.
+
+See [`brick-5e.md`](brick-5e.md).
 
 ### Brick 5F — serial-equivalence and performance acceptance — partially implemented / remaining gate
 
@@ -138,8 +144,7 @@ Correctness coverage exists across speculative receipts, validation/replay, Conf
 
 ## Proposed follow-on engineering
 
-1. Productize Brick 5E: learn/measure the serialization-cost reference and expose stable raw-probability vs scheduling-risk, replay-cost, fan-out, service-inflation, and scheduler-realization metrics.
-2. Define Brick 5F acceptance criteria on supported hardware and workloads, including closed-loop adaptation and checkpoint compatibility.
-3. Keep VM snapshot/reset/COW work on a separate research branch until it passes adversarial isolation tests (memory, globals, tables, gas, memory growth, traps/OOG, backends) and end-to-end serial equivalence.
-4. Add scan/iterator-specific storage probes if MiniWarehouse-specific storage inflation remains material.
-5. Consider cost/granularity-aware worker/concurrency policy and explicit soft-edge exploration only as correctness-independent optimization hints.
+1. Define Brick 5F acceptance criteria on supported hardware and workloads, including closed-loop adaptation and checkpoint compatibility.
+2. Keep VM snapshot/reset/COW work on a separate research branch until it passes adversarial isolation tests (memory, globals, tables, gas, memory growth, traps/OOG, backends) and end-to-end serial equivalence.
+3. Add scan/iterator-specific storage probes if MiniWarehouse-specific storage inflation remains material.
+4. Consider cost/granularity-aware worker/concurrency policy and explicit soft-edge exploration only as correctness-independent optimization hints.

@@ -28,7 +28,8 @@ use acg_validator_sim::{
 use cosmwasm_std::{to_json_binary, Binary, Empty, Env, MessageInfo, Reply, Response};
 use serde_json::{json, Value};
 
-const CONFLICTLAB: &[u8] = include_bytes!("../../../../benchmarks/symbolic/conflictlab.symbolic.json");
+const CONFLICTLAB: &[u8] =
+    include_bytes!("../../../../benchmarks/symbolic/conflictlab.symbolic.json");
 
 struct ConflictLabRuntime {
     first_execute_barrier: Option<FirstExecuteBarrier>,
@@ -77,7 +78,8 @@ impl NativeContract for ConflictLabRuntime {
         _info: MessageInfo,
         msg: Binary,
     ) -> Result<Response<Empty>, String> {
-        let value: Value = serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
+        let value: Value =
+            serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
         let credit = value
             .get("credit")
             .and_then(Value::as_object)
@@ -102,10 +104,7 @@ impl NativeContract for ConflictLabRuntime {
                 sync.barrier.wait();
             }
         }
-        context.storage_set(
-            key.as_bytes(),
-            current.saturating_add(amount).to_be_bytes(),
-        );
+        context.storage_set(key.as_bytes(), current.saturating_add(amount).to_be_bytes());
         Ok(Response::new())
     }
 
@@ -140,7 +139,7 @@ fn credit(id: u64, contract: &Address, account: &str) -> ExecutionRequest {
                 "amount": 1_u64
             }
         }))
-            .unwrap(),
+        .unwrap(),
     }
 }
 
@@ -201,7 +200,7 @@ fn setup_with_runtime(
             ..AdaptiveFeedbackConfig::default()
         },
     )
-        .unwrap();
+    .unwrap();
     let pipeline = AdaptiveSerialPipeline::new(
         adapter,
         feedback,
@@ -217,7 +216,7 @@ fn setup_with_runtime(
             cost_policy: Default::default(),
         },
     )
-        .unwrap();
+    .unwrap();
 
     (engine, contract, graph, pipeline)
 }
@@ -314,7 +313,6 @@ fn conflictlab_adaptive_plan_groups_independent_work_but_executes_canonically_an
     assert!(learned.probability() > alice_edge.probability());
 }
 
-
 #[test]
 fn brick5d_reconciliation_attribution_measures_replay_cost_and_transitive_fanout() {
     let (engine, contract, graph, mut pipeline) =
@@ -351,9 +349,9 @@ fn brick5d_reconciliation_attribution_measures_replay_cost_and_transitive_fanout
         .unwrap();
     assert_eq!(attributions.len(), report.dependency_evidence.len());
     assert!(attributions.iter().all(|item| item.candidate_edge_present));
-    assert!(attributions
-        .iter()
-        .all(|item| item.conflict_kinds.contains(acg_core::ConflictKinds::WRITE_READ)));
+    assert!(attributions.iter().all(|item| item
+        .conflict_kinds
+        .contains(acg_core::ConflictKinds::WRITE_READ)));
     assert!(attributions
         .iter()
         .all(|item| matches!(&item.conflict, ValidationConflict::Storage { key, .. } if key.as_slice() == b"balance/alice")));

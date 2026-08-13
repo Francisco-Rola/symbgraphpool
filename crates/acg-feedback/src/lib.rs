@@ -7,7 +7,8 @@ use acg_profile_graph::ProfileGraph;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const FEEDBACK_CHECKPOINT_VERSION: u16 = 2;
+pub const FEEDBACK_CHECKPOINT_VERSION: u16 = 3;
+const REPLAY_COST_CHECKPOINT_VERSION: u16 = 2;
 const LEGACY_FEEDBACK_CHECKPOINT_VERSION: u16 = 1;
 
 /// Where one concrete observation came from.
@@ -528,6 +529,108 @@ impl AdaptiveFeedbackConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SerializationCostEstimate {
+    pub expected_serialization_cost_nanos: f64,
+    pub observation_weight: f64,
+    pub confidence: f64,
+    pub observations: u64,
+    pub total_serialization_cost_nanos: u64,
+    pub epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SerializationCostStatistics {
+    /// Decayed weighted sum of marginal dependency-ready delay.
+    pub weighted_serialization_cost_nanos: f64,
+    /// Decayed observation weight.
+    pub observation_weight: f64,
+    pub last_update_epoch: u64,
+    pub observations: u64,
+    pub total_serialization_cost_nanos: u64,
+}
+
+impl Default for SerializationCostStatistics {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl SerializationCostStatistics {
+    pub fn new(last_update_epoch: u64) -> Self {
+        Self {
+            weighted_serialization_cost_nanos: 0.0,
+            observation_weight: 0.0,
+            last_update_epoch,
+            observations: 0,
+            total_serialization_cost_nanos: 0,
+        }
+    }
+
+    pub fn estimate_at(
+        &self,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<SerializationCostEstimate, FeedbackError> {
+        config.validate()?;
+        let mut projected = *self;
+        projected.decay_to(epoch, config.retention_factor)?;
+        let expected_serialization_cost_nanos = if projected.observation_weight > 0.0 {
+            projected.weighted_serialization_cost_nanos / projected.observation_weight
+        } else {
+            0.0
+        };
+        let confidence = if projected.observation_weight > 0.0 {
+            1.0 - (-projected.observation_weight / config.confidence_scale).exp()
+        } else {
+            0.0
+        };
+        Ok(SerializationCostEstimate {
+            expected_serialization_cost_nanos,
+            observation_weight: projected.observation_weight,
+            confidence,
+            observations: projected.observations,
+            total_serialization_cost_nanos: projected.total_serialization_cost_nanos,
+            epoch,
+        })
+    }
+
+    fn decay_to(&mut self, epoch: u64, retention_factor: f64) -> Result<(), FeedbackError> {
+        if epoch < self.last_update_epoch {
+            return Err(FeedbackError::StaleSerializationCostEpoch {
+                observation_epoch: epoch,
+                last_update_epoch: self.last_update_epoch,
+            });
+        }
+        let delta = epoch - self.last_update_epoch;
+        if delta > 0 {
+            let decay = retention_factor.powf(delta as f64);
+            self.weighted_serialization_cost_nanos *= decay;
+            self.observation_weight *= decay;
+            self.last_update_epoch = epoch;
+        }
+        Ok(())
+    }
+
+    fn apply(
+        &mut self,
+        serialization_cost_nanos: u64,
+        weight: f64,
+        epoch: u64,
+        retention_factor: f64,
+    ) -> Result<(), FeedbackError> {
+        validate_weight(weight)?;
+        self.decay_to(epoch, retention_factor)?;
+        self.weighted_serialization_cost_nanos += serialization_cost_nanos as f64 * weight;
+        self.observation_weight += weight;
+        self.observations = self.observations.saturating_add(1);
+        self.total_serialization_cost_nanos = self
+            .total_serialization_cost_nanos
+            .saturating_add(serialization_cost_nanos);
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RuntimeEdgeId(pub u32);
@@ -545,6 +648,8 @@ pub struct RuntimeDiscoveredEdge {
     pub statistics: BetaStatistics,
     #[serde(default)]
     pub replay_cost_statistics: ReplayCostStatistics,
+    #[serde(default)]
+    pub serialization_cost_statistics: SerializationCostStatistics,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -560,6 +665,10 @@ pub struct ApplySummary {
     pub attributed_replay_cost_nanos: u64,
     /// Transitive replay descendants attributed across the observations in this batch.
     pub attributed_invalidated_descendants: u64,
+    /// Brick 5E marginal dependency-ready delay observations learned from realized scheduling.
+    pub serialization_cost_observations: usize,
+    /// Sum of marginal dependency-ready delay attributed in this batch.
+    pub attributed_serialization_cost_nanos: u64,
 }
 
 /// Mutable statistics separated from the immutable [`ProfileGraph`] topology.
@@ -567,6 +676,7 @@ pub struct ApplySummary {
 pub struct AdaptiveFeedbackStore {
     static_statistics: Vec<BetaStatistics>,
     static_replay_costs: Vec<ReplayCostStatistics>,
+    static_serialization_costs: Vec<SerializationCostStatistics>,
     fallback_edges: Vec<RuntimeDiscoveredEdge>,
     fallback_by_pair: BTreeMap<(ProfileId, ProfileId), usize>,
     fallback_adjacency: BTreeMap<ProfileId, Vec<usize>>,
@@ -587,9 +697,12 @@ impl AdaptiveFeedbackStore {
         }
         let static_replay_costs =
             vec![ReplayCostStatistics::new(initial_epoch); graph.edges().len()];
+        let static_serialization_costs =
+            vec![SerializationCostStatistics::new(initial_epoch); graph.edges().len()];
         Ok(Self {
             static_statistics,
             static_replay_costs,
+            static_serialization_costs,
             fallback_edges: Vec::new(),
             fallback_by_pair: BTreeMap::new(),
             fallback_adjacency: BTreeMap::new(),
@@ -614,6 +727,24 @@ impl AdaptiveFeedbackStore {
         config: &AdaptiveFeedbackConfig,
     ) -> Result<ReplayCostEstimate, FeedbackError> {
         self.static_replay_cost_statistics(edge)
+            .ok_or(FeedbackError::UnknownStaticEdge(edge))?
+            .estimate_at(epoch, config)
+    }
+
+    pub fn static_serialization_cost_statistics(
+        &self,
+        edge: ProfileEdgeIndex,
+    ) -> Option<&SerializationCostStatistics> {
+        self.static_serialization_costs.get(edge.0 as usize)
+    }
+
+    pub fn estimate_static_serialization_cost(
+        &self,
+        edge: ProfileEdgeIndex,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<SerializationCostEstimate, FeedbackError> {
+        self.static_serialization_cost_statistics(edge)
             .ok_or(FeedbackError::UnknownStaticEdge(edge))?
             .estimate_at(epoch, config)
     }
@@ -661,6 +792,70 @@ impl AdaptiveFeedbackStore {
             .ok_or(FeedbackError::UnknownRuntimeEdge(id))?
             .replay_cost_statistics
             .estimate_at(epoch, config)
+    }
+
+    pub fn estimate_fallback_serialization_cost(
+        &self,
+        id: RuntimeEdgeId,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<SerializationCostEstimate, FeedbackError> {
+        self.fallback_edge_by_id(id)
+            .ok_or(FeedbackError::UnknownRuntimeEdge(id))?
+            .serialization_cost_statistics
+            .estimate_at(epoch, config)
+    }
+
+    pub fn record_static_serialization_cost(
+        &mut self,
+        edge: ProfileEdgeIndex,
+        serialization_cost_nanos: u64,
+        weight: f64,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<ApplySummary, FeedbackError> {
+        config.validate()?;
+        let statistics = self
+            .static_serialization_costs
+            .get_mut(edge.0 as usize)
+            .ok_or(FeedbackError::UnknownStaticEdge(edge))?;
+        statistics.apply(
+            serialization_cost_nanos,
+            weight,
+            epoch,
+            config.retention_factor,
+        )?;
+        Ok(ApplySummary {
+            serialization_cost_observations: 1,
+            attributed_serialization_cost_nanos: serialization_cost_nanos,
+            ..ApplySummary::default()
+        })
+    }
+
+    pub fn record_fallback_serialization_cost(
+        &mut self,
+        id: RuntimeEdgeId,
+        serialization_cost_nanos: u64,
+        weight: f64,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<ApplySummary, FeedbackError> {
+        config.validate()?;
+        let edge = self
+            .fallback_edges
+            .get_mut(id.0 as usize)
+            .ok_or(FeedbackError::UnknownRuntimeEdge(id))?;
+        edge.serialization_cost_statistics.apply(
+            serialization_cost_nanos,
+            weight,
+            epoch,
+            config.retention_factor,
+        )?;
+        Ok(ApplySummary {
+            serialization_cost_observations: 1,
+            attributed_serialization_cost_nanos: serialization_cost_nanos,
+            ..ApplySummary::default()
+        })
     }
 
     /// Runtime-discovered relationships incident to `profile`.
@@ -825,11 +1020,14 @@ impl AdaptiveFeedbackStore {
                     .definition
                     .stable_key;
                 let replay_cost_statistics = self.static_replay_costs[edge.index.0 as usize];
+                let serialization_cost_statistics =
+                    self.static_serialization_costs[edge.index.0 as usize];
                 Ok(StaticEdgeCheckpoint {
                     source,
                     target,
                     statistics: *statistics,
                     replay_cost_statistics,
+                    serialization_cost_statistics,
                 })
             })
             .collect::<Result<Vec<_>, FeedbackError>>()?;
@@ -844,6 +1042,7 @@ impl AdaptiveFeedbackStore {
                 review_required: edge.review_required,
                 statistics: edge.statistics,
                 replay_cost_statistics: edge.replay_cost_statistics,
+                serialization_cost_statistics: edge.serialization_cost_statistics,
             })
             .collect();
         Ok(FeedbackCheckpoint {
@@ -859,6 +1058,7 @@ impl AdaptiveFeedbackStore {
         initial_epoch: u64,
     ) -> Result<Self, FeedbackError> {
         if checkpoint.format_version != FEEDBACK_CHECKPOINT_VERSION
+            && checkpoint.format_version != REPLAY_COST_CHECKPOINT_VERSION
             && checkpoint.format_version != LEGACY_FEEDBACK_CHECKPOINT_VERSION
         {
             return Err(FeedbackError::UnsupportedCheckpointVersion {
@@ -893,8 +1093,16 @@ impl AdaptiveFeedbackStore {
                 validate_replay_cost_statistics(saved.replay_cost_statistics)?;
                 saved.replay_cost_statistics
             };
+            let serialization_cost_statistics = if checkpoint_version < FEEDBACK_CHECKPOINT_VERSION
+            {
+                SerializationCostStatistics::new(saved.statistics.last_update_epoch)
+            } else {
+                validate_serialization_cost_statistics(saved.serialization_cost_statistics)?;
+                saved.serialization_cost_statistics
+            };
             store.static_statistics[edge_index.0 as usize] = saved.statistics;
             store.static_replay_costs[edge_index.0 as usize] = replay_cost_statistics;
+            store.static_serialization_costs[edge_index.0 as usize] = serialization_cost_statistics;
         }
 
         for saved in checkpoint.fallback_edges {
@@ -919,6 +1127,13 @@ impl AdaptiveFeedbackStore {
                 validate_replay_cost_statistics(saved.replay_cost_statistics)?;
                 saved.replay_cost_statistics
             };
+            let serialization_cost_statistics = if checkpoint_version < FEEDBACK_CHECKPOINT_VERSION
+            {
+                SerializationCostStatistics::new(saved.statistics.last_update_epoch)
+            } else {
+                validate_serialization_cost_statistics(saved.serialization_cost_statistics)?;
+                saved.serialization_cost_statistics
+            };
             if saved.conflict_kinds.is_empty() {
                 return Err(FeedbackError::EmptyFallbackConflictKinds);
             }
@@ -937,6 +1152,7 @@ impl AdaptiveFeedbackStore {
                 review_required: saved.review_required,
                 statistics: saved.statistics,
                 replay_cost_statistics,
+                serialization_cost_statistics,
             };
             store.fallback_edges.push(edge);
             let index = store.fallback_edges.len() - 1;
@@ -975,6 +1191,7 @@ impl FeedbackCheckpoint {
     pub fn from_json(bytes: &[u8]) -> Result<Self, FeedbackError> {
         let checkpoint: Self = serde_json::from_slice(bytes)?;
         if checkpoint.format_version != FEEDBACK_CHECKPOINT_VERSION
+            && checkpoint.format_version != REPLAY_COST_CHECKPOINT_VERSION
             && checkpoint.format_version != LEGACY_FEEDBACK_CHECKPOINT_VERSION
         {
             return Err(FeedbackError::UnsupportedCheckpointVersion {
@@ -993,6 +1210,8 @@ pub struct StaticEdgeCheckpoint {
     pub statistics: BetaStatistics,
     #[serde(default)]
     pub replay_cost_statistics: ReplayCostStatistics,
+    #[serde(default)]
+    pub serialization_cost_statistics: SerializationCostStatistics,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1005,6 +1224,8 @@ pub struct FallbackEdgeCheckpoint {
     pub statistics: BetaStatistics,
     #[serde(default)]
     pub replay_cost_statistics: ReplayCostStatistics,
+    #[serde(default)]
+    pub serialization_cost_statistics: SerializationCostStatistics,
 }
 
 fn create_fallback_edge(
@@ -1047,6 +1268,7 @@ fn create_fallback_edge(
             observation.epoch,
         )?,
         replay_cost_statistics: ReplayCostStatistics::new(observation.epoch),
+        serialization_cost_statistics: SerializationCostStatistics::new(observation.epoch),
     })
 }
 
@@ -1082,6 +1304,19 @@ fn validate_replay_cost_statistics(statistics: ReplayCostStatistics) -> Result<(
         || statistics.observation_weight < 0.0
     {
         return Err(FeedbackError::InvalidReplayCostStatistics);
+    }
+    Ok(())
+}
+
+fn validate_serialization_cost_statistics(
+    statistics: SerializationCostStatistics,
+) -> Result<(), FeedbackError> {
+    if !statistics.weighted_serialization_cost_nanos.is_finite()
+        || statistics.weighted_serialization_cost_nanos < 0.0
+        || !statistics.observation_weight.is_finite()
+        || statistics.observation_weight < 0.0
+    {
+        return Err(FeedbackError::InvalidSerializationCostStatistics);
     }
     Ok(())
 }
@@ -1183,6 +1418,15 @@ pub enum FeedbackError {
     },
     #[error("replay-cost statistics contain non-finite or negative decayed values")]
     InvalidReplayCostStatistics,
+    #[error(
+        "serialization-cost observation epoch {observation_epoch} precedes the cost model's last update epoch {last_update_epoch}"
+    )]
+    StaleSerializationCostEpoch {
+        observation_epoch: u64,
+        last_update_epoch: u64,
+    },
+    #[error("serialization-cost statistics contain non-finite or negative decayed values")]
+    InvalidSerializationCostStatistics,
     #[error("too many runtime-discovered fallback edges for u32 identifiers")]
     TooManyFallbackEdges,
     #[error("static statistics length {statistics} does not match graph edge count {edges}")]

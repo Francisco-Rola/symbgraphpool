@@ -30,7 +30,7 @@ use crate::querier::EngineQuerier;
 use crate::speculative::{
     CanonicalTransaction, CanonicalTxDisposition, CanonicalTxResult, SpeculativeBlockOutcome,
     SpeculativeExecutionMetrics, SpeculativeExecutionOutcome, SpeculativeExecutionStatus,
-    SpeculativeTxResult, StateSnapshot, StateWriteSet,
+    SpeculativeExecutionTiming, SpeculativeTxResult, StateSnapshot, StateWriteSet,
 };
 use crate::state::{code_id_of, SharedTx, SharedWorld, TransactionState, WorldState};
 use crate::storage::EngineStorage;
@@ -292,6 +292,7 @@ impl CosmWasmEngine {
         let transaction_id = request.transaction_id();
         let receipt_block = block.clone();
         let receipt_request = request.clone();
+        let execution_started = Instant::now();
         let (result, tx) =
             self.execute_request_on_state(snapshot.state.clone(), block, request, false);
         let state = tx.lock();
@@ -319,6 +320,7 @@ impl CosmWasmEngine {
             }
         };
 
+        let service_duration = execution_started.elapsed();
         Ok(SpeculativeTxResult {
             transaction_id,
             block: receipt_block,
@@ -327,6 +329,11 @@ impl CosmWasmEngine {
             accesses,
             read_dependencies,
             write_set,
+            execution_timing: SpeculativeExecutionTiming {
+                started_after_phase: std::time::Duration::ZERO,
+                completed_after_phase: service_duration,
+                service_duration,
+            },
             engine_identity: self.core.engine_identity.clone(),
         })
     }
@@ -342,6 +349,7 @@ impl CosmWasmEngine {
         let transaction_id = request.transaction_id();
         let receipt_block = block.clone();
         let receipt_request = request.clone();
+        let speculative_started = Instant::now();
         let request_started = Instant::now();
         let (result, tx) = self.execute_request_on_mvcc(base, view, block, request);
         diagnostics.record_request_execution(request_started.elapsed());
@@ -380,6 +388,7 @@ impl CosmWasmEngine {
             write_set.created_contracts.len(),
         );
 
+        let service_duration = speculative_started.elapsed();
         Ok(SpeculativeTxResult {
             transaction_id,
             block: receipt_block,
@@ -388,6 +397,11 @@ impl CosmWasmEngine {
             accesses,
             read_dependencies,
             write_set,
+            execution_timing: SpeculativeExecutionTiming {
+                started_after_phase: std::time::Duration::ZERO,
+                completed_after_phase: service_duration,
+                service_duration,
+            },
             engine_identity: self.core.engine_identity.clone(),
         })
     }
@@ -625,6 +639,7 @@ impl CosmWasmEngine {
                 let transactions = transactions.clone();
                 let worker_diagnostics = worker_diagnostics.clone();
                 let base_state = base.state.clone();
+                let worker_phase_origin = worker_phase_started;
                 scope.spawn(move || {
                     let mut diagnostics = DependencyWorkerDiagnostics::default();
                     'worker: loop {
@@ -687,6 +702,7 @@ impl CosmWasmEngine {
                             visibility,
                             hot_path.clone(),
                         );
+                        let started_after_phase = worker_phase_origin.elapsed();
                         let execution_started = Instant::now();
                         let execution = self.execute_speculative_mvcc(
                             base_state.clone(),
@@ -700,7 +716,7 @@ impl CosmWasmEngine {
                         let publish_started = Instant::now();
                         let (state_lock, ready_changed) = &*shared;
                         match execution {
-                            Ok(receipt) => {
+                            Ok(mut receipt) => {
                                 let succeeded = receipt.is_success();
                                 if succeeded {
                                     diagnostics.published_storage_versions +=
@@ -731,7 +747,6 @@ impl CosmWasmEngine {
                                     let bit = transaction_index % 64;
                                     state.successful_completed[word] |= 1_u64 << bit;
                                 }
-                                state.receipts[transaction_index] = Some(receipt);
                                 state.completed += 1;
                                 let successors = state.successors[transaction_index].clone();
                                 for successor in successors {
@@ -741,6 +756,14 @@ impl CosmWasmEngine {
                                         state.ready.insert(successor);
                                     }
                                 }
+                                let completed_after_phase = worker_phase_origin.elapsed();
+                                receipt.execution_timing = SpeculativeExecutionTiming {
+                                    started_after_phase,
+                                    completed_after_phase,
+                                    service_duration: completed_after_phase
+                                        .saturating_sub(started_after_phase),
+                                };
+                                state.receipts[transaction_index] = Some(receipt);
                                 ready_changed.notify_all();
                             }
                             Err(error) => {

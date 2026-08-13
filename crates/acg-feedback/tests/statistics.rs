@@ -587,12 +587,20 @@ fn legacy_v1_checkpoint_loads_with_empty_replay_cost_state() {
             .as_object_mut()
             .unwrap()
             .remove("replay_cost_statistics");
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("serialization_cost_statistics");
     }
     for saved in value["fallback_edges"].as_array_mut().unwrap() {
         saved
             .as_object_mut()
             .unwrap()
             .remove("replay_cost_statistics");
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("serialization_cost_statistics");
     }
 
     let bytes = serde_json::to_vec(&value).unwrap();
@@ -605,6 +613,106 @@ fn legacy_v1_checkpoint_loads_with_empty_replay_cost_state() {
     assert_eq!(replay.expected_invalidated_descendants, 0.0);
     assert_eq!(replay.confidence, 0.0);
     assert_eq!(replay.replay_observations, 0);
+}
+
+#[test]
+fn serialization_cost_statistics_track_decay_and_checkpoint() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let config = AdaptiveFeedbackConfig {
+        retention_factor: 0.5,
+        confidence_scale: 2.0,
+        ..AdaptiveFeedbackConfig::default()
+    };
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+
+    let summary = store
+        .record_static_serialization_cost(edge, 900_000, 2.0, 2, &config)
+        .unwrap();
+    assert_eq!(summary.serialization_cost_observations, 1);
+    assert_eq!(summary.attributed_serialization_cost_nanos, 900_000);
+
+    let now = store
+        .estimate_static_serialization_cost(edge, 2, &config)
+        .unwrap();
+    assert!((now.expected_serialization_cost_nanos - 900_000.0).abs() < 1e-6);
+    assert_eq!(now.observations, 1);
+    assert_eq!(now.total_serialization_cost_nanos, 900_000);
+    assert!(now.confidence > 0.0);
+
+    let projected = store
+        .estimate_static_serialization_cost(edge, 5, &config)
+        .unwrap();
+    assert!(
+        (projected.expected_serialization_cost_nanos - now.expected_serialization_cost_nanos).abs()
+            < 1e-6
+    );
+    assert!(projected.observation_weight < now.observation_weight);
+    assert!(projected.confidence < now.confidence);
+
+    let checkpoint = store.checkpoint(&graph).unwrap();
+    assert_eq!(checkpoint.format_version, 3);
+    let restored = AdaptiveFeedbackStore::restore(&graph, checkpoint, 0).unwrap();
+    assert_eq!(
+        restored.static_serialization_cost_statistics(edge),
+        store.static_serialization_cost_statistics(edge)
+    );
+}
+
+#[test]
+fn legacy_v2_checkpoint_loads_with_replay_cost_but_empty_serialization_cost() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let config = AdaptiveFeedbackConfig::default();
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 7).unwrap();
+    let mut buffer = ObservationBuffer::default();
+    buffer.push(
+        ConflictObservation::conflict(
+            credit,
+            credit,
+            TxId(70),
+            TxId(71),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::Replay,
+            ObservationTarget::Static { edge_index: edge },
+            1.0,
+            7,
+            true,
+        )
+        .unwrap()
+        .with_replay_impact(1_250_000, 2),
+    );
+    store.apply_batch(&graph, buffer, &config).unwrap();
+
+    let mut value = serde_json::to_value(store.checkpoint(&graph).unwrap()).unwrap();
+    value["format_version"] = serde_json::json!(2);
+    for saved in value["static_edges"].as_array_mut().unwrap() {
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("serialization_cost_statistics");
+    }
+    for saved in value["fallback_edges"].as_array_mut().unwrap() {
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("serialization_cost_statistics");
+    }
+
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let checkpoint = FeedbackCheckpoint::from_json(&bytes).unwrap();
+    let restored = AdaptiveFeedbackStore::restore(&graph, checkpoint, 0).unwrap();
+    let replay = restored
+        .estimate_static_replay_cost(edge, 7, &config)
+        .unwrap();
+    let serialization = restored
+        .estimate_static_serialization_cost(edge, 7, &config)
+        .unwrap();
+    assert!((replay.expected_replay_cost_nanos - 1_250_000.0).abs() < 1e-6);
+    assert_eq!(serialization.expected_serialization_cost_nanos, 0.0);
+    assert_eq!(serialization.confidence, 0.0);
+    assert_eq!(serialization.observations, 0);
 }
 
 #[test]

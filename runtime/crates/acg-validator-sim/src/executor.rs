@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use acg_cosmwasm_engine::{
     CanonicalTransaction, CanonicalTxDisposition, CosmWasmEngine, EngineError, ExecutionOutcome,
     ParallelExecutionConfig, PostConsensusTimings, PredictionMatchMetrics,
@@ -10,11 +12,21 @@ use thiserror::Error;
 use crate::block::ProducedBlock;
 use crate::scheduler::{ExecutionDependencyClass, ExecutionPlan, SchedulingError};
 
+/// Validator-local execution timing used by Brick 5E measurement and cost estimation.
+/// These values are never consensus inputs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransactionExecutionTiming {
+    pub started_after_phase: Duration,
+    pub completed_after_phase: Duration,
+    pub service_duration: Duration,
+}
+
 #[derive(Debug)]
 pub struct TransactionExecution {
     pub transaction_index: usize,
     pub transaction_id: TransactionId,
     pub result: Result<ExecutionOutcome, EngineError>,
+    pub timing: TransactionExecutionTiming,
 }
 
 #[derive(Debug)]
@@ -75,6 +87,7 @@ impl SerialBlockExecutor {
         }
 
         let mut executions = Vec::with_capacity(block.transactions.len());
+        let phase_started = Instant::now();
         for wave in &plan.waves {
             let transaction_index = wave.transaction_indices[0];
             let pending = &block.transactions[transaction_index];
@@ -83,13 +96,22 @@ impl SerialBlockExecutor {
                 Some(u32::try_from(transaction_index).map_err(|_| {
                     BlockExecutionError::TransactionIndexOverflow(transaction_index)
                 })?);
+            let started_after_phase = phase_started.elapsed();
+            let execution_started = Instant::now();
             let result = self
                 .engine
                 .execute_request(context, pending.request.clone());
+            let service_duration = execution_started.elapsed();
+            let completed_after_phase = phase_started.elapsed();
             executions.push(TransactionExecution {
                 transaction_index,
                 transaction_id: pending.transaction_id(),
                 result,
+                timing: TransactionExecutionTiming {
+                    started_after_phase,
+                    completed_after_phase,
+                    service_duration,
+                },
             });
         }
 
@@ -208,6 +230,11 @@ impl SpeculativeParallelBlockExecutor {
             transactions.push(TransactionExecution {
                 transaction_index,
                 transaction_id: receipt.transaction_id,
+                timing: TransactionExecutionTiming {
+                    started_after_phase: receipt.execution_timing.started_after_phase,
+                    completed_after_phase: receipt.execution_timing.completed_after_phase,
+                    service_duration: receipt.execution_timing.service_duration,
+                },
                 result: Ok(ExecutionOutcome {
                     transaction_id: receipt.transaction_id,
                     contract: outcome.contract.clone(),
@@ -344,6 +371,11 @@ fn split_phase_report(
             TransactionExecution {
                 transaction_index,
                 transaction_id: result.transaction_id,
+                timing: TransactionExecutionTiming {
+                    started_after_phase: Duration::ZERO,
+                    completed_after_phase: result.reexecution_duration,
+                    service_duration: result.reexecution_duration,
+                },
                 result: result.result,
             }
         })

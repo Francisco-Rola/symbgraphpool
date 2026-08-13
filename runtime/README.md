@@ -46,6 +46,14 @@ events to `acg-feedback` observations. It detects exact storage/bank overlaps, s
 explicit independence for tracked pairs, runtime topology misses, and owns a convenience
 `RuntimeFeedbackEngine` for batched update/checkpoint flow.
 
+### `acg-evaluation`
+
+Brick 5E workload-independent experiment records. It combines adaptive planning/scheduling metrics,
+READY-DAG service/DAG bounds, VM/host/MVCC diagnostics, validation/replay statistics, feedback update
+overhead, learned replay/serialization-cost evidence, and optional serial-equivalence digests into a
+schema-versioned deterministic JSON/JSONL record. Timing is validator-local optimization evidence
+only and never participates in canonical correctness.
+
 ### `acg-miniwarehouse-workload`
 
 Brick 2.5 benchmark traffic source for MiniWarehouse. It emits concrete `ExecutionRequest` values
@@ -204,7 +212,7 @@ let checkpoint = feedback.checkpoint(&profile_graph)?;
 
 Concrete conflicts absent from static topology create reviewable runtime fallback edges. Failed
 top-level executions are currently excluded from negative evidence because the engine does not yet
-return a top-level failure trace artifact. See [`../docs/brick-3.md`](../docs/brick-3.md).
+return a top-level failure trace artifact. See [`../docs/brick-3.md`](../docs/brick-3.md). Brick 5D/5E extend the same store with replay-impact and learned serialization-cost statistics; see [`../docs/brick-5d.md`](../docs/brick-5d.md) and [`../docs/brick-5e.md`](../docs/brick-5e.md).
 
 
 ## Dependency policy

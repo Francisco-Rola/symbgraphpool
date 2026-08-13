@@ -152,7 +152,7 @@ statistics are therefore not mutated for every individual VM storage access.
 static edge statistics and all runtime-discovered fallback edges. Dense IDs are resolved again on
 restore.
 
-The checkpoint format is independently versioned as version `1`.
+The checkpoint format is independently versioned. Brick 5E currently writes version `3`; restore remains backward-compatible with v1 (conflict statistics only) and v2 (conflict + replay-cost statistics).
 
 ## Future validation/replay integration
 

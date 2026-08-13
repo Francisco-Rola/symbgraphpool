@@ -6,4 +6,5 @@
 .idea/
 .vscode/
 *.profraw
-/benchmark-results
+
+/benchmark-results/

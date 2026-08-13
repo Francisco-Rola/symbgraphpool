@@ -4,7 +4,7 @@ mod adaptive_pipeline;
 
 pub use adaptive_pipeline::{
     AdaptiveBlockPlan, AdaptiveBlockRun, AdaptivePipelineError, AdaptivePlanningConfig,
-    AdaptivePlanningMetrics, AdaptiveSerialPipeline, ReplayAttribution,
+    AdaptivePlanningMetrics, AdaptiveSerialPipeline, ReplayAttribution, SerializationAttribution,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -338,6 +338,14 @@ pub struct ValidationEvidence {
     pub predecessor: TxIndex,
     pub transaction: TxIndex,
     pub kind: ValidationEvidenceKind,
+}
+
+/// Brick 5E local estimate of the marginal ready-time delay caused by one scheduled dependency.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SerializationCostEvidence {
+    pub predecessor: TxIndex,
+    pub transaction: TxIndex,
+    pub marginal_ready_delay_nanos: u64,
 }
 
 /// Converts concrete execution/validation evidence into runtime-independent observations.
@@ -900,6 +908,56 @@ impl RuntimeFeedbackEngine {
             .apply_batch(profile_graph, observations, &self.adaptive_config)?)
     }
 
+    /// Apply Brick 5E dependency serialization-cost evidence.
+    ///
+    /// The evidence is local performance data only. It changes future speculative scheduling
+    /// policy but never validation or canonical state.
+    pub fn process_serialization_costs(
+        &mut self,
+        candidate_graph: &CandidateGraph,
+        evidence: &[SerializationCostEvidence],
+        epoch: u64,
+    ) -> Result<ApplySummary, RuntimeFeedbackError> {
+        let mut summary = ApplySummary::default();
+        for item in evidence {
+            let edge = candidate_graph
+                .edge_between(item.predecessor, item.transaction)
+                .ok_or(
+                    RuntimeFeedbackError::SerializationEvidenceMissingCandidateEdge {
+                        predecessor: item.predecessor,
+                        transaction: item.transaction,
+                    },
+                )?;
+            let applied = match edge.provenance {
+                EdgeProvenance::Static { profile_edge_index } => {
+                    self.store.record_static_serialization_cost(
+                        profile_edge_index,
+                        item.marginal_ready_delay_nanos,
+                        1.0,
+                        epoch,
+                        &self.adaptive_config,
+                    )?
+                }
+                EdgeProvenance::RuntimeDiscovered { runtime_edge_id } => {
+                    self.store.record_fallback_serialization_cost(
+                        runtime_edge_id,
+                        item.marginal_ready_delay_nanos,
+                        1.0,
+                        epoch,
+                        &self.adaptive_config,
+                    )?
+                }
+            };
+            summary.serialization_cost_observations = summary
+                .serialization_cost_observations
+                .saturating_add(applied.serialization_cost_observations);
+            summary.attributed_serialization_cost_nanos = summary
+                .attributed_serialization_cost_nanos
+                .saturating_add(applied.attributed_serialization_cost_nanos);
+        }
+        Ok(summary)
+    }
+
     pub fn checkpoint(
         &self,
         profile_graph: &ProfileGraph,
@@ -939,6 +997,13 @@ pub enum RuntimeFeedbackError {
     },
     #[error("candidate transaction {0:?} is missing")]
     CandidateTransactionMissing(TxIndex),
+    #[error(
+        "serialization-cost evidence for {predecessor:?} -> {transaction:?} has no candidate edge"
+    )]
+    SerializationEvidenceMissingCandidateEdge {
+        predecessor: TxIndex,
+        transaction: TxIndex,
+    },
     #[error(transparent)]
     Feedback(#[from] FeedbackError),
 }

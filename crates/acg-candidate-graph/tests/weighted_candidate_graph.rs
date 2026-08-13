@@ -546,3 +546,114 @@ fn replay_cost_changes_scheduling_risk_without_rewriting_raw_conflict_probabilit
     assert_eq!(scheduler.classify(cheap_edge), EdgeClass::Soft);
     assert_eq!(scheduler.classify(expensive_edge), EdgeClass::Hard);
 }
+
+#[test]
+fn learned_serialization_cost_changes_risk_while_preserving_replay_and_probability_inputs() {
+    let graph = graph();
+    let credit = profile_id(&graph, "execute::Credit");
+    let edge_index = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let feedback_config = AdaptiveFeedbackConfig {
+        retention_factor: 1.0,
+        confidence_scale: 1.0,
+        ..AdaptiveFeedbackConfig::default()
+    };
+    let cost_policy = CostAwareEdgePolicyConfig {
+        serialization_cost_reference_nanos: 250_000,
+        invalidation_fanout_weight: 0.5,
+    };
+
+    let build_store = |serialization_cost_nanos| {
+        let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+        let mut observations = ObservationBuffer::default();
+        for offset in 0..8_u64 {
+            observations.push(
+                ConflictObservation::independent(
+                    credit,
+                    credit,
+                    TxId(300 + offset * 2),
+                    TxId(301 + offset * 2),
+                    ObservationSource::CanonicalExecution,
+                    ObservationTarget::Static { edge_index },
+                    1.0,
+                    1,
+                    true,
+                )
+                .unwrap(),
+            );
+        }
+        observations.push(
+            ConflictObservation::conflict(
+                credit,
+                credit,
+                TxId(400),
+                TxId(401),
+                ConflictKinds::WRITE_WRITE,
+                ObservationSource::Replay,
+                ObservationTarget::Static { edge_index },
+                4.0,
+                1,
+                true,
+            )
+            .unwrap()
+            .with_replay_impact(1_000_000, 1),
+        );
+        store
+            .apply_batch(&graph, observations, &feedback_config)
+            .unwrap();
+        for _ in 0..8 {
+            store
+                .record_static_serialization_cost(
+                    edge_index,
+                    serialization_cost_nanos,
+                    1.0,
+                    1,
+                    &feedback_config,
+                )
+                .unwrap();
+        }
+        store
+    };
+
+    let cheap_to_serialize = build_store(25_000);
+    let expensive_to_serialize = build_store(5_000_000);
+    let transactions = || {
+        vec![
+            tx(&graph, 1, "execute::Credit", 1, json!({"account":"alice"})),
+            tx(&graph, 2, "execute::Credit", 1, json!({"account":"alice"})),
+        ]
+    };
+    let config = WeightedCandidateGraphConfig {
+        epoch: 1,
+        edge_materialization_threshold: 0.0,
+        cost_policy,
+    };
+    let cheap = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            transactions(),
+            &cheap_to_serialize,
+            &feedback_config,
+            config,
+        )
+        .unwrap();
+    let expensive = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            transactions(),
+            &expensive_to_serialize,
+            &feedback_config,
+            config,
+        )
+        .unwrap();
+    let cheap_edge = cheap.edge_between(TxIndex(0), TxIndex(1)).unwrap();
+    let expensive_edge = expensive.edge_between(TxIndex(0), TxIndex(1)).unwrap();
+
+    assert!((cheap_edge.probability() - expensive_edge.probability()).abs() <= Q16_EPSILON);
+    assert_eq!(
+        cheap_edge.expected_replay_cost_nanos,
+        expensive_edge.expected_replay_cost_nanos
+    );
+    assert_eq!(cheap_edge.expected_serialization_cost_nanos, 25_000);
+    assert_eq!(expensive_edge.expected_serialization_cost_nanos, 5_000_000);
+    assert!(cheap_edge.serialization_cost_confidence() > 0.99);
+    assert!(expensive_edge.serialization_cost_confidence() > 0.99);
+    assert!(cheap_edge.scheduling_risk() > expensive_edge.scheduling_risk() + 0.5);
+}

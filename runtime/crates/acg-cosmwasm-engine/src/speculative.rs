@@ -133,6 +133,17 @@ impl SpeculativeExecutionStatus {
     }
 }
 
+/// Brick 5E validator-local timing for one speculative execution.
+///
+/// Offsets are measured from the dependency worker phase origin. They are observational only and
+/// never participate in validation, replay correctness, or consensus-visible state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpeculativeExecutionTiming {
+    pub started_after_phase: Duration,
+    pub completed_after_phase: Duration,
+    pub service_duration: Duration,
+}
+
 /// Detached result of one transaction executed against a [`StateSnapshot`].
 ///
 /// A failed top-level transaction has an empty commit-ready `write_set`, while `accesses` retains
@@ -149,6 +160,8 @@ pub struct SpeculativeTxResult {
     pub accesses: Vec<AccessRecord>,
     pub read_dependencies: Vec<ReadDependency>,
     pub write_set: StateWriteSet,
+    /// Brick 5E local execution timing used only for cost estimation and experiment records.
+    pub execution_timing: SpeculativeExecutionTiming,
     pub(crate) engine_identity: Arc<()>,
 }
 

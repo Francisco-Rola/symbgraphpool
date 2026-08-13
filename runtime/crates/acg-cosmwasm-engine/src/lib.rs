@@ -31,7 +31,8 @@ pub use crate::parallel::{
 pub use crate::speculative::{
     BalanceWrite, CanonicalTransaction, CanonicalTxDisposition, CanonicalTxResult, ReadDependency,
     SpeculativeBlockOutcome, SpeculativeExecutionMetrics, SpeculativeExecutionOutcome,
-    SpeculativeExecutionStatus, SpeculativeTxResult, StateSnapshot, StateWriteSet, StorageWrite,
+    SpeculativeExecutionStatus, SpeculativeExecutionTiming, SpeculativeTxResult, StateSnapshot,
+    StateWriteSet, StorageWrite,
 };
 pub use crate::types::{
     AccessKind, AccessRecord, Address, BlockContext, CodeChecksum, CodeId, CodeKind, CodeMetadata,

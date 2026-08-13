@@ -60,6 +60,7 @@
 ./docs/brick-4.md
 ./docs/brick-5.md
 ./docs/brick-5d.md
+./docs/brick-5e.md
 ./docs/implementation-status.md
 ./docs/next-brick.md
 ./docs/runtime-simulation.md
@@ -96,6 +97,10 @@
 ./runtime/crates/acg-cosmwasm-engine/tests/validation_replay.rs
 ./runtime/crates/acg-cosmwasm-engine/tests/wasm_cache.rs
 ./runtime/crates/acg-cosmwasm-engine/tests/wasm_smoke.rs
+./runtime/crates/acg-evaluation/Cargo.toml
+./runtime/crates/acg-evaluation/src/lib.rs
+./runtime/crates/acg-evaluation/tests/brick5e_runtime.rs
+./runtime/crates/acg-evaluation/tests/schema.rs
 ./runtime/crates/acg-miniwarehouse-workload/Cargo.toml
 ./runtime/crates/acg-miniwarehouse-workload/src/lib.rs
 ./runtime/crates/acg-miniwarehouse-workload/tests/adaptive_scheduling.rs
@@ -123,5 +128,6 @@
 ./rust-toolchain.toml
 ./rustfmt.toml
 ./scripts/run-brick5d-closed-loop-diagnostics.sh
+./scripts/run-brick5e-measurement-diagnostics.sh
 ./scripts/run-miniwarehouse-5c7-mvcc-diagnostics.sh
 ./scripts/run-miniwarehouse-5c7-sweep.sh

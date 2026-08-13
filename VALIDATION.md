@@ -338,3 +338,24 @@ cargo fmt --manifest-path runtime/Cargo.toml --all -- --check
 cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets -- -D warnings
 cargo test --manifest-path runtime/Cargo.toml --workspace --all-targets
 ```
+
+## Brick 5E: learned serialization cost and stable experiment records (2026-08-13)
+
+Brick 5E adds validator-local per-transaction READY-DAG timing, decayed marginal serialization-cost
+statistics, feedback checkpoint v3 with v1/v2 restore compatibility, and the
+`runtime/crates/acg-evaluation` schema-v1 JSON/JSONL experiment record.
+
+Focused acceptance command:
+
+```text
+./scripts/run-brick5e-measurement-diagnostics.sh
+```
+
+The focused suite validates serialization-cost decay/persistence, learned serialize-vs-speculate
+risk, deterministic record round-trips/schema rejection, and a real two-worker READY-DAG dependency
+whose measured marginal delay is learned in one block and consumed by the next block's candidate
+edge. The runner emits `records.jsonl` under `benchmark-results/brick5e-measurement/<timestamp>/`.
+
+A Rust toolchain is unavailable in the artifact-construction environment. Definitive acceptance
+remains local `cargo fmt`, workspace tests, and `cargo clippy -- -D warnings` for both root and
+runtime workspaces, followed by the focused Brick 5E runner.

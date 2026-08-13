@@ -41,8 +41,7 @@ The projected mean replay cost/fan-out stays stable under pure decay while confi
 observation weight decays. New independence/conflict evidence continues to update the existing Beta
 posterior independently.
 
-Feedback checkpoint format version is now **2**. Version-1 checkpoints remain readable; their new
-replay-cost state starts empty at the old edge statistic's last-update epoch.
+Brick 5D introduced checkpoint v2 for replay-cost state. Brick 5E subsequently advances the format to **v3** for learned serialization cost; v1 and v2 remain readable. v1 starts replay/serialization cost empty, while v2 restores replay cost and starts only serialization cost empty.
 
 ## 5D.3 — cost-adjusted scheduling risk
 
@@ -79,9 +78,7 @@ scheduling_risk = lerp(
 `RiskBoundedScheduler` uses `scheduling_risk` for hard/soft classification and same-wave soft-risk
 accumulation. Raw probability remains available for diagnostics and learning inspection.
 
-The `serialization_cost_reference_nanos` is deliberately an explicit policy input rather than a
-claim that the system already has a perfect online lost-parallelism estimator. Productizing that
-reference is part of Brick 5E.
+Brick 5E now learns marginal dependency-ready delay per relationship and uses `serialization_cost_reference_nanos` only as the low-confidence fallback. See `brick-5e.md`.
 
 ## 5D.4 — closed-loop phase adaptation
 
@@ -119,10 +116,7 @@ Brick 5D intentionally stops short of several useful refinements:
 - replay cost is learned at profile-relationship level, not individual symbolic clause level;
 - fan-out is represented as a count and converted to cost by a configurable multiplier rather than
   summing a learned descendant-cost distribution;
-- the serialization-cost reference is configured, not learned online from realized lost
-  parallelism;
 - there is no explicit exploration policy for periodically probing long-lived soft/hard edges;
 - wall-time evidence is local and should never be used in consensus-visible output.
 
-Those are candidates for Brick 5E metrics/policy productization and later adaptive-policy work, not
-requirements for the Brick 5D correctness boundary.
+Those are candidates for later adaptive-policy work, not requirements for the Brick 5D correctness boundary.

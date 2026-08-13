@@ -1,0 +1,24 @@
+[package]
+name = "acg-evaluation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+acg-candidate-graph.workspace = true
+acg-feedback.workspace = true
+acg-runtime-feedback.workspace = true
+acg-cosmwasm-engine.workspace = true
+acg-validator-sim.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+acg-core.workspace = true
+acg-profile-graph.workspace = true
+acg-symbolic-json.workspace = true
+acg-cosmwasm-adapter.workspace = true
+cosmwasm-std.workspace = true

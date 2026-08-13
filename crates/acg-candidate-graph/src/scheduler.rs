@@ -577,6 +577,8 @@ mod tests {
             expected_replay_cost_nanos: 0,
             expected_invalidated_descendants_milli: 0,
             replay_cost_confidence_q16: 0,
+            expected_serialization_cost_nanos: 0,
+            serialization_cost_confidence_q16: 0,
         }
     }
 
@@ -610,6 +612,8 @@ mod tests {
             expected_replay_cost_nanos: 0,
             expected_invalidated_descendants_milli: 0,
             replay_cost_confidence_q16: 0,
+            expected_serialization_cost_nanos: 0,
+            serialization_cost_confidence_q16: 0,
         }
     }
 
