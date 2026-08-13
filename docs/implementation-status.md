@@ -1,6 +1,6 @@
 # Implementation status
 
-This document is the repository checkpoint after Brick 5E, with Brick 5C.7 as the production execution substrate and VM-lifecycle work preserved as research.
+This document is the repository checkpoint after Brick 5F, with Brick 5C.7 as the production execution substrate and VM-lifecycle work preserved as research.
 
 ## Production implementation
 
@@ -126,7 +126,7 @@ See `research/vm-lifecycle/README.md` for the archived VM work.
 
 Measured wall time remains validator-local optimization evidence and never becomes a correctness or consensus input. See [`brick-5d.md`](brick-5d.md).
 
-## Remaining proposed Brick 5 work
+## Current Brick 5 completion
 
 ### Brick 5E — learned serialization cost + stable evaluation records — implemented
 
@@ -138,13 +138,32 @@ Measured wall time remains validator-local optimization evidence and never becom
 
 See [`brick-5e.md`](brick-5e.md).
 
-### Brick 5F — serial-equivalence and performance acceptance — partially implemented / remaining gate
+### Brick 5F — formal acceptance and reproducible evaluation gates — implemented
 
-Correctness coverage exists across speculative receipts, validation/replay, ConflictLab, MiniWarehouse, and MVCC. A final production acceptance matrix and stable performance thresholds still need to be defined.
+- publication and smoke acceptance policies distinguish scientific completeness from mechanism-only tests;
+- publication records require provenance, explicit workload parameters, serial/DAG references, clean release-build metadata, state digests, and serial equivalence;
+- versioned experiment manifests enumerate the complete expected run matrix and enforce the physical-core budget;
+- versioned acceptance reports classify incomplete records, correctness failures, configuration errors, and explicitly configured performance regressions;
+- missing, unexpected, and duplicate samples are machine-detectable;
+- deterministic SHA-256 state-digest and best-effort host/build metadata helpers are available to future workload adapters;
+- `acg-evaluate` and `scripts/validate-experiment-records.sh` provide a shared JSONL acceptance gate.
+
+See [`brick-5f.md`](brick-5f.md) and [`../evaluation/README.md`](../evaluation/README.md).
+
+## Common benchmark harness — implemented
+
+- manifest runs are executed through one workload-independent lifecycle: deterministic setup, independent serial reference, requested speculative policy, state digests, Brick 5E record, Brick 5F acceptance;
+- the workload adapter boundary is isolated from READY-DAG/MVCC and evaluation schemas;
+- static, probability-only, and cost-aware policy ablations use the same executor/canonical replay path;
+- common `acg.*` tuning parameters are manifest-driven and preserved in exact run identity;
+- ConflictLab is the first built-in adapter and an end-to-end smoke manifest validates the runner.
+
+See [`common-benchmark-harness.md`](common-benchmark-harness.md).
 
 ## Proposed follow-on engineering
 
-1. Define Brick 5F acceptance criteria on supported hardware and workloads, including closed-loop adaptation and checkpoint compatibility.
-2. Keep VM snapshot/reset/COW work on a separate research branch until it passes adversarial isolation tests (memory, globals, tables, gas, memory growth, traps/OOG, backends) and end-to-end serial equivalence.
-3. Add scan/iterator-specific storage probes if MiniWarehouse-specific storage inflation remains material.
-4. Consider cost/granularity-aware worker/concurrency policy and explicit soft-edge exploration only as correctness-independent optimization hints.
+1. Expand ConflictLab into the controlled ground-truth matrix for conflict probability, transaction cost, fan-out, skew, DAG shape, and phase changes, and add an oracle-conflict baseline.
+2. Connect MiniWarehouse to the exact same harness lifecycle and record/acceptance schemas.
+3. Add repeated-run aggregation/experiment generation utilities so large parameter sweeps are declared rather than hand-written.
+4. Only after those two internal workload families are stable, add external workloads.
+5. Keep VM snapshot/reset/COW work on a separate research branch until the common evaluation identifies VM lifecycle as a limiting factor under accepted workloads.

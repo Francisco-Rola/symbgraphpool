@@ -1,5 +1,5 @@
 [package]
-name = "acg-evaluation"
+name = "acg-benchmark-harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,20 +7,19 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+acg-core.workspace = true
 acg-candidate-graph.workspace = true
 acg-feedback.workspace = true
-acg-runtime-feedback.workspace = true
+acg-profile-graph.workspace = true
+acg-symbolic-json.workspace = true
 acg-cosmwasm-engine.workspace = true
+acg-cosmwasm-adapter.workspace = true
+acg-runtime-feedback.workspace = true
 acg-validator-sim.workspace = true
+acg-evaluation.workspace = true
+cosmwasm-std.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-hex.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-acg-core.workspace = true
-acg-profile-graph.workspace = true
-acg-symbolic-json.workspace = true
-acg-cosmwasm-adapter.workspace = true
-cosmwasm-std.workspace = true

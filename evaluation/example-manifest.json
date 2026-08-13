@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "experiment_id": "conflictlab-cost-aware-example",
+  "record_schema_version": 1,
+  "physical_core_limit": 6,
+  "policy": {
+    "require_started_at_utc": true,
+    "require_git_revision": true,
+    "require_build_profile": true,
+    "require_rustc_version": true,
+    "require_clean_git_tree": true,
+    "required_build_profile": "release",
+    "require_nonempty_parameters": true,
+    "require_serial_reference": true,
+    "require_correctness_digests": true,
+    "require_serial_equivalent": true,
+    "required_environment_keys": [
+      "cpu_model",
+      "git_dirty",
+      "kernel",
+      "logical_cores",
+      "os"
+    ],
+    "performance": {
+      "max_service_inflation_milli": null,
+      "max_scheduler_realization_milli": null,
+      "max_planning_overhead_milli": null,
+      "max_feedback_overhead_milli": null,
+      "min_parallel_speedup_milli": null
+    }
+  },
+  "runs": [
+    {
+      "workload": "conflictlab",
+      "mode": "cost-aware",
+      "run_index": 1,
+      "seed": 42,
+      "workers": 6,
+      "parameters": {
+        "transactions": "200",
+        "warmup_blocks": "4",
+        "accounts": "16",
+        "hot_account_probability_bps": "7500",
+        "work_iterations": "5000",
+        "warmup_hot_account_probability_bps": "0",
+        "warmup_work_iterations": "500",
+        "acg.feedback_retention_factor": "0.99",
+        "acg.feedback_confidence_scale": "20.0"
+      }
+    }
+  ]
+}

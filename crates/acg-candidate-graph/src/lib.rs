@@ -160,8 +160,8 @@ impl TransactionEdge {
             },
             fallback_serialization_cost_nanos,
         )
-            .round()
-            .clamp(1.0, u64::MAX as f64) as u64
+        .round()
+        .clamp(1.0, u64::MAX as f64) as u64
     }
 
     pub fn expected_invalidated_descendants(&self) -> f64 {
@@ -486,10 +486,7 @@ impl<'graph> CandidateGraphBuilder<'graph> {
     }
 }
 
-type PreparedBuckets = (
-    Vec<Vec<TxIndex>>,
-    Vec<BTreeMap<InstanceId, Vec<TxIndex>>>,
-);
+type PreparedBuckets = (Vec<Vec<TxIndex>>, Vec<BTreeMap<InstanceId, Vec<TxIndex>>>);
 
 #[derive(Clone, Copy)]
 struct AdaptiveMaterialization {
@@ -798,8 +795,7 @@ fn edge_metrics(
             .expected_replay_cost_nanos
             .round()
             .clamp(0.0, u64::MAX as f64) as u64,
-        expected_invalidated_descendants_milli: (replay_cost
-            .expected_invalidated_descendants
+        expected_invalidated_descendants_milli: (replay_cost.expected_invalidated_descendants
             * 1000.0)
             .round()
             .clamp(0.0, u32::MAX as f64) as u32,
@@ -825,9 +821,10 @@ fn effective_serialization_cost_nanos(
     // A measured zero marginal delay is real evidence that this dependency is effectively free
     // under the observed schedule. Keep a one-nanosecond floor only to avoid division by zero; do
     // not confuse zero cost with missing evidence (which is represented by zero confidence).
-    let learned = serialization_cost.expected_serialization_cost_nanos.max(1.0);
-    fallback
-        + serialization_cost.confidence.clamp(0.0, 1.0) * (learned - fallback)
+    let learned = serialization_cost
+        .expected_serialization_cost_nanos
+        .max(1.0);
+    fallback + serialization_cost.confidence.clamp(0.0, 1.0) * (learned - fallback)
 }
 
 fn cost_adjusted_scheduling_risk(

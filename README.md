@@ -23,7 +23,9 @@ The repository currently implements:
 - Brick 5A/5B speculative receipts with canonical validation/reuse/replay;
 - Brick 5C.7 dependency-driven READY-DAG pre-execution over block-local persistent MVCC;
 - Brick 5D replay attribution, decayed replay-cost/fan-out feedback, and cost-adjusted scheduling risk;
-- Brick 5E learned marginal serialization cost and stable machine-readable experiment records.
+- Brick 5E learned marginal serialization cost and stable machine-readable experiment records;
+- Brick 5F formal publication/CI acceptance manifests, correctness/provenance gates, and machine-readable acceptance reports;
+- a common manifest-driven benchmark harness with independent serial references and static/probability-only/cost-aware ablations.
 
 ## Repository layout
 
@@ -167,8 +169,10 @@ Brick 5D extends that feedback with exact reconciliation causes, measured replay
 separate cost-adjusted scheduling risk while keeping canonical validation/replay as the correctness
 authority. Brick 5E learns the marginal READY delay imposed by scheduled dependencies, persists
 that serialization-cost evidence, and provides schema-versioned deterministic JSON/JSONL experiment
-records through `runtime/crates/acg-evaluation`. See [`docs/brick-5d.md`](docs/brick-5d.md) and
-[`docs/brick-5e.md`](docs/brick-5e.md).
+records through `runtime/crates/acg-evaluation`. Brick 5F adds versioned experiment manifests,
+publication-grade provenance/serial-equivalence gates, optional CI performance thresholds, and
+machine-readable acceptance reports via `acg-evaluate`. The common `acg-benchmark-harness` now executes manifest runs end to end and feeds the resulting JSONL directly into those gates. See [`docs/brick-5d.md`](docs/brick-5d.md),
+[`docs/brick-5e.md`](docs/brick-5e.md), [`docs/brick-5f.md`](docs/brick-5f.md), and [`docs/common-benchmark-harness.md`](docs/common-benchmark-harness.md).
 
 
 ## Publication checklist

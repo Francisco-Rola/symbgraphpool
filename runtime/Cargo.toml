@@ -5,6 +5,7 @@ members = [
     "crates/acg-cosmwasm-adapter",
     "crates/acg-runtime-feedback",
     "crates/acg-evaluation",
+    "crates/acg-benchmark-harness",
     "crates/acg-miniwarehouse-workload",
 ]
 resolver = "2"
@@ -28,6 +29,7 @@ acg-validator-sim = { path = "crates/acg-validator-sim" }
 acg-cosmwasm-adapter = { path = "crates/acg-cosmwasm-adapter" }
 acg-runtime-feedback = { path = "crates/acg-runtime-feedback" }
 acg-evaluation = { path = "crates/acg-evaluation" }
+acg-benchmark-harness = { path = "crates/acg-benchmark-harness" }
 acg-miniwarehouse-workload = { path = "crates/acg-miniwarehouse-workload" }
 
 # Stable CosmWasm 2.x host interface. The uploaded fork was based on 2.0.0-rc.1.

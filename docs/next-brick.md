@@ -1,53 +1,54 @@
-# Next implementation work after Brick 5E
+# Next implementation work after the common benchmark harness
 
-Brick 5E productizes the performance evidence required by the closed-loop Brick 5D policy: it
-learns per-relationship marginal serialization cost from READY-DAG timings and emits one stable
-machine-readable experiment schema for future workloads.
+Brick 5A through 5F and the manifest-driven common benchmark harness are now implemented. The
+execution substrate and measurement/acceptance schemas should remain stable while the project moves
+into controlled evaluation and tuning. VM reset/pool/cache-shard work remains research-only under
+`research/vm-lifecycle/`.
 
-The next production milestone should be **Brick 5F — formal acceptance and reproducible evaluation
-gates**. VM reset/pool/cache-shard work remains research-only under `research/vm-lifecycle/`.
+## 1. ConflictLab ground-truth matrix + oracle baseline
 
-## 1. Brick 5F — acceptance matrix
+Use the harness to generate a declared matrix over:
 
-Turn the existing correctness/performance suite into explicit, automatically reported gates for:
+- conflict probability/locality and hotspot skew;
+- transaction service cost;
+- worker count from 1 through the physical-core budget;
+- feedback retention/confidence;
+- hard/soft/risk thresholds;
+- block size;
+- phase-history/warm-up length.
 
-- serial-equivalent final state and outputs;
-- receipt reuse/replay correctness for points, ranges/iterators, balances, metadata, nested calls,
-  traps/failures, and out-of-gas behavior;
-- 5D attribution conservation, replay fan-out, and phase-change adaptation;
-- feedback checkpoint v1/v2/v3 compatibility;
-- 5E marginal serialization-cost learning and fallback behavior;
-- stable experiment-schema version/required metadata;
-- bounded planner + feedback overhead;
-- READY-DAG realization on controlled 6/4/2/1-lane workloads;
-- worker scaling from one through the physical-core budget;
-- MiniWarehouse serial equivalence, replay/reuse, and end-to-end wall-time targets.
+Preserve `static`, `probability-only`, and `cost-aware` as explicit ablations. Add an oracle-conflict
+baseline for ConflictLab so learned schedules can be compared against known concrete dependency
+structure.
 
-Brick 5F should produce a compact PASS/FAIL acceptance report in addition to raw JSONL records.
+## 2. MiniWarehouse adapter
 
-## 2. Benchmark-ready harness after 5F
+Implement `BenchmarkWorkload`/`PreparedBenchmark` for MiniWarehouse using exactly the same lifecycle:
+independent serial setup, identical generated blocks, deterministic canonical-state encoding, Brick
+5E record, and Brick 5F acceptance. No benchmark-specific timing schema should be added. Sweep
+warehouses, block size, transaction mix, remote-stock probability, skew, workers, and warm-up blocks.
 
-Once metric definitions and gates are frozen, introduce a workload adapter that can run
-ConflictLab, MiniWarehouse, and future external workloads through the same experiment lifecycle:
+## 3. Sweep generation and statistical layer
 
-```text
-setup -> deterministic transactions -> serial reference -> adaptive run
-      -> correctness digest -> ExperimentRecord JSONL
-```
+Add utilities that generate manifests from parameter grids and aggregate accepted JSONL without
+rewriting records. Freeze repeated-run methodology, mode-order randomization/control, confidence
+intervals, raw-sample retention, and deterministic table/figure generation before the large campaign.
 
-Then extend ConflictLab into the ground-truth parameter sweep for conflict probability, skew,
-transaction cost, fan-out, DAG width/depth, and phase changes before adding external benchmarks.
+## 4. Bottleneck-driven optimization
 
-## Parallel research tracks
+Only optimize after accepted matrices identify a material bottleneck. The first candidates to test
+explicitly are:
 
-- **VM snapshot/reset/COW:** potentially high value, but outside production until full
-  isolation/equivalence gates pass.
-- **MiniWarehouse iterator/range scans:** point MVCC is largely exonerated; isolate scan/iterator
-  costs if workload-specific inflation remains high.
-- **Granularity-aware worker policy:** measure 1–6 worker behavior for tiny transactions before
-  adding any adaptive concurrency hint.
-- **Soft-edge exploration:** later consider a deterministic/local exploration policy so heavily
-  serialized relationships can be periodically re-measured without affecting correctness.
+- candidate-graph/planner scaling versus block size and edge density;
+- point versus iterator/range-heavy MVCC service inflation;
+- transaction granularity and 1..physical-core worker scaling;
+- VM lifecycle only if accepted external/application workloads still show it as dominant.
 
-See [`brick-5e.md`](brick-5e.md), [`brick-5d.md`](brick-5d.md), and
-[`implementation-status.md`](implementation-status.md).
+## 5. External workloads
+
+After ConflictLab and MiniWarehouse use the same accepted pipeline, add independently designed
+workloads with different conflict structures. New workloads should require only an adapter plus
+manifest parameters, not changes to READY-DAG, feedback, records, or acceptance semantics.
+
+See [`common-benchmark-harness.md`](common-benchmark-harness.md), [`brick-5f.md`](brick-5f.md),
+[`brick-5e.md`](brick-5e.md), and [`implementation-status.md`](implementation-status.md).

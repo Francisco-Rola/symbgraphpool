@@ -359,3 +359,69 @@ edge. The runner emits `records.jsonl` under `benchmark-results/brick5e-measurem
 A Rust toolchain is unavailable in the artifact-construction environment. Definitive acceptance
 remains local `cargo fmt`, workspace tests, and `cargo clippy -- -D warnings` for both root and
 runtime workspaces, followed by the focused Brick 5E runner.
+
+
+## Brick 5F: formal acceptance and reproducible evaluation gates (2026-08-13)
+
+Brick 5F adds versioned experiment manifests and acceptance reports, publication/smoke acceptance
+policies, serial-state SHA-256 digest helpers, best-effort provenance capture, core-budget and
+internal-consistency validation, explicit optional CI performance thresholds, and the
+`acg-evaluate` JSONL validator.
+
+Focused acceptance command:
+
+```text
+./scripts/run-brick5f-acceptance-diagnostics.sh
+```
+
+Full source/test/lint gate:
+
+```text
+./scripts/run-brick5f-system-acceptance.sh
+```
+
+Generic result validation:
+
+```text
+./scripts/validate-experiment-records.sh <manifest.json> <records.jsonl> [acceptance.json]
+```
+
+The focused tests distinguish incomplete records, correctness failures, configuration errors, and
+performance regressions; detect missing/unexpected/duplicate samples; round-trip manifest/report
+JSON; validate state digests and JSONL loading; check metadata capture; and rerun the existing Brick
+5E measurement/schema integration. Final Rust acceptance remains local formatting, workspace tests,
+and Clippy with `-D warnings` for both root and runtime workspaces.
+
+## Common benchmark harness (2026-08-13)
+
+Added `runtime/crates/acg-benchmark-harness`, a manifest-driven workload adapter/runner layered above
+Brick 5F. Every run independently prepares a serial reference and requested speculative ablation,
+checks deterministic setup, executes warm-up plus one measured block, fills Brick 5E serial/DAG and
+correctness fields, writes JSONL, and evaluates the complete dataset through Brick 5F.
+
+Focused acceptance command:
+
+```text
+./scripts/run-common-benchmark-harness-diagnostics.sh
+```
+
+Generic manifest execution:
+
+```text
+./scripts/run-benchmark-manifest.sh <manifest.json> [output-directory]
+```
+
+The first built-in ConflictLab adapter supports static, probability-only, and cost-aware modes,
+manifest-driven workload/scheduler/feedback knobs, and distinct warm-up versus measured contention
+and work-cost parameters. Unknown workload or reserved `acg.*` parameters are rejected rather than
+silently ignored.
+
+Focused tests cover deterministic preparation, independent serial/adaptive state, serial-equivalence
+digests, serial/DAG reference population, ablation-specific feedback separation, tuning-parameter
+parsing, worker-budget enforcement, output-file round trips, and unknown workload handling. The
+end-to-end smoke manifest executes all three policy modes and must be accepted by Brick 5F.
+
+Static construction-environment validation completed with TOML/JSON parsing, shell `bash -n`,
+lightweight changed-Rust delimiter checks, and patch whitespace/application checks. Definitive Rust
+acceptance remains local `cargo fmt`, runtime workspace tests, and runtime workspace Clippy with
+`-D warnings`, followed by the focused harness diagnostics runner.

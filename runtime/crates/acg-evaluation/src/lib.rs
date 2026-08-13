@@ -1,7 +1,18 @@
-//! Stable Brick 5E experiment records shared by all benchmark workloads.
+//! Stable Brick 5E experiment records plus Brick 5F acceptance gates shared by all workloads.
 //!
 //! Wall-clock values are validator-local measurement only. Nothing in this crate is consensus
 //! visible or participates in canonical validation/replay decisions.
+
+pub mod acceptance;
+mod metadata;
+
+pub use acceptance::{
+    AcceptanceError, AcceptanceIssue, AcceptanceIssueCategory, AcceptancePolicy,
+    DerivedAcceptanceMetrics, ExperimentAcceptanceReport, ExperimentAcceptanceStatus,
+    ExperimentManifest, PerformanceAcceptancePolicy, RunAcceptanceReport, RunAcceptanceStatus,
+    RunIdentity, ACCEPTANCE_REPORT_SCHEMA_VERSION, EXPERIMENT_MANIFEST_SCHEMA_VERSION,
+};
+pub use metadata::sha256_hex;
 
 use std::{collections::BTreeMap, fs::OpenOptions, io::Write, path::Path, time::Duration};
 

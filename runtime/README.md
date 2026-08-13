@@ -46,6 +46,14 @@ events to `acg-feedback` observations. It detects exact storage/bank overlaps, s
 explicit independence for tracked pairs, runtime topology misses, and owns a convenience
 `RuntimeFeedbackEngine` for batched update/checkpoint flow.
 
+### `acg-benchmark-harness`
+
+Manifest-driven common benchmark runner layered above Brick 5F. It prepares independent serial and
+speculative workload instances, enforces deterministic setup, executes static/probability-only/
+cost-aware policy ablations through the same READY-DAG/canonical-replay substrate, derives serial
+DAG references and correctness digests, writes Brick 5E JSONL records, and evaluates the complete
+dataset through Brick 5F. ConflictLab is the first built-in adapter.
+
 ### `acg-evaluation`
 
 Brick 5E workload-independent experiment records. It combines adaptive planning/scheduling metrics,

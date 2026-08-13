@@ -3,6 +3,26 @@
 version = 3
 
 [[package]]
+name = "acg-benchmark-harness"
+version = "0.1.0"
+dependencies = [
+ "acg-candidate-graph",
+ "acg-core",
+ "acg-cosmwasm-adapter",
+ "acg-cosmwasm-engine",
+ "acg-evaluation",
+ "acg-feedback",
+ "acg-profile-graph",
+ "acg-runtime-feedback",
+ "acg-symbolic-json",
+ "acg-validator-sim",
+ "cosmwasm-std",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "acg-candidate-graph"
 version = "0.1.0"
 dependencies = [
@@ -80,8 +100,10 @@ dependencies = [
  "acg-symbolic-json",
  "acg-validator-sim",
  "cosmwasm-std",
+ "hex",
  "serde",
  "serde_json",
+ "sha2 0.10.8",
  "thiserror",
 ]
 

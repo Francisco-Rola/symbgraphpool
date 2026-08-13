@@ -217,6 +217,79 @@ impl AdaptiveSerialPipeline {
         Ok(merge_apply_summaries(access_summary, serialization_summary))
     }
 
+    /// Apply only probability/topology evidence from pre-execution.
+    ///
+    /// This is the Brick 4/5D ablation path used by the common benchmark harness. It deliberately
+    /// excludes Brick 5E serialization-cost observations so cost-aware scheduling can be compared
+    /// against probability-only learning without changing execution correctness.
+    pub fn process_pre_execution_probability_only(
+        &mut self,
+        profile_graph: &ProfileGraph,
+        plan: &AdaptiveBlockPlan,
+        report: &BlockExecutionReport,
+        epoch: u64,
+    ) -> Result<ApplySummary, AdaptivePipelineError> {
+        Ok(self.feedback.process_pre_execution(
+            profile_graph,
+            &plan.candidate_graph,
+            report,
+            epoch,
+        )?)
+    }
+
+    /// Apply replay/canonical conflict evidence without replay-cost or fan-out evidence.
+    ///
+    /// Replayed traces still update conflict probabilities and runtime-discovered topology, but
+    /// validation causes are represented as ordinary invalidations rather than cost-bearing replay
+    /// observations. This keeps the ablation scientifically useful while canonical replay remains
+    /// exactly the same as in the cost-aware mode.
+    pub fn process_reconciliation_probability_only(
+        &mut self,
+        profile_graph: &ProfileGraph,
+        plan: &AdaptiveBlockPlan,
+        report: &SplitPhaseSpeculativeExecutionReport,
+        epoch: u64,
+    ) -> Result<ApplySummary, AdaptivePipelineError> {
+        let replayed_transactions = report
+            .reconciliation
+            .iter()
+            .filter(|diagnostic| diagnostic.disposition == CanonicalTxDisposition::Replayed)
+            .map(|diagnostic| {
+                Ok(TxIndex(
+                    u32::try_from(diagnostic.transaction_index).map_err(|_| {
+                        RuntimeFeedbackError::TransactionIndexOverflow(diagnostic.transaction_index)
+                    })?,
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, RuntimeFeedbackError>>()?;
+        let replay_summary = self.feedback.process_replay_execution(
+            profile_graph,
+            &plan.candidate_graph,
+            &report.block,
+            &replayed_transactions,
+            epoch,
+        )?;
+
+        let attributions = reconciliation_attributions(plan, report)?;
+        let evidence = attributions
+            .iter()
+            .map(|attribution| ValidationEvidence {
+                predecessor: attribution.predecessor,
+                transaction: attribution.transaction,
+                kind: ValidationEvidenceKind::Invalidated {
+                    conflict_kinds: attribution.conflict_kinds,
+                },
+            })
+            .collect::<Vec<_>>();
+        let validation_summary = self.feedback.process_validation(
+            profile_graph,
+            &plan.candidate_graph,
+            &evidence,
+            epoch,
+        )?;
+        Ok(merge_apply_summaries(replay_summary, validation_summary))
+    }
+
     /// Apply replay evidence from post-consensus reconciliation.
     ///
     /// Each item is a concrete read dependency that failed validation and was attributed by the
