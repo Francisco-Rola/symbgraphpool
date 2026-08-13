@@ -59,6 +59,7 @@
 ./docs/brick-3.md
 ./docs/brick-4.md
 ./docs/brick-5.md
+./docs/brick-5d.md
 ./docs/implementation-status.md
 ./docs/next-brick.md
 ./docs/runtime-simulation.md
@@ -106,6 +107,7 @@
 ./runtime/crates/acg-runtime-feedback/src/adaptive_pipeline.rs
 ./runtime/crates/acg-runtime-feedback/src/lib.rs
 ./runtime/crates/acg-runtime-feedback/tests/adaptive_pipeline.rs
+./runtime/crates/acg-runtime-feedback/tests/brick5d_closed_loop.rs
 ./runtime/crates/acg-runtime-feedback/tests/miniwarehouse_feedback.rs
 ./runtime/crates/acg-runtime-feedback/tests/runtime_feedback.rs
 ./runtime/crates/acg-validator-sim/Cargo.toml
@@ -120,5 +122,6 @@
 ./runtime/crates/acg-validator-sim/tests/speculative_parallel.rs
 ./rust-toolchain.toml
 ./rustfmt.toml
+./scripts/run-brick5d-closed-loop-diagnostics.sh
 ./scripts/run-miniwarehouse-5c7-mvcc-diagnostics.sh
 ./scripts/run-miniwarehouse-5c7-sweep.sh

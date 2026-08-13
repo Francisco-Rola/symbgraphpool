@@ -112,6 +112,9 @@ pub struct ReconciliationTransactionDiagnostic {
     pub transaction_id: TransactionId,
     pub disposition: CanonicalTxDisposition,
     pub validation: Option<ValidationOutcome>,
+    /// Canonical execution time paid because speculation could not be reused. Zero for reused
+    /// receipts. Brick 5D consumes this only as adaptive cost evidence.
+    pub reexecution_duration: std::time::Duration,
 }
 
 /// Post-consensus report for split-phase dependency/MVCC reconciliation.
@@ -336,6 +339,7 @@ fn split_phase_report(
                 transaction_id: result.transaction_id,
                 disposition: result.disposition,
                 validation: result.validation.clone(),
+                reexecution_duration: result.reexecution_duration,
             });
             TransactionExecution {
                 transaction_index,

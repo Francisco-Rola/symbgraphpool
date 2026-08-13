@@ -897,6 +897,7 @@ fn adaptive_pipeline(
                 max_wave_width: measurement.max_wave_width,
                 independent_observations_before_softening: measurement.symbolic_hard_soften_after,
             },
+            cost_policy: Default::default(),
         },
     )
     .unwrap()

@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use acg_core::{ConflictKinds, InstanceId, ProfileEdgeIndex, ProfileId, TxId, TxIndex};
 use acg_feedback::{
-    AdaptiveFeedbackConfig, AdaptiveFeedbackStore, EdgeEstimate, FeedbackError, RuntimeEdgeId,
+    AdaptiveFeedbackConfig, AdaptiveFeedbackStore, EdgeEstimate, FeedbackError, ReplayCostEstimate,
+    RuntimeEdgeId,
 };
 use acg_predicate::{CompiledPredicate, InputBindings, PredicateResult};
 use acg_profile_graph::ProfileGraph;
@@ -81,6 +82,18 @@ pub struct TransactionEdge {
     /// becomes eligible for speculation after repeated executions *did not* observe the conflict.
     #[serde(default)]
     pub concrete_independent_observations: u32,
+    /// Brick 5D cost-adjusted scheduling risk. Raw conflict probability remains separately visible.
+    #[serde(default)]
+    pub scheduling_risk_q16: u16,
+    /// Decayed mean direct replay cost learned for this profile relationship.
+    #[serde(default)]
+    pub expected_replay_cost_nanos: u64,
+    /// Decayed mean transitive replay fan-out, in milli-transactions.
+    #[serde(default)]
+    pub expected_invalidated_descendants_milli: u32,
+    /// Confidence in the replay-cost estimate, quantized to Q16.
+    #[serde(default)]
+    pub replay_cost_confidence_q16: u16,
 }
 
 impl TransactionEdge {
@@ -104,6 +117,24 @@ impl TransactionEdge {
 
     pub fn confidence(&self) -> f64 {
         dequantize_q16(self.confidence_q16)
+    }
+
+    pub fn scheduling_risk(&self) -> f64 {
+        // Legacy/binary edges serialized before Brick 5D may have a zero default here. Preserve
+        // their old semantics by falling back to raw probability when there is no cost evidence.
+        if self.scheduling_risk_q16 == 0 && self.replay_cost_confidence_q16 == 0 {
+            self.probability()
+        } else {
+            dequantize_q16(self.scheduling_risk_q16)
+        }
+    }
+
+    pub fn replay_cost_confidence(&self) -> f64 {
+        dequantize_q16(self.replay_cost_confidence_q16)
+    }
+
+    pub fn expected_invalidated_descendants(&self) -> f64 {
+        f64::from(self.expected_invalidated_descendants_milli) / 1000.0
     }
 
     /// A concrete symbolic predicate evaluated false, but prior runtime execution proved that
@@ -159,6 +190,38 @@ impl CandidateGraph {
     }
 }
 
+/// Brick 5D conversion from conflict probability + measured replay impact into scheduling risk.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CostAwareEdgePolicyConfig {
+    /// Wall-time cost used as the reference for serializing one dependency.
+    pub serialization_cost_reference_nanos: u64,
+    /// Additional penalty per expected transitive invalidation descendant.
+    pub invalidation_fanout_weight: f64,
+}
+
+impl Default for CostAwareEdgePolicyConfig {
+    fn default() -> Self {
+        Self {
+            serialization_cost_reference_nanos: 250_000,
+            invalidation_fanout_weight: 0.50,
+        }
+    }
+}
+
+impl CostAwareEdgePolicyConfig {
+    pub fn validate(&self) -> Result<(), CandidateGraphError> {
+        if self.serialization_cost_reference_nanos == 0 {
+            return Err(CandidateGraphError::ZeroSerializationCostReference);
+        }
+        if !self.invalidation_fanout_weight.is_finite() || self.invalidation_fanout_weight < 0.0 {
+            return Err(CandidateGraphError::InvalidInvalidationFanoutWeight(
+                self.invalidation_fanout_weight,
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Inputs controlling adaptive candidate-edge materialization.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeightedCandidateGraphConfig {
@@ -170,6 +233,9 @@ pub struct WeightedCandidateGraphConfig {
     /// runtime-discovered topology stay materialized so learning can demote them from Hard to
     /// Soft without silently deleting a known dependency relationship.
     pub edge_materialization_threshold: f64,
+    /// Cost-aware Brick 5D policy. With no replay-cost evidence, scheduling risk exactly matches
+    /// the Brick 4 posterior probability.
+    pub cost_policy: CostAwareEdgePolicyConfig,
 }
 
 impl WeightedCandidateGraphConfig {
@@ -181,6 +247,7 @@ impl WeightedCandidateGraphConfig {
                 self.edge_materialization_threshold,
             ));
         }
+        self.cost_policy.validate()?;
         Ok(())
     }
 }
@@ -286,6 +353,11 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                     config.epoch,
                     feedback_config,
                 )?;
+                let replay_cost = feedback_store.estimate_static_replay_cost(
+                    adjacency.edge_index,
+                    config.epoch,
+                    feedback_config,
+                )?;
                 let profile_edge = &self.profile_graph.edges()[adjacency.edge_index.0 as usize];
                 materialize_static_profile_edge(
                     &transactions,
@@ -296,7 +368,9 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                     profile_edge,
                     StaticMaterialization::Adaptive {
                         estimate,
+                        replay_cost,
                         edge_materialization_threshold: config.edge_materialization_threshold,
+                        cost_policy: config.cost_policy,
                     },
                 )?;
             }
@@ -318,7 +392,19 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                     config.epoch,
                     feedback_config,
                 )?;
-                materialize_runtime_fallback_edge(&buckets, &mut edges, fallback, estimate);
+                let replay_cost = feedback_store.estimate_fallback_replay_cost(
+                    fallback.id,
+                    config.epoch,
+                    feedback_config,
+                )?;
+                materialize_runtime_fallback_edge(
+                    &buckets,
+                    &mut edges,
+                    fallback,
+                    estimate,
+                    replay_cost,
+                    config.cost_policy,
+                );
             }
         }
 
@@ -362,7 +448,9 @@ enum StaticMaterialization {
     Binary,
     Adaptive {
         estimate: EdgeEstimate,
+        replay_cost: ReplayCostEstimate,
         edge_materialization_threshold: f64,
+        cost_policy: CostAwareEdgePolicyConfig,
     },
 }
 
@@ -380,6 +468,7 @@ impl StaticMaterialization {
             Self::Adaptive {
                 estimate,
                 edge_materialization_threshold,
+                ..
             } => match predicate_result {
                 // A concrete predicate match is known symbolic topology. Keep it present so
                 // concrete execution can soften the relationship rather than erase it.
@@ -393,15 +482,24 @@ impl StaticMaterialization {
             },
         }
     }
-    fn probability_confidence_and_observations(self) -> (u16, u16, u32, u32) {
+    fn edge_metrics(self) -> EdgeMetrics {
         match self {
-            Self::Binary => (u16::MAX, 0, 0, 0),
-            Self::Adaptive { estimate, .. } => (
-                quantize_q16(estimate.probability),
-                quantize_q16(estimate.confidence),
-                u32::try_from(estimate.positive_observations).unwrap_or(u32::MAX),
-                u32::try_from(estimate.negative_observations).unwrap_or(u32::MAX),
-            ),
+            Self::Binary => EdgeMetrics {
+                probability_q16: u16::MAX,
+                confidence_q16: 0,
+                concrete_conflict_observations: 0,
+                concrete_independent_observations: 0,
+                scheduling_risk_q16: u16::MAX,
+                expected_replay_cost_nanos: 0,
+                expected_invalidated_descendants_milli: 0,
+                replay_cost_confidence_q16: 0,
+            },
+            Self::Adaptive {
+                estimate,
+                replay_cost,
+                cost_policy,
+                ..
+            } => edge_metrics(estimate, replay_cost, cost_policy),
         }
     }
 }
@@ -547,12 +645,7 @@ fn maybe_materialize_static_edge(
     if !mode.should_materialize(result) {
         return Ok(());
     }
-    let (
-        probability_q16,
-        confidence_q16,
-        concrete_conflict_observations,
-        concrete_independent_observations,
-    ) = mode.probability_confidence_and_observations();
+    let metrics = mode.edge_metrics();
     push_edge(
         edges,
         left_index,
@@ -562,10 +655,7 @@ fn maybe_materialize_static_edge(
         },
         result,
         profile_edge.conflict_kinds,
-        probability_q16,
-        confidence_q16,
-        concrete_conflict_observations,
-        concrete_independent_observations,
+        metrics,
     );
     Ok(())
 }
@@ -575,15 +665,12 @@ fn materialize_runtime_fallback_edge(
     edges: &mut Vec<TransactionEdge>,
     fallback: &acg_feedback::RuntimeDiscoveredEdge,
     estimate: EdgeEstimate,
+    replay_cost: ReplayCostEstimate,
+    cost_policy: CostAwareEdgePolicyConfig,
 ) {
     let source_bucket = &buckets[fallback.source.0 as usize];
     let target_bucket = &buckets[fallback.target.0 as usize];
-    let probability_q16 = quantize_q16(estimate.probability);
-    let confidence_q16 = quantize_q16(estimate.confidence);
-    let concrete_conflict_observations =
-        u32::try_from(estimate.positive_observations).unwrap_or(u32::MAX);
-    let concrete_independent_observations =
-        u32::try_from(estimate.negative_observations).unwrap_or(u32::MAX);
+    let metrics = edge_metrics(estimate, replay_cost, cost_policy);
     if fallback.source == fallback.target {
         for (left_offset, &left_index) in source_bucket.iter().enumerate() {
             for &right_index in source_bucket.iter().skip(left_offset + 1) {
@@ -596,10 +683,7 @@ fn materialize_runtime_fallback_edge(
                     },
                     PredicateResult::Unknown,
                     fallback.conflict_kinds,
-                    probability_q16,
-                    confidence_q16,
-                    concrete_conflict_observations,
-                    concrete_independent_observations,
+                    metrics,
                 );
             }
         }
@@ -615,17 +699,71 @@ fn materialize_runtime_fallback_edge(
                     },
                     PredicateResult::Unknown,
                     fallback.conflict_kinds,
-                    probability_q16,
-                    confidence_q16,
-                    concrete_conflict_observations,
-                    concrete_independent_observations,
+                    metrics,
                 );
             }
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+struct EdgeMetrics {
+    probability_q16: u16,
+    confidence_q16: u16,
+    concrete_conflict_observations: u32,
+    concrete_independent_observations: u32,
+    scheduling_risk_q16: u16,
+    expected_replay_cost_nanos: u64,
+    expected_invalidated_descendants_milli: u32,
+    replay_cost_confidence_q16: u16,
+}
+
+fn edge_metrics(
+    estimate: EdgeEstimate,
+    replay_cost: ReplayCostEstimate,
+    cost_policy: CostAwareEdgePolicyConfig,
+) -> EdgeMetrics {
+    let scheduling_risk =
+        cost_adjusted_scheduling_risk(estimate.probability, replay_cost, cost_policy);
+    EdgeMetrics {
+        probability_q16: quantize_q16(estimate.probability),
+        confidence_q16: quantize_q16(estimate.confidence),
+        concrete_conflict_observations: u32::try_from(estimate.positive_observations)
+            .unwrap_or(u32::MAX),
+        concrete_independent_observations: u32::try_from(estimate.negative_observations)
+            .unwrap_or(u32::MAX),
+        scheduling_risk_q16: quantize_q16(scheduling_risk),
+        expected_replay_cost_nanos: replay_cost
+            .expected_replay_cost_nanos
+            .round()
+            .clamp(0.0, u64::MAX as f64) as u64,
+        expected_invalidated_descendants_milli: (replay_cost.expected_invalidated_descendants
+            * 1000.0)
+            .round()
+            .clamp(0.0, u32::MAX as f64) as u32,
+        replay_cost_confidence_q16: quantize_q16(replay_cost.confidence.clamp(0.0, 1.0)),
+    }
+}
+
+fn cost_adjusted_scheduling_risk(
+    conflict_probability: f64,
+    replay_cost: ReplayCostEstimate,
+    cost_policy: CostAwareEdgePolicyConfig,
+) -> f64 {
+    if replay_cost.confidence <= 0.0 || replay_cost.expected_replay_cost_nanos <= 0.0 {
+        return conflict_probability;
+    }
+    let fanout_multiplier =
+        1.0 + cost_policy.invalidation_fanout_weight * replay_cost.expected_invalidated_descendants;
+    let expected_speculation_penalty =
+        conflict_probability * replay_cost.expected_replay_cost_nanos * fanout_multiplier;
+    let cost_risk = (expected_speculation_penalty
+        / cost_policy.serialization_cost_reference_nanos as f64)
+        .clamp(0.0, 1.0);
+    (conflict_probability + replay_cost.confidence * (cost_risk - conflict_probability))
+        .clamp(0.0, 1.0)
+}
+
 fn push_edge(
     edges: &mut Vec<TransactionEdge>,
     left_index: TxIndex,
@@ -633,10 +771,7 @@ fn push_edge(
     provenance: EdgeProvenance,
     predicate_result: PredicateResult,
     conflict_kinds: ConflictKinds,
-    probability_q16: u16,
-    confidence_q16: u16,
-    concrete_conflict_observations: u32,
-    concrete_independent_observations: u32,
+    metrics: EdgeMetrics,
 ) {
     let (source, target) = if left_index <= right_index {
         (left_index, right_index)
@@ -649,10 +784,14 @@ fn push_edge(
         provenance,
         predicate_result,
         conflict_kinds,
-        probability_q16,
-        confidence_q16,
-        concrete_conflict_observations,
-        concrete_independent_observations,
+        probability_q16: metrics.probability_q16,
+        confidence_q16: metrics.confidence_q16,
+        concrete_conflict_observations: metrics.concrete_conflict_observations,
+        concrete_independent_observations: metrics.concrete_independent_observations,
+        scheduling_risk_q16: metrics.scheduling_risk_q16,
+        expected_replay_cost_nanos: metrics.expected_replay_cost_nanos,
+        expected_invalidated_descendants_milli: metrics.expected_invalidated_descendants_milli,
+        replay_cost_confidence_q16: metrics.replay_cost_confidence_q16,
     });
 }
 
@@ -718,6 +857,10 @@ pub enum CandidateGraphError {
     InvalidInclusionProbability { tx_id: TxId, value: f32 },
     #[error("edge materialization threshold must be finite and within [0, 1], got {0}")]
     InvalidMaterializationThreshold(f64),
+    #[error("Brick 5D serialization cost reference must be greater than zero")]
+    ZeroSerializationCostReference,
+    #[error("Brick 5D invalidation fan-out weight must be finite and non-negative, got {0}")]
+    InvalidInvalidationFanoutWeight(f64),
     #[error(transparent)]
     Feedback(#[from] FeedbackError),
 }

@@ -1,19 +1,39 @@
-# Next implementation work after Brick 5C.7
+# Next implementation work after Brick 5D
 
-Brick 5C.7 is the current production execution substrate: dependency-driven READY-DAG speculative execution over block-local persistent MVCC, followed by canonical receipt validation/reuse/replay.
+Brick 5D now closes the adaptive planning loop: concrete reconciliation identifies why a receipt replayed, measured replay cost/fan-out are persisted with decay, and future candidate edges expose a cost-adjusted scheduling risk without changing canonical correctness.
 
-The next production work is **not** another VM pool or cache-sharding strategy. Those experiments are archived under `research/vm-lifecycle/` and are intentionally absent from the production engine.
+The next production work should be **Brick 5E followed by Brick 5F**. VM reset/pool/cache-shard work remains research-only under `research/vm-lifecycle/`.
 
-## Near-term priorities
+## 1. Brick 5E — productize cost/efficiency metrics and policy inputs
 
-1. **Brick 5F acceptance matrix** — define stable serial-equivalence, replay/reuse, and performance acceptance gates for ConflictLab, MiniWarehouse, and controlled synthetic workloads.
-2. **Brick 5E production metrics** — productize only the metrics that are useful for diagnosing exposed parallelism, observed service inflation, and scheduler realization without carrying research policy knobs into the engine API.
-3. **MiniWarehouse scan/iterator diagnosis** — if workload-specific service inflation remains significant, isolate range/iterator behavior separately from point MVCC.
-4. **Granularity-aware execution policy research** — measure whether fewer workers help very small transactions; keep any policy advisory and correctness-independent.
-5. **Brick 5D broader adaptive learning** — extend validation/replay-driven feedback once the execution/performance baseline is stable.
+The 5D policy currently uses a configured `serialization_cost_reference_nanos`. Brick 5E should replace that blunt reference with stable measurements or a conservative estimator of lost parallelism, while exposing a compact diagnostics surface:
 
-## Separate VM research branch
+- raw conflict probability and confidence;
+- cost-adjusted scheduling risk and cost confidence;
+- expected direct replay cost and expected replay fan-out;
+- actual replay work and cascade work;
+- serial-cost DAG, observed-service DAG, service inflation, and scheduler realization;
+- planner/feedback overhead.
 
-A correct pristine VM snapshot/reset/copy-on-write mechanism remains a potentially high-value optimization. It requires state-reset semantics below the current public `cosmwasm_vm::Instance` abstraction and must not enter production until adversarial isolation tests cover memory, mutable globals, tables, gas, memory growth, traps/out-of-gas, storage/querier rebinding, and end-to-end world-state equivalence.
+The goal is not to make wall-clock timing consensus-visible. All timing remains validator-local optimization evidence.
 
-See [`implementation-status.md`](implementation-status.md) and [`../research/vm-lifecycle/README.md`](../research/vm-lifecycle/README.md).
+## 2. Brick 5F — acceptance matrix
+
+Turn the existing correctness/performance suite into explicit gates for:
+
+- serial-equivalent final state and outputs;
+- receipt reuse/replay correctness for points, ranges, balances, metadata, traps/failures, and nested calls;
+- 5D attribution conservation and checkpoint v1/v2 compatibility;
+- phase-change adaptation (soften → expensive replay harden → decay/recover);
+- bounded planner/feedback overhead;
+- READY-DAG realization on controlled 6/4/2/1-lane workloads;
+- MiniWarehouse replay/reuse and end-to-end wall-time targets on the six-core reference machine.
+
+## Parallel research tracks
+
+- **VM snapshot/reset/COW:** potentially high value, but remains outside production until full isolation/equivalence gates pass.
+- **MiniWarehouse iterator/range scans:** point MVCC is largely exonerated; isolate scan/iterator costs if workload-specific inflation remains high.
+- **Granularity-aware worker policy:** measure 1–6 worker behavior for tiny transactions before adding any adaptive concurrency hint.
+- **Soft-edge exploration:** later consider a deterministic/local exploration policy so heavily serialized relationships can be periodically re-measured without affecting correctness.
+
+See [`brick-5d.md`](brick-5d.md) and [`implementation-status.md`](implementation-status.md).

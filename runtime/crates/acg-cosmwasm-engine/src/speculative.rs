@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use cosmwasm_std::{Binary, Event};
 
@@ -191,6 +191,12 @@ pub struct CanonicalTxResult {
     pub disposition: CanonicalTxDisposition,
     /// Present when a speculative receipt existed. Valid receipts have an empty conflict list.
     pub validation: Option<ValidationOutcome>,
+    /// Wall time spent canonically executing this transaction during reconciliation.
+    ///
+    /// This is non-zero only for a replayed speculative receipt or a transaction that had no
+    /// matching pre-consensus receipt. Reused receipts keep this at zero. Brick 5D uses the replay
+    /// duration as cost evidence; it is observational and never participates in correctness.
+    pub reexecution_duration: Duration,
     pub result: Result<ExecutionOutcome, EngineError>,
 }
 

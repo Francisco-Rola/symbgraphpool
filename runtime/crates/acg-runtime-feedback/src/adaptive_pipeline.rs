@@ -1,12 +1,12 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
 use acg_candidate_graph::{
-    CandidateGraph, CandidateGraphBuilder, CandidateGraphError, RiskBoundedSchedule,
-    RiskBoundedScheduler, RiskBoundedSchedulerConfig, SchedulingError as GraphSchedulingError,
-    WeightedCandidateGraphConfig,
+    CandidateGraph, CandidateGraphBuilder, CandidateGraphError, CostAwareEdgePolicyConfig,
+    RiskBoundedSchedule, RiskBoundedScheduler, RiskBoundedSchedulerConfig,
+    SchedulingError as GraphSchedulingError, WeightedCandidateGraphConfig,
 };
 use acg_core::{ConflictKinds, TxIndex};
 use acg_cosmwasm_adapter::{AdapterError, CosmWasmCandidateAdapter};
@@ -32,6 +32,8 @@ pub struct AdaptivePlanningConfig {
     pub edge_materialization_threshold: f64,
     /// Hard/soft thresholds, risk budget and optional wave capacity from Brick 4C.
     pub scheduler: RiskBoundedSchedulerConfig,
+    /// Brick 5D expected replay-cost policy used to turn posterior probability into scheduling risk.
+    pub cost_policy: CostAwareEdgePolicyConfig,
 }
 
 impl Default for AdaptivePlanningConfig {
@@ -39,6 +41,7 @@ impl Default for AdaptivePlanningConfig {
         Self {
             edge_materialization_threshold: 0.05,
             scheduler: RiskBoundedSchedulerConfig::default(),
+            cost_policy: CostAwareEdgePolicyConfig::default(),
         }
     }
 }
@@ -48,6 +51,7 @@ impl AdaptivePlanningConfig {
         WeightedCandidateGraphConfig {
             epoch: 0,
             edge_materialization_threshold: self.edge_materialization_threshold,
+            cost_policy: self.cost_policy,
         }
         .validate()?;
         self.scheduler.validate()?;
@@ -73,6 +77,23 @@ impl AdaptivePlanningMetrics {
             + self.schedule_validation
             + self.plan_conversion
     }
+}
+
+/// Brick 5D.1 concrete attribution for one validation conflict that forced replay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayAttribution {
+    pub predecessor: TxIndex,
+    pub transaction: TxIndex,
+    pub conflict_kinds: ConflictKinds,
+    /// Exact stale concrete dependency (key/range/balance/metadata) that failed validation.
+    pub conflict: ValidationConflict,
+    /// Share of the replay's measured canonical execution cost attributed to this concrete cause.
+    pub replay_cost_nanos: u64,
+    /// Number of later replayed transactions transitively reachable through concrete invalidation
+    /// evidence from this transaction.
+    pub invalidated_descendants: u32,
+    /// Whether the candidate graph contained the relationship that caused the replay.
+    pub candidate_edge_present: bool,
 }
 
 /// One Brick 4D planning result before any speculative parallel executor exists.
@@ -206,32 +227,22 @@ impl AdaptiveSerialPipeline {
             epoch,
         )?;
 
-        // Validation attribution adds targeted positive evidence for the concrete dependency that
-        // forced each replay. This is stronger than access-overlap evidence because it records a
-        // value that was actually stale relative to a canonical predecessor.
-        let mut evidence = Vec::with_capacity(report.dependency_evidence.len());
-        for item in &report.dependency_evidence {
-            let Some(transaction) = report.reconciliation.get(item.transaction_index) else {
-                continue;
-            };
-            let Some(validation) = transaction.validation.as_ref() else {
-                continue;
-            };
-            let Some(conflict) = validation.conflicts().get(item.conflict_index) else {
-                continue;
-            };
-            evidence.push(ValidationEvidence {
-                predecessor: TxIndex(u32::try_from(item.predecessor_index).map_err(|_| {
-                    RuntimeFeedbackError::TransactionIndexOverflow(item.predecessor_index)
-                })?),
-                transaction: TxIndex(u32::try_from(item.transaction_index).map_err(|_| {
-                    RuntimeFeedbackError::TransactionIndexOverflow(item.transaction_index)
-                })?),
+        // Validation attribution adds targeted positive + cost evidence for the concrete
+        // dependency that forced each replay. Direct replay time is split across that transaction's
+        // concrete conflict attributions so one replay cannot be counted multiple times as cost.
+        let attributions = reconciliation_attributions(plan, report)?;
+        let evidence = attributions
+            .iter()
+            .map(|item| ValidationEvidence {
+                predecessor: item.predecessor,
+                transaction: item.transaction,
                 kind: ValidationEvidenceKind::Replayed {
-                    conflict_kinds: conflict_kinds_for_validation(conflict),
+                    conflict_kinds: item.conflict_kinds,
+                    replay_cost_nanos: item.replay_cost_nanos,
+                    invalidated_descendants: item.invalidated_descendants,
                 },
-            });
-        }
+            })
+            .collect::<Vec<_>>();
         let validation_summary = self.feedback.process_validation(
             profile_graph,
             &plan.candidate_graph,
@@ -239,6 +250,15 @@ impl AdaptiveSerialPipeline {
             epoch,
         )?;
         Ok(merge_apply_summaries(replay_summary, validation_summary))
+    }
+
+    /// Return Brick 5D.1 replay attributions without mutating feedback state.
+    pub fn reconciliation_attributions(
+        &self,
+        plan: &AdaptiveBlockPlan,
+        report: &SplitPhaseSpeculativeExecutionReport,
+    ) -> Result<Vec<ReplayAttribution>, AdaptivePipelineError> {
+        reconciliation_attributions(plan, report)
     }
 
     /// Creates the weighted transaction graph and risk-bounded waves for `block` without executing
@@ -275,6 +295,7 @@ impl AdaptiveSerialPipeline {
             WeightedCandidateGraphConfig {
                 epoch,
                 edge_materialization_threshold: self.planning_config.edge_materialization_threshold,
+                cost_policy: self.planning_config.cost_policy,
             },
         )?;
         let candidate_graph_elapsed = started.elapsed();
@@ -339,6 +360,121 @@ impl AdaptiveSerialPipeline {
     }
 }
 
+fn reconciliation_attributions(
+    plan: &AdaptiveBlockPlan,
+    report: &SplitPhaseSpeculativeExecutionReport,
+) -> Result<Vec<ReplayAttribution>, AdaptivePipelineError> {
+    let mut evidence_count_by_transaction = BTreeMap::<usize, usize>::new();
+    let mut adjacency = BTreeMap::<usize, BTreeSet<usize>>::new();
+    for item in &report.dependency_evidence {
+        *evidence_count_by_transaction
+            .entry(item.transaction_index)
+            .or_default() += 1;
+        adjacency
+            .entry(item.predecessor_index)
+            .or_default()
+            .insert(item.transaction_index);
+    }
+
+    let replayed = report
+        .reconciliation
+        .iter()
+        .filter(|item| item.disposition == CanonicalTxDisposition::Replayed)
+        .map(|item| item.transaction_index)
+        .collect::<BTreeSet<_>>();
+
+    let mut descendant_cache = BTreeMap::<usize, u32>::new();
+    let mut attribution_ordinal_by_transaction = BTreeMap::<usize, usize>::new();
+    let mut attributions = Vec::with_capacity(report.dependency_evidence.len());
+    for item in &report.dependency_evidence {
+        let Some(transaction) = report.reconciliation.get(item.transaction_index) else {
+            continue;
+        };
+        let Some(validation) = transaction.validation.as_ref() else {
+            continue;
+        };
+        let Some(conflict) = validation.conflicts().get(item.conflict_index) else {
+            continue;
+        };
+        let predecessor =
+            TxIndex(u32::try_from(item.predecessor_index).map_err(|_| {
+                RuntimeFeedbackError::TransactionIndexOverflow(item.predecessor_index)
+            })?);
+        let transaction_index =
+            TxIndex(u32::try_from(item.transaction_index).map_err(|_| {
+                RuntimeFeedbackError::TransactionIndexOverflow(item.transaction_index)
+            })?);
+        let attribution_count = evidence_count_by_transaction
+            .get(&item.transaction_index)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let ordinal = attribution_ordinal_by_transaction
+            .entry(item.transaction_index)
+            .or_default();
+        let replay_total_nanos = duration_to_u64_nanos(transaction.reexecution_duration);
+        let divisor = u64::try_from(attribution_count).unwrap_or(u64::MAX).max(1);
+        let remainder_bonus =
+            if u64::try_from(*ordinal).unwrap_or(u64::MAX) < replay_total_nanos % divisor {
+                1
+            } else {
+                0
+            };
+        let replay_cost_nanos = replay_total_nanos / divisor + remainder_bonus;
+        *ordinal = (*ordinal).saturating_add(1);
+        let invalidated_descendants = *descendant_cache
+            .entry(item.transaction_index)
+            .or_insert_with(|| {
+                replay_descendant_count(item.transaction_index, &adjacency, &replayed)
+            });
+        attributions.push(ReplayAttribution {
+            predecessor,
+            transaction: transaction_index,
+            conflict_kinds: conflict_kinds_for_validation(conflict),
+            conflict: conflict.clone(),
+            replay_cost_nanos,
+            invalidated_descendants,
+            candidate_edge_present: plan
+                .candidate_graph
+                .edge_between(predecessor, transaction_index)
+                .is_some(),
+        });
+    }
+    Ok(attributions)
+}
+
+fn replay_descendant_count(
+    root: usize,
+    adjacency: &BTreeMap<usize, BTreeSet<usize>>,
+    replayed: &BTreeSet<usize>,
+) -> u32 {
+    let mut pending = adjacency
+        .get(&root)
+        .into_iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
+    while let Some(transaction) = pending.pop() {
+        if !seen.insert(transaction) {
+            continue;
+        }
+        if let Some(children) = adjacency.get(&transaction) {
+            pending.extend(children.iter().copied());
+        }
+    }
+    u32::try_from(
+        seen.iter()
+            .filter(|index| replayed.contains(*index))
+            .count(),
+    )
+    .unwrap_or(u32::MAX)
+}
+
+fn duration_to_u64_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
 fn execution_plan_from_schedule(
     schedule: &RiskBoundedSchedule,
 ) -> Result<ExecutionPlan, AdaptivePipelineError> {
@@ -393,6 +529,14 @@ fn merge_apply_summaries(left: ApplySummary, right: ApplySummary) -> ApplySummar
         negative_observations: left.negative_observations + right.negative_observations,
         fallback_edges_created: left.fallback_edges_created + right.fallback_edges_created,
         candidate_misses: left.candidate_misses + right.candidate_misses,
+        replay_impact_observations: left.replay_impact_observations
+            + right.replay_impact_observations,
+        attributed_replay_cost_nanos: left
+            .attributed_replay_cost_nanos
+            .saturating_add(right.attributed_replay_cost_nanos),
+        attributed_invalidated_descendants: left
+            .attributed_invalidated_descendants
+            .saturating_add(right.attributed_invalidated_descendants),
     }
 }
 

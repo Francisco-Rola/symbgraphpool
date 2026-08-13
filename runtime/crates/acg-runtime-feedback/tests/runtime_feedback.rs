@@ -775,6 +775,7 @@ fn weighted_runtime_fallback_edge_collects_independence_for_the_fallback_target(
             WeightedCandidateGraphConfig {
                 epoch: 1,
                 edge_materialization_threshold: 0.0,
+                cost_policy: Default::default(),
             },
         )
         .unwrap();
@@ -862,6 +863,8 @@ fn validation_and_replay_events_use_stronger_explicit_sources() {
                     transaction: TxIndex(2),
                     kind: ValidationEvidenceKind::Replayed {
                         conflict_kinds: ConflictKinds::WRITE_READ,
+                        replay_cost_nanos: 1_000_000,
+                        invalidated_descendants: 0,
                     },
                 },
             ],

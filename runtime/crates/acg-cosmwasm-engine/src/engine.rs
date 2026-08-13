@@ -467,11 +467,14 @@ impl CosmWasmEngine {
             let transaction_id = transaction.transaction_id();
             let Some(receipt) = receipts.remove(&transaction_id) else {
                 metrics.canonical_transactions += 1;
+                let started = Instant::now();
                 let result = self.execute_request(transaction.block, transaction.request);
+                let reexecution_duration = started.elapsed();
                 outcomes.push(CanonicalTxResult {
                     transaction_id,
                     disposition: CanonicalTxDisposition::Canonical,
                     validation: None,
+                    reexecution_duration,
                     result,
                 });
                 continue;
@@ -485,16 +488,20 @@ impl CosmWasmEngine {
                     transaction_id,
                     disposition: CanonicalTxDisposition::ReusedSpeculative,
                     validation: Some(validation),
+                    reexecution_duration: std::time::Duration::ZERO,
                     result,
                 });
             } else {
                 metrics.invalidated_results += 1;
                 metrics.replayed_transactions += 1;
+                let started = Instant::now();
                 let result = self.execute_request(transaction.block, transaction.request);
+                let reexecution_duration = started.elapsed();
                 outcomes.push(CanonicalTxResult {
                     transaction_id,
                     disposition: CanonicalTxDisposition::Replayed,
                     validation: Some(validation),
+                    reexecution_duration,
                     result,
                 });
             }
@@ -915,11 +922,13 @@ impl CosmWasmEngine {
                 metrics.canonical_transactions += 1;
                 let started = Instant::now();
                 let result = self.execute_request(transaction.block, transaction.request);
-                timings.replay_or_missing_execution += started.elapsed();
+                let reexecution_duration = started.elapsed();
+                timings.replay_or_missing_execution += reexecution_duration;
                 outcomes.push(CanonicalTxResult {
                     transaction_id,
                     disposition: CanonicalTxDisposition::Canonical,
                     validation: None,
+                    reexecution_duration,
                     result,
                 });
                 continue;
@@ -938,6 +947,7 @@ impl CosmWasmEngine {
                     transaction_id,
                     disposition: CanonicalTxDisposition::ReusedSpeculative,
                     validation: Some(validation),
+                    reexecution_duration: std::time::Duration::ZERO,
                     result,
                 });
             } else {
@@ -960,11 +970,13 @@ impl CosmWasmEngine {
                 }
                 let started = Instant::now();
                 let result = self.execute_request(transaction.block, transaction.request);
-                timings.replay_or_missing_execution += started.elapsed();
+                let reexecution_duration = started.elapsed();
+                timings.replay_or_missing_execution += reexecution_duration;
                 outcomes.push(CanonicalTxResult {
                     transaction_id,
                     disposition: CanonicalTxDisposition::Replayed,
                     validation: Some(validation),
+                    reexecution_duration,
                     result,
                 });
             }

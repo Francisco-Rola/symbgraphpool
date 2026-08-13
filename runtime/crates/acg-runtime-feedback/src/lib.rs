@@ -4,7 +4,7 @@ mod adaptive_pipeline;
 
 pub use adaptive_pipeline::{
     AdaptiveBlockPlan, AdaptiveBlockRun, AdaptivePipelineError, AdaptivePlanningConfig,
-    AdaptivePlanningMetrics, AdaptiveSerialPipeline,
+    AdaptivePlanningMetrics, AdaptiveSerialPipeline, ReplayAttribution,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -323,8 +323,14 @@ fn canonical_tx_pair(left: TxIndex, right: TxIndex) -> (TxIndex, TxIndex) {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationEvidenceKind {
     Independent,
-    Invalidated { conflict_kinds: ConflictKinds },
-    Replayed { conflict_kinds: ConflictKinds },
+    Invalidated {
+        conflict_kinds: ConflictKinds,
+    },
+    Replayed {
+        conflict_kinds: ConflictKinds,
+        replay_cost_nanos: u64,
+        invalidated_descendants: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -612,22 +618,29 @@ impl BlockFeedbackCollector {
                         candidate_present,
                     )?);
                 }
-                ValidationEvidenceKind::Replayed { conflict_kinds } => {
+                ValidationEvidenceKind::Replayed {
+                    conflict_kinds,
+                    replay_cost_nanos,
+                    invalidated_descendants,
+                } => {
                     let target = static_edge
                         .map(|edge_index| ObservationTarget::Static { edge_index })
                         .unwrap_or(ObservationTarget::RuntimeDiscovered);
-                    buffer.push(ConflictObservation::conflict(
-                        left.profile_id,
-                        right.profile_id,
-                        left.tx_id,
-                        right.tx_id,
-                        conflict_kinds,
-                        ObservationSource::Replay,
-                        target,
-                        self.weights.replay_conflict,
-                        epoch,
-                        candidate_present,
-                    )?);
+                    buffer.push(
+                        ConflictObservation::conflict(
+                            left.profile_id,
+                            right.profile_id,
+                            left.tx_id,
+                            right.tx_id,
+                            conflict_kinds,
+                            ObservationSource::Replay,
+                            target,
+                            self.weights.replay_conflict,
+                            epoch,
+                            candidate_present,
+                        )?
+                        .with_replay_impact(replay_cost_nanos, invalidated_descendants),
+                    );
                 }
             }
         }

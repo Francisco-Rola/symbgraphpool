@@ -164,6 +164,7 @@ fn setup() -> (
                 max_wave_width: None,
                 independent_observations_before_softening: 1,
             },
+            cost_policy: Default::default(),
         },
     )
     .unwrap();

@@ -34,9 +34,11 @@ pub struct ScheduledDependency {
 /// Scheduler parameters for adaptive dependency scheduling.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RiskBoundedSchedulerConfig {
-    /// Probability at or above which an ordinary adaptive edge contributes same-wave risk.
+    /// Cost-adjusted scheduling risk at or above which an ordinary adaptive edge contributes
+    /// same-wave risk. Before Brick 5D has replay-cost evidence this equals conflict probability.
     pub soft_threshold: f64,
-    /// Probability at or above which an evidence-mature edge remains a hard predecessor dependency.
+    /// Cost-adjusted scheduling risk at or above which an evidence-mature edge remains a hard
+    /// predecessor dependency.
     pub hard_threshold: f64,
     /// Maximum combined soft-conflict risk accepted for one transaction placement.
     pub risk_budget: f64,
@@ -49,8 +51,8 @@ pub struct RiskBoundedSchedulerConfig {
     /// Fresh `PredicateResult::True`, historical false-overrides, and runtime-discovered edges are
     /// hard regardless of their prior probability. Repeated observed conflicts do not mature the
     /// softening gate; only executions that did *not* observe the relationship do. After this many
-    /// independence observations, the edge remains hard only while its posterior probability is
-    /// at least `hard_threshold`; otherwise it becomes soft.
+    /// independence observations, the edge remains hard only while its cost-adjusted scheduling
+    /// risk is at least `hard_threshold`; otherwise it becomes soft.
     pub independent_observations_before_softening: u32,
 }
 
@@ -98,16 +100,16 @@ impl RiskBoundedSchedulerConfig {
             let evidence_mature = self.independent_observations_before_softening != 0
                 && edge.concrete_independent_observations
                     >= self.independent_observations_before_softening;
-            if !evidence_mature || edge.probability() >= self.hard_threshold {
+            if !evidence_mature || edge.scheduling_risk() >= self.hard_threshold {
                 EdgeClass::Hard
             } else {
                 EdgeClass::Soft
             }
         } else {
-            let probability = edge.probability();
-            if probability >= self.hard_threshold {
+            let scheduling_risk = edge.scheduling_risk();
+            if scheduling_risk >= self.hard_threshold {
                 EdgeClass::Hard
-            } else if probability >= self.soft_threshold {
+            } else if scheduling_risk >= self.soft_threshold {
                 EdgeClass::Soft
             } else {
                 EdgeClass::Low
@@ -354,11 +356,11 @@ impl<'graph> SchedulingAnalysis<'graph> {
             match class {
                 EdgeClass::Low => {}
                 EdgeClass::Soft => {
-                    let probability = edge.probability();
+                    let scheduling_risk = edge.scheduling_risk();
                     analysis.soft_neighbors[edge.source.0 as usize]
-                        .push((edge.target, probability));
+                        .push((edge.target, scheduling_risk));
                     analysis.soft_neighbors[edge.target.0 as usize]
-                        .push((edge.source, probability));
+                        .push((edge.source, scheduling_risk));
                 }
                 EdgeClass::Hard => {
                     let (predecessor, successor) =
@@ -571,6 +573,10 @@ mod tests {
             confidence_q16: 0,
             concrete_conflict_observations: 0,
             concrete_independent_observations: observations,
+            scheduling_risk_q16: quantize_q16(probability),
+            expected_replay_cost_nanos: 0,
+            expected_invalidated_descendants_milli: 0,
+            replay_cost_confidence_q16: 0,
         }
     }
 
@@ -600,6 +606,10 @@ mod tests {
             confidence_q16: 0,
             concrete_conflict_observations: 0,
             concrete_independent_observations: observations,
+            scheduling_risk_q16: quantize_q16(probability),
+            expected_replay_cost_nanos: 0,
+            expected_invalidated_descendants_milli: 0,
+            replay_cost_confidence_q16: 0,
         }
     }
 

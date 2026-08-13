@@ -99,6 +99,7 @@ fn build_weighted(
             WeightedCandidateGraphConfig {
                 epoch: 1,
                 edge_materialization_threshold: 0.0,
+                cost_policy: Default::default(),
             },
         )
         .unwrap()
@@ -225,6 +226,7 @@ fn learned_negative_evidence_can_change_a_future_pair_from_hard_to_soft() {
             WeightedCandidateGraphConfig {
                 epoch: 1,
                 edge_materialization_threshold: threshold,
+                cost_policy: Default::default(),
             },
         )
         .unwrap();

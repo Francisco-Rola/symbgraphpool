@@ -2,7 +2,7 @@
 
 A modular Rust implementation of profile-guided smart-contract conflict graphs.
 
-This first brick implements:
+The repository currently implements:
 
 - parsing and validating symbolic-analyzer JSON documents;
 - normalization into runtime-independent symbolic profiles;
@@ -18,7 +18,11 @@ This first brick implements:
 - Brick 2 concrete-transaction adaptation, executable three-valued predicates, and candidate transaction-graph materialization;
 - Brick 2.1 clause-level conflict resolution and explicit unknown-reason metadata;
 - Brick 2.5 MiniWarehouse structured integration, input-derived order-line prefixes, and a deterministic workload generator;
-- Brick 3 concrete execution feedback, decayed Beta statistics, fallback edges, and checkpoints.
+- Brick 3 concrete execution feedback, decayed Beta statistics, fallback edges, and checkpoints;
+- Brick 4 adaptive weighted candidate graphs and risk-bounded scheduling;
+- Brick 5A/5B speculative receipts with canonical validation/reuse/replay;
+- Brick 5C.7 dependency-driven READY-DAG pre-execution over block-local persistent MVCC;
+- Brick 5D replay attribution, decayed replay-cost/fan-out feedback, and cost-adjusted scheduling risk.
 
 ## Repository layout
 
@@ -157,6 +161,10 @@ static edge, while concrete conflicts missing from the symbolic topology create 
 reviewable fallback edges. Pre-execution, canonical execution, validation, and replay evidence have
 separate configurable weights. Feedback checkpoints use stable profile keys so statistics survive
 dense `ProfileId` reassignment. See [`docs/brick-3.md`](docs/brick-3.md).
+
+Brick 5D extends that feedback with exact reconciliation causes, measured replay cost/fan-out, and a
+separate cost-adjusted scheduling risk while keeping canonical validation/replay as the correctness
+authority. See [`docs/brick-5d.md`](docs/brick-5d.md).
 
 
 ## Publication checklist

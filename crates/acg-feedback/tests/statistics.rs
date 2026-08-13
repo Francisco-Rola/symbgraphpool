@@ -272,13 +272,14 @@ fn checkpoint_round_trip_preserves_static_and_runtime_discovered_statistics() {
             TxId(1),
             TxId(2),
             ConflictKinds::WRITE_WRITE,
-            ObservationSource::Validation,
+            ObservationSource::Replay,
             ObservationTarget::Static { edge_index: edge },
             2.0,
             4,
             true,
         )
-        .unwrap(),
+        .unwrap()
+        .with_replay_impact(750_000, 1),
     );
     buffer.push(
         ConflictObservation::conflict(
@@ -293,7 +294,8 @@ fn checkpoint_round_trip_preserves_static_and_runtime_discovered_statistics() {
             4,
             false,
         )
-        .unwrap(),
+        .unwrap()
+        .with_replay_impact(2_000_000, 3),
     );
     store.apply_batch(&graph, buffer, &config).unwrap();
 
@@ -304,6 +306,10 @@ fn checkpoint_round_trip_preserves_static_and_runtime_discovered_statistics() {
     assert_eq!(
         restored.static_statistics(edge),
         store.static_statistics(edge)
+    );
+    assert_eq!(
+        restored.static_replay_cost_statistics(edge),
+        store.static_replay_cost_statistics(edge)
     );
     assert_eq!(restored.fallback_edges(), store.fallback_edges());
 }
@@ -509,4 +515,124 @@ fn estimate_at_projects_decay_without_mutating_stored_statistics() {
     assert!(projected.posterior_mass < stored.posterior_mass());
     assert!(projected.confidence < stored.confidence(config.confidence_scale).unwrap());
     assert_eq!(*store.static_statistics(edge).unwrap(), stored);
+}
+
+#[test]
+fn replay_cost_statistics_track_cost_fanout_decay_and_checkpoint() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let config = AdaptiveFeedbackConfig {
+        retention_factor: 0.5,
+        confidence_scale: 2.0,
+        ..AdaptiveFeedbackConfig::default()
+    };
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let mut buffer = ObservationBuffer::default();
+    buffer.push(
+        ConflictObservation::conflict(
+            credit,
+            credit,
+            TxId(50),
+            TxId(51),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::Replay,
+            ObservationTarget::Static { edge_index: edge },
+            4.0,
+            2,
+            true,
+        )
+        .unwrap()
+        .with_replay_impact(2_000_000, 3),
+    );
+    let summary = store.apply_batch(&graph, buffer, &config).unwrap();
+    assert_eq!(summary.replay_impact_observations, 1);
+    assert_eq!(summary.attributed_replay_cost_nanos, 2_000_000);
+    assert_eq!(summary.attributed_invalidated_descendants, 3);
+
+    let now = store.estimate_static_replay_cost(edge, 2, &config).unwrap();
+    assert!((now.expected_replay_cost_nanos - 2_000_000.0).abs() < 1e-6);
+    assert!((now.expected_invalidated_descendants - 3.0).abs() < 1e-12);
+    assert_eq!(now.replay_observations, 1);
+    assert_eq!(now.total_replay_cost_nanos, 2_000_000);
+    assert_eq!(now.total_invalidated_descendants, 3);
+    assert!(now.confidence > 0.0);
+
+    let projected = store.estimate_static_replay_cost(edge, 5, &config).unwrap();
+    assert!((projected.expected_replay_cost_nanos - now.expected_replay_cost_nanos).abs() < 1e-6);
+    assert!(
+        (projected.expected_invalidated_descendants - now.expected_invalidated_descendants).abs()
+            < 1e-12
+    );
+    assert!(projected.observation_weight < now.observation_weight);
+    assert!(projected.confidence < now.confidence);
+
+    let checkpoint = store.checkpoint(&graph).unwrap();
+    let restored = AdaptiveFeedbackStore::restore(&graph, checkpoint, 0).unwrap();
+    assert_eq!(
+        restored.static_replay_cost_statistics(edge),
+        store.static_replay_cost_statistics(edge)
+    );
+}
+
+#[test]
+fn legacy_v1_checkpoint_loads_with_empty_replay_cost_state() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let store = AdaptiveFeedbackStore::from_graph(&graph, 7).unwrap();
+    let mut value = serde_json::to_value(store.checkpoint(&graph).unwrap()).unwrap();
+    value["format_version"] = serde_json::json!(1);
+    for saved in value["static_edges"].as_array_mut().unwrap() {
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("replay_cost_statistics");
+    }
+    for saved in value["fallback_edges"].as_array_mut().unwrap() {
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("replay_cost_statistics");
+    }
+
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let checkpoint = FeedbackCheckpoint::from_json(&bytes).unwrap();
+    let restored = AdaptiveFeedbackStore::restore(&graph, checkpoint, 0).unwrap();
+    let replay = restored
+        .estimate_static_replay_cost(edge, 7, &AdaptiveFeedbackConfig::default())
+        .unwrap();
+    assert_eq!(replay.expected_replay_cost_nanos, 0.0);
+    assert_eq!(replay.expected_invalidated_descendants, 0.0);
+    assert_eq!(replay.confidence, 0.0);
+    assert_eq!(replay.replay_observations, 0);
+}
+
+#[test]
+fn replay_impact_cannot_be_attached_to_independence() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let mut buffer = ObservationBuffer::default();
+    buffer.push(
+        ConflictObservation::independent(
+            credit,
+            credit,
+            TxId(60),
+            TxId(61),
+            ObservationSource::Validation,
+            ObservationTarget::Static { edge_index: edge },
+            1.0,
+            1,
+            true,
+        )
+        .unwrap()
+        .with_replay_impact(10, 0),
+    );
+    let error = store
+        .apply_batch(&graph, buffer, &AdaptiveFeedbackConfig::default())
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("can only be attached to a conflict observation"));
 }

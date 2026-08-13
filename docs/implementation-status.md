@@ -1,6 +1,6 @@
 # Implementation status
 
-This document is the repository checkpoint after Brick 5C.7 and the VM-lifecycle performance investigation.
+This document is the repository checkpoint after Brick 5D, with Brick 5C.7 as the production execution substrate and VM-lifecycle work preserved as research.
 
 ## Production implementation
 
@@ -117,11 +117,16 @@ These findings are research evidence, not additional production features:
 
 See `research/vm-lifecycle/README.md` for the archived VM work.
 
+### Brick 5D — cost-aware validation/replay policy — implemented
+
+- 5D.1: concrete reconciliation attribution retains the exact stale validation dependency, responsible canonical predecessor, measured direct replay cost, candidate-edge presence, and transitive replay fan-out;
+- 5D.2: decayed replay-cost/fan-out statistics are persisted beside conflict probability; checkpoint format v2 remains backward-compatible with v1;
+- 5D.3: candidate edges retain raw conflict probability separately from cost-adjusted scheduling risk, and the risk-bounded scheduler uses the latter;
+- 5D.4: closed-loop phase-change tests prove expensive replay evidence hardens future scheduling and later independence/decay relaxes it again.
+
+Measured wall time remains validator-local optimization evidence and never becomes a correctness or consensus input. See [`brick-5d.md`](brick-5d.md).
+
 ## Remaining proposed Brick 5 work
-
-### Brick 5D — broader adaptive validation/replay policy — proposed
-
-Generalize learning beyond the intentionally narrow hard-to-soft loop after the execution model and metrics are stable. Candidate/predicate misses and replay evidence should inform future scheduling without moving correctness out of concrete validation.
 
 ### Brick 5E — cost-aware theoretical versus realized parallelism — partially implemented / still to productize
 
@@ -133,8 +138,8 @@ Correctness coverage exists across speculative receipts, validation/replay, Conf
 
 ## Proposed follow-on engineering
 
-1. Define Brick 5F acceptance criteria on supported hardware and workloads.
-2. Keep VM snapshot/reset/COW work on a separate research branch until it passes adversarial isolation tests (memory, globals, tables, gas, memory growth, traps/OOG, backends) and end-to-end serial equivalence.
-3. Add scan/iterator-specific storage probes if MiniWarehouse-specific storage inflation remains material.
-4. Consider cost/granularity-aware worker/concurrency policy only after measuring it as an optimization hint; canonical correctness must remain independent of the policy.
-5. Continue broader Brick 5D adaptive-policy work only after the execution-efficiency baseline is stable.
+1. Productize Brick 5E: learn/measure the serialization-cost reference and expose stable raw-probability vs scheduling-risk, replay-cost, fan-out, service-inflation, and scheduler-realization metrics.
+2. Define Brick 5F acceptance criteria on supported hardware and workloads, including closed-loop adaptation and checkpoint compatibility.
+3. Keep VM snapshot/reset/COW work on a separate research branch until it passes adversarial isolation tests (memory, globals, tables, gas, memory growth, traps/OOG, backends) and end-to-end serial equivalence.
+4. Add scan/iterator-specific storage probes if MiniWarehouse-specific storage inflation remains material.
+5. Consider cost/granularity-aware worker/concurrency policy and explicit soft-edge exploration only as correctness-independent optimization hints.

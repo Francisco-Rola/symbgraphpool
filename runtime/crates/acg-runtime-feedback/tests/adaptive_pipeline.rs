@@ -1,11 +1,18 @@
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier,
+    },
+    time::Duration,
+};
 
 use acg_candidate_graph::{EdgeClass, RiskBoundedSchedulerConfig};
 use acg_core::{ContractCodeHash, RuntimeId, TxIndex};
 use acg_cosmwasm_adapter::{CosmWasmAdapterConfig, CosmWasmCandidateAdapter};
 use acg_cosmwasm_engine::{
-    Address, BlockContext, CosmWasmEngine, ExecutionRequest, NativeCallContext, NativeContract,
-    TransactionId,
+    Address, BlockContext, CanonicalTxDisposition, CosmWasmEngine, ExecutionRequest,
+    NativeCallContext, NativeContract, ParallelExecutionConfig, TransactionId, ValidationConflict,
 };
 use acg_feedback::AdaptiveFeedbackConfig;
 use acg_profile_graph::{EdgeBuildConfig, GraphLoadConfig, ProfileGraph, ProfileGraphArtifact};
@@ -14,14 +21,43 @@ use acg_runtime_feedback::{
     TraceConflictConfig,
 };
 use acg_symbolic_json::{normalize_document, parse_slice, IngestionContext};
-use acg_validator_sim::{BlockProducer, BlockProducerConfig, Mempool};
+use acg_validator_sim::{
+    BlockProducer, BlockProducerConfig, ExecutionPlan, ExecutionWave, Mempool,
+    SpeculativeParallelBlockExecutor,
+};
 use cosmwasm_std::{to_json_binary, Binary, Empty, Env, MessageInfo, Reply, Response};
 use serde_json::{json, Value};
 
-const CONFLICTLAB: &[u8] =
-    include_bytes!("../../../../benchmarks/symbolic/conflictlab.symbolic.json");
+const CONFLICTLAB: &[u8] = include_bytes!("../../../../benchmarks/symbolic/conflictlab.symbolic.json");
 
-struct ConflictLabRuntime;
+struct ConflictLabRuntime {
+    first_execute_barrier: Option<FirstExecuteBarrier>,
+}
+
+struct FirstExecuteBarrier {
+    barrier: Barrier,
+    participants: usize,
+    calls: AtomicUsize,
+}
+
+impl ConflictLabRuntime {
+    fn normal() -> Self {
+        Self {
+            first_execute_barrier: None,
+        }
+    }
+
+    fn barrier_first_execute_calls(participants: usize) -> Self {
+        assert!(participants > 0);
+        Self {
+            first_execute_barrier: Some(FirstExecuteBarrier {
+                barrier: Barrier::new(participants),
+                participants,
+                calls: AtomicUsize::new(0),
+            }),
+        }
+    }
+}
 
 impl NativeContract for ConflictLabRuntime {
     fn instantiate(
@@ -41,8 +77,7 @@ impl NativeContract for ConflictLabRuntime {
         _info: MessageInfo,
         msg: Binary,
     ) -> Result<Response<Empty>, String> {
-        let value: Value =
-            serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
+        let value: Value = serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
         let credit = value
             .get("credit")
             .and_then(Value::as_object)
@@ -61,7 +96,16 @@ impl NativeContract for ConflictLabRuntime {
             .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
             .map(u64::from_be_bytes)
             .unwrap_or_default();
-        context.storage_set(key.as_bytes(), current.saturating_add(amount).to_be_bytes());
+        if let Some(sync) = &self.first_execute_barrier {
+            let call = sync.calls.fetch_add(1, Ordering::SeqCst);
+            if call < sync.participants {
+                sync.barrier.wait();
+            }
+        }
+        context.storage_set(
+            key.as_bytes(),
+            current.saturating_add(amount).to_be_bytes(),
+        );
         Ok(Response::new())
     }
 
@@ -96,7 +140,7 @@ fn credit(id: u64, contract: &Address, account: &str) -> ExecutionRequest {
                 "amount": 1_u64
             }
         }))
-        .unwrap(),
+            .unwrap(),
     }
 }
 
@@ -106,9 +150,20 @@ fn setup() -> (
     ProfileGraph,
     AdaptiveSerialPipeline,
 ) {
+    setup_with_runtime(ConflictLabRuntime::normal())
+}
+
+fn setup_with_runtime(
+    runtime: ConflictLabRuntime,
+) -> (
+    CosmWasmEngine,
+    Address,
+    ProfileGraph,
+    AdaptiveSerialPipeline,
+) {
     let engine = CosmWasmEngine::default();
     let code_id = engine
-        .register_native("conflictlab-brick4d", Arc::new(ConflictLabRuntime))
+        .register_native("conflictlab-brick4d", Arc::new(runtime))
         .unwrap();
     let checksum = engine.code_metadata(code_id).unwrap().checksum;
     let contract = engine
@@ -146,7 +201,7 @@ fn setup() -> (
             ..AdaptiveFeedbackConfig::default()
         },
     )
-    .unwrap();
+        .unwrap();
     let pipeline = AdaptiveSerialPipeline::new(
         adapter,
         feedback,
@@ -159,9 +214,10 @@ fn setup() -> (
                 max_wave_width: None,
                 independent_observations_before_softening: 8,
             },
+            cost_policy: Default::default(),
         },
     )
-    .unwrap();
+        .unwrap();
 
     (engine, contract, graph, pipeline)
 }
@@ -256,4 +312,103 @@ fn conflictlab_adaptive_plan_groups_independent_work_but_executes_canonically_an
         .unwrap();
     assert_eq!(learned.positive_observations, 1);
     assert!(learned.probability() > alice_edge.probability());
+}
+
+
+#[test]
+fn brick5d_reconciliation_attribution_measures_replay_cost_and_transitive_fanout() {
+    let (engine, contract, graph, mut pipeline) =
+        setup_with_runtime(ConflictLabRuntime::barrier_first_execute_calls(4));
+    let mempool = Mempool::default();
+    for id in 1..=4_u64 {
+        mempool.admit(credit(id, &contract, "alice"), id);
+    }
+    let block = BlockProducer::fifo(BlockProducerConfig::default())
+        .unwrap()
+        .produce_next(&mempool);
+    let plan = pipeline.plan_block(&engine, &graph, &block).unwrap();
+
+    // Intentionally ignore the conservative adaptive dependencies so reconciliation has real stale
+    // receipts to attribute. This is an evaluation fixture, not a production scheduling path.
+    let wide_plan = ExecutionPlan {
+        transaction_count: 4,
+        waves: vec![ExecutionWave {
+            transaction_indices: vec![0, 1, 2, 3],
+        }],
+        dependencies: Vec::new(),
+    };
+    let executor = SpeculativeParallelBlockExecutor::new(
+        engine.clone(),
+        ParallelExecutionConfig { workers: 4 },
+    );
+    let prepared = executor.prepare(&block, &wide_plan).unwrap();
+    let report = executor.validate_prepared(&block, prepared).unwrap();
+    assert!(report.speculative.replayed_transactions > 0);
+    assert!(!report.dependency_evidence.is_empty());
+
+    let attributions = pipeline
+        .reconciliation_attributions(&plan, &report)
+        .unwrap();
+    assert_eq!(attributions.len(), report.dependency_evidence.len());
+    assert!(attributions.iter().all(|item| item.candidate_edge_present));
+    assert!(attributions
+        .iter()
+        .all(|item| item.conflict_kinds.contains(acg_core::ConflictKinds::WRITE_READ)));
+    assert!(attributions
+        .iter()
+        .all(|item| matches!(&item.conflict, ValidationConflict::Storage { key, .. } if key.as_slice() == b"balance/alice")));
+    assert!(attributions
+        .iter()
+        .any(|item| item.invalidated_descendants > 0));
+
+    // If one replay has multiple concrete conflicts, 5D splits the direct replay duration across
+    // them. The shares must exactly conserve the measured direct replay time per transaction.
+    let mut attributed_nanos = BTreeMap::<usize, u64>::new();
+    for item in &attributions {
+        *attributed_nanos
+            .entry(item.transaction.0 as usize)
+            .or_default() += item.replay_cost_nanos;
+    }
+    let mut saw_measured_replay = false;
+    for diagnostic in &report.reconciliation {
+        if diagnostic.disposition != CanonicalTxDisposition::Replayed {
+            assert_eq!(diagnostic.reexecution_duration, Duration::ZERO);
+            continue;
+        }
+        saw_measured_replay |= !diagnostic.reexecution_duration.is_zero();
+        if let Some(attributed) = attributed_nanos.get(&diagnostic.transaction_index) {
+            assert_eq!(
+                u128::from(*attributed),
+                diagnostic.reexecution_duration.as_nanos()
+            );
+        }
+    }
+    assert!(saw_measured_replay);
+
+    let edge_index = plan
+        .candidate_graph
+        .edge_between(TxIndex(0), TxIndex(1))
+        .unwrap()
+        .profile_edge_index()
+        .unwrap();
+    let summary = pipeline
+        .process_reconciliation_report(&graph, &plan, &report, block.context.height)
+        .unwrap();
+    assert_eq!(summary.replay_impact_observations, attributions.len());
+    assert!(summary.attributed_replay_cost_nanos > 0);
+    assert!(summary.attributed_invalidated_descendants > 0);
+    let replay_cost = pipeline
+        .feedback_store()
+        .estimate_static_replay_cost(
+            edge_index,
+            block.context.height,
+            &AdaptiveFeedbackConfig {
+                retention_factor: 1.0,
+                ..AdaptiveFeedbackConfig::default()
+            },
+        )
+        .unwrap();
+    assert!(replay_cost.replay_observations > 0);
+    assert!(replay_cost.total_replay_cost_nanos > 0);
+    assert!(replay_cost.total_invalidated_descendants > 0);
 }

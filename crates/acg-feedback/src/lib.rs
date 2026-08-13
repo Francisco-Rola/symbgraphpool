@@ -7,7 +7,8 @@ use acg_profile_graph::ProfileGraph;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const FEEDBACK_CHECKPOINT_VERSION: u16 = 1;
+pub const FEEDBACK_CHECKPOINT_VERSION: u16 = 2;
+const LEGACY_FEEDBACK_CHECKPOINT_VERSION: u16 = 1;
 
 /// Where one concrete observation came from.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -56,6 +57,12 @@ pub struct ConflictObservation {
     pub epoch: u64,
     /// False for a concrete overlap that the candidate graph failed to materialize.
     pub candidate_edge_present: bool,
+    /// Brick 5D replay-cost attribution. Zero for ordinary access/validation observations.
+    #[serde(default)]
+    pub replay_cost_nanos: u64,
+    /// Number of later replayed transactions transitively attributable to this invalidation.
+    #[serde(default)]
+    pub invalidated_descendants: u32,
 }
 
 impl ConflictObservation {
@@ -142,7 +149,27 @@ impl ConflictObservation {
             weight,
             epoch,
             candidate_edge_present,
+            replay_cost_nanos: 0,
+            invalidated_descendants: 0,
         })
+    }
+
+    /// Attach measured replay impact to an already constructed conflict observation.
+    ///
+    /// The probability update remains the same; this additional evidence is consumed by Brick 5D's
+    /// cost model when selecting scheduling risk for future blocks.
+    pub fn with_replay_impact(
+        mut self,
+        replay_cost_nanos: u64,
+        invalidated_descendants: u32,
+    ) -> Self {
+        self.replay_cost_nanos = replay_cost_nanos;
+        self.invalidated_descendants = invalidated_descendants;
+        self
+    }
+
+    pub fn has_replay_impact(&self) -> bool {
+        self.replay_cost_nanos != 0 || self.invalidated_descendants != 0
     }
 }
 
@@ -335,6 +362,126 @@ impl EdgeEstimate {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReplayCostStatistics {
+    /// Decayed weighted sum of direct replay wall time.
+    pub weighted_replay_cost_nanos: f64,
+    /// Decayed weighted sum of transitive replay fan-out.
+    pub weighted_invalidated_descendants: f64,
+    /// Decayed total observation weight used by both means.
+    pub observation_weight: f64,
+    pub last_update_epoch: u64,
+    pub replay_observations: u64,
+    pub total_replay_cost_nanos: u64,
+    pub total_invalidated_descendants: u64,
+}
+
+impl Default for ReplayCostStatistics {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl ReplayCostStatistics {
+    pub fn new(last_update_epoch: u64) -> Self {
+        Self {
+            weighted_replay_cost_nanos: 0.0,
+            weighted_invalidated_descendants: 0.0,
+            observation_weight: 0.0,
+            last_update_epoch,
+            replay_observations: 0,
+            total_replay_cost_nanos: 0,
+            total_invalidated_descendants: 0,
+        }
+    }
+
+    pub fn estimate_at(
+        &self,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<ReplayCostEstimate, FeedbackError> {
+        config.validate()?;
+        let mut projected = *self;
+        projected.decay_to(epoch, config.retention_factor)?;
+        let (expected_replay_cost_nanos, expected_invalidated_descendants) =
+            if projected.observation_weight > 0.0 {
+                (
+                    projected.weighted_replay_cost_nanos / projected.observation_weight,
+                    projected.weighted_invalidated_descendants / projected.observation_weight,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+        let confidence = if projected.observation_weight > 0.0 {
+            1.0 - (-projected.observation_weight / config.confidence_scale).exp()
+        } else {
+            0.0
+        };
+        Ok(ReplayCostEstimate {
+            expected_replay_cost_nanos,
+            expected_invalidated_descendants,
+            observation_weight: projected.observation_weight,
+            confidence,
+            replay_observations: projected.replay_observations,
+            total_replay_cost_nanos: projected.total_replay_cost_nanos,
+            total_invalidated_descendants: projected.total_invalidated_descendants,
+            epoch,
+        })
+    }
+
+    fn decay_to(&mut self, epoch: u64, retention_factor: f64) -> Result<(), FeedbackError> {
+        if epoch < self.last_update_epoch {
+            return Err(FeedbackError::StaleReplayCostEpoch {
+                observation_epoch: epoch,
+                last_update_epoch: self.last_update_epoch,
+            });
+        }
+        let delta = epoch - self.last_update_epoch;
+        if delta > 0 {
+            let decay = retention_factor.powf(delta as f64);
+            self.weighted_replay_cost_nanos *= decay;
+            self.weighted_invalidated_descendants *= decay;
+            self.observation_weight *= decay;
+            self.last_update_epoch = epoch;
+        }
+        Ok(())
+    }
+
+    fn apply(
+        &mut self,
+        replay_cost_nanos: u64,
+        invalidated_descendants: u32,
+        weight: f64,
+        epoch: u64,
+        retention_factor: f64,
+    ) -> Result<(), FeedbackError> {
+        self.decay_to(epoch, retention_factor)?;
+        self.weighted_replay_cost_nanos += replay_cost_nanos as f64 * weight;
+        self.weighted_invalidated_descendants += f64::from(invalidated_descendants) * weight;
+        self.observation_weight += weight;
+        self.replay_observations = self.replay_observations.saturating_add(1);
+        self.total_replay_cost_nanos = self
+            .total_replay_cost_nanos
+            .saturating_add(replay_cost_nanos);
+        self.total_invalidated_descendants = self
+            .total_invalidated_descendants
+            .saturating_add(u64::from(invalidated_descendants));
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReplayCostEstimate {
+    pub expected_replay_cost_nanos: f64,
+    pub expected_invalidated_descendants: f64,
+    pub observation_weight: f64,
+    pub confidence: f64,
+    pub replay_observations: u64,
+    pub total_replay_cost_nanos: u64,
+    pub total_invalidated_descendants: u64,
+    pub epoch: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdaptiveFeedbackConfig {
     /// Retained evidence per epoch in `(0, 1]`.
@@ -396,6 +543,8 @@ pub struct RuntimeDiscoveredEdge {
     pub discovered_epoch: u64,
     pub review_required: bool,
     pub statistics: BetaStatistics,
+    #[serde(default)]
+    pub replay_cost_statistics: ReplayCostStatistics,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -405,12 +554,19 @@ pub struct ApplySummary {
     pub fallback_edges_created: usize,
     /// Concrete conflicts absent from the candidate graph, whether due to predicate or topology miss.
     pub candidate_misses: usize,
+    /// Conflict observations carrying Brick 5D measured replay impact.
+    pub replay_impact_observations: usize,
+    /// Direct replay nanoseconds attributed across the observations in this batch.
+    pub attributed_replay_cost_nanos: u64,
+    /// Transitive replay descendants attributed across the observations in this batch.
+    pub attributed_invalidated_descendants: u64,
 }
 
 /// Mutable statistics separated from the immutable [`ProfileGraph`] topology.
 #[derive(Debug)]
 pub struct AdaptiveFeedbackStore {
     static_statistics: Vec<BetaStatistics>,
+    static_replay_costs: Vec<ReplayCostStatistics>,
     fallback_edges: Vec<RuntimeDiscoveredEdge>,
     fallback_by_pair: BTreeMap<(ProfileId, ProfileId), usize>,
     fallback_adjacency: BTreeMap<ProfileId, Vec<usize>>,
@@ -429,8 +585,11 @@ impl AdaptiveFeedbackStore {
                 initial_epoch,
             )?);
         }
+        let static_replay_costs =
+            vec![ReplayCostStatistics::new(initial_epoch); graph.edges().len()];
         Ok(Self {
             static_statistics,
+            static_replay_costs,
             fallback_edges: Vec::new(),
             fallback_by_pair: BTreeMap::new(),
             fallback_adjacency: BTreeMap::new(),
@@ -439,6 +598,24 @@ impl AdaptiveFeedbackStore {
 
     pub fn static_statistics(&self, edge: ProfileEdgeIndex) -> Option<&BetaStatistics> {
         self.static_statistics.get(edge.0 as usize)
+    }
+
+    pub fn static_replay_cost_statistics(
+        &self,
+        edge: ProfileEdgeIndex,
+    ) -> Option<&ReplayCostStatistics> {
+        self.static_replay_costs.get(edge.0 as usize)
+    }
+
+    pub fn estimate_static_replay_cost(
+        &self,
+        edge: ProfileEdgeIndex,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<ReplayCostEstimate, FeedbackError> {
+        self.static_replay_cost_statistics(edge)
+            .ok_or(FeedbackError::UnknownStaticEdge(edge))?
+            .estimate_at(epoch, config)
     }
 
     /// Returns a current-epoch estimate for one immutable/static profile edge without mutating it.
@@ -471,6 +648,18 @@ impl AdaptiveFeedbackStore {
         self.fallback_edge_by_id(id)
             .ok_or(FeedbackError::UnknownRuntimeEdge(id))?
             .statistics
+            .estimate_at(epoch, config)
+    }
+
+    pub fn estimate_fallback_replay_cost(
+        &self,
+        id: RuntimeEdgeId,
+        epoch: u64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<ReplayCostEstimate, FeedbackError> {
+        self.fallback_edge_by_id(id)
+            .ok_or(FeedbackError::UnknownRuntimeEdge(id))?
+            .replay_cost_statistics
             .estimate_at(epoch, config)
     }
 
@@ -514,6 +703,21 @@ impl AdaptiveFeedbackStore {
 
         for observation in &observations {
             validate_weight(observation.weight)?;
+            if observation.has_replay_impact()
+                && matches!(observation.outcome, ObservationOutcome::Independent)
+            {
+                return Err(FeedbackError::ReplayImpactRequiresConflict);
+            }
+            if observation.has_replay_impact() {
+                summary.replay_impact_observations =
+                    summary.replay_impact_observations.saturating_add(1);
+                summary.attributed_replay_cost_nanos = summary
+                    .attributed_replay_cost_nanos
+                    .saturating_add(observation.replay_cost_nanos);
+                summary.attributed_invalidated_descendants = summary
+                    .attributed_invalidated_descendants
+                    .saturating_add(u64::from(observation.invalidated_descendants));
+            }
             if !observation.candidate_edge_present
                 && matches!(observation.outcome, ObservationOutcome::Conflict { .. })
             {
@@ -536,6 +740,19 @@ impl AdaptiveFeedbackStore {
                         .get_mut(edge_index.0 as usize)
                         .ok_or(FeedbackError::UnknownStaticEdge(edge_index))?;
                     statistics.apply(observation, config.retention_factor)?;
+                    if observation.has_replay_impact() {
+                        let replay_cost = self
+                            .static_replay_costs
+                            .get_mut(edge_index.0 as usize)
+                            .ok_or(FeedbackError::UnknownStaticEdge(edge_index))?;
+                        replay_cost.apply(
+                            observation.replay_cost_nanos,
+                            observation.invalidated_descendants,
+                            observation.weight,
+                            observation.epoch,
+                            config.retention_factor,
+                        )?;
+                    }
                 }
                 ObservationTarget::RuntimeDiscovered => {
                     let pair = canonical_profile_pair(
@@ -570,6 +787,15 @@ impl AdaptiveFeedbackStore {
                     }
                     edge.statistics
                         .apply(observation, config.retention_factor)?;
+                    if observation.has_replay_impact() {
+                        edge.replay_cost_statistics.apply(
+                            observation.replay_cost_nanos,
+                            observation.invalidated_descendants,
+                            observation.weight,
+                            observation.epoch,
+                            config.retention_factor,
+                        )?;
+                    }
                 }
             }
         }
@@ -598,10 +824,12 @@ impl AdaptiveFeedbackStore {
                     .ok_or(FeedbackError::UnknownProfile(edge.target))?
                     .definition
                     .stable_key;
+                let replay_cost_statistics = self.static_replay_costs[edge.index.0 as usize];
                 Ok(StaticEdgeCheckpoint {
                     source,
                     target,
                     statistics: *statistics,
+                    replay_cost_statistics,
                 })
             })
             .collect::<Result<Vec<_>, FeedbackError>>()?;
@@ -615,6 +843,7 @@ impl AdaptiveFeedbackStore {
                 discovered_epoch: edge.discovered_epoch,
                 review_required: edge.review_required,
                 statistics: edge.statistics,
+                replay_cost_statistics: edge.replay_cost_statistics,
             })
             .collect();
         Ok(FeedbackCheckpoint {
@@ -629,12 +858,15 @@ impl AdaptiveFeedbackStore {
         checkpoint: FeedbackCheckpoint,
         initial_epoch: u64,
     ) -> Result<Self, FeedbackError> {
-        if checkpoint.format_version != FEEDBACK_CHECKPOINT_VERSION {
+        if checkpoint.format_version != FEEDBACK_CHECKPOINT_VERSION
+            && checkpoint.format_version != LEGACY_FEEDBACK_CHECKPOINT_VERSION
+        {
             return Err(FeedbackError::UnsupportedCheckpointVersion {
                 actual: checkpoint.format_version,
                 supported: FEEDBACK_CHECKPOINT_VERSION,
             });
         }
+        let checkpoint_version = checkpoint.format_version;
         let mut store = Self::from_graph(graph, initial_epoch)?;
         let mut restored_static = BTreeSet::new();
         for saved in checkpoint.static_edges {
@@ -654,7 +886,15 @@ impl AdaptiveFeedbackStore {
                 return Err(FeedbackError::DuplicateStaticCheckpoint(edge_index));
             }
             validate_statistics(saved.statistics)?;
+            let replay_cost_statistics = if checkpoint_version == LEGACY_FEEDBACK_CHECKPOINT_VERSION
+            {
+                ReplayCostStatistics::new(saved.statistics.last_update_epoch)
+            } else {
+                validate_replay_cost_statistics(saved.replay_cost_statistics)?;
+                saved.replay_cost_statistics
+            };
             store.static_statistics[edge_index.0 as usize] = saved.statistics;
+            store.static_replay_costs[edge_index.0 as usize] = replay_cost_statistics;
         }
 
         for saved in checkpoint.fallback_edges {
@@ -672,6 +912,13 @@ impl AdaptiveFeedbackStore {
                 });
             }
             validate_statistics(saved.statistics)?;
+            let replay_cost_statistics = if checkpoint_version == LEGACY_FEEDBACK_CHECKPOINT_VERSION
+            {
+                ReplayCostStatistics::new(saved.statistics.last_update_epoch)
+            } else {
+                validate_replay_cost_statistics(saved.replay_cost_statistics)?;
+                saved.replay_cost_statistics
+            };
             if saved.conflict_kinds.is_empty() {
                 return Err(FeedbackError::EmptyFallbackConflictKinds);
             }
@@ -689,6 +936,7 @@ impl AdaptiveFeedbackStore {
                 discovered_epoch: saved.discovered_epoch,
                 review_required: saved.review_required,
                 statistics: saved.statistics,
+                replay_cost_statistics,
             };
             store.fallback_edges.push(edge);
             let index = store.fallback_edges.len() - 1;
@@ -726,7 +974,9 @@ impl FeedbackCheckpoint {
 
     pub fn from_json(bytes: &[u8]) -> Result<Self, FeedbackError> {
         let checkpoint: Self = serde_json::from_slice(bytes)?;
-        if checkpoint.format_version != FEEDBACK_CHECKPOINT_VERSION {
+        if checkpoint.format_version != FEEDBACK_CHECKPOINT_VERSION
+            && checkpoint.format_version != LEGACY_FEEDBACK_CHECKPOINT_VERSION
+        {
             return Err(FeedbackError::UnsupportedCheckpointVersion {
                 actual: checkpoint.format_version,
                 supported: FEEDBACK_CHECKPOINT_VERSION,
@@ -741,6 +991,8 @@ pub struct StaticEdgeCheckpoint {
     pub source: StableProfileKey,
     pub target: StableProfileKey,
     pub statistics: BetaStatistics,
+    #[serde(default)]
+    pub replay_cost_statistics: ReplayCostStatistics,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -751,6 +1003,8 @@ pub struct FallbackEdgeCheckpoint {
     pub discovered_epoch: u64,
     pub review_required: bool,
     pub statistics: BetaStatistics,
+    #[serde(default)]
+    pub replay_cost_statistics: ReplayCostStatistics,
 }
 
 fn create_fallback_edge(
@@ -792,6 +1046,7 @@ fn create_fallback_edge(
             config.epsilon,
             observation.epoch,
         )?,
+        replay_cost_statistics: ReplayCostStatistics::new(observation.epoch),
     })
 }
 
@@ -814,6 +1069,19 @@ fn validate_static_target(
             actual_source: actual.0,
             actual_target: actual.1,
         });
+    }
+    Ok(())
+}
+
+fn validate_replay_cost_statistics(statistics: ReplayCostStatistics) -> Result<(), FeedbackError> {
+    if !statistics.weighted_replay_cost_nanos.is_finite()
+        || statistics.weighted_replay_cost_nanos < 0.0
+        || !statistics.weighted_invalidated_descendants.is_finite()
+        || statistics.weighted_invalidated_descendants < 0.0
+        || !statistics.observation_weight.is_finite()
+        || statistics.observation_weight < 0.0
+    {
+        return Err(FeedbackError::InvalidReplayCostStatistics);
     }
     Ok(())
 }
@@ -904,6 +1172,17 @@ pub enum FeedbackError {
         observation_epoch: u64,
         last_update_epoch: u64,
     },
+    #[error("replay cost/fan-out evidence can only be attached to a conflict observation")]
+    ReplayImpactRequiresConflict,
+    #[error(
+        "replay-cost observation epoch {observation_epoch} precedes the cost model's last update epoch {last_update_epoch}"
+    )]
+    StaleReplayCostEpoch {
+        observation_epoch: u64,
+        last_update_epoch: u64,
+    },
+    #[error("replay-cost statistics contain non-finite or negative decayed values")]
+    InvalidReplayCostStatistics,
     #[error("too many runtime-discovered fallback edges for u32 identifiers")]
     TooManyFallbackEdges,
     #[error("static statistics length {statistics} does not match graph edge count {edges}")]

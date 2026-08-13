@@ -197,17 +197,27 @@ fn split_phase_validator_prepares_without_commit_then_reconciles_decided_block()
         .is_some_and(|validation| validation.is_valid()));
     assert!(report.reconciliation.iter().all(|diagnostic| {
         match diagnostic.disposition {
-            CanonicalTxDisposition::ReusedSpeculative => diagnostic
-                .validation
-                .as_ref()
-                .is_some_and(|validation| validation.is_valid()),
-            CanonicalTxDisposition::Replayed => diagnostic
-                .validation
-                .as_ref()
-                .is_some_and(|validation| !validation.is_valid()),
+            CanonicalTxDisposition::ReusedSpeculative => {
+                diagnostic.reexecution_duration.is_zero()
+                    && diagnostic
+                        .validation
+                        .as_ref()
+                        .is_some_and(|validation| validation.is_valid())
+            }
+            CanonicalTxDisposition::Replayed => {
+                !diagnostic.reexecution_duration.is_zero()
+                    && diagnostic
+                        .validation
+                        .as_ref()
+                        .is_some_and(|validation| !validation.is_valid())
+            }
             CanonicalTxDisposition::Canonical => false,
         }
     }));
+    assert_eq!(
+        report.dependency_evidence.is_empty(),
+        report.speculative.replayed_transactions == 0
+    );
     assert_eq!(
         engine.raw_storage(&contract, b"count"),
         Some(4_u64.to_be_bytes().to_vec())

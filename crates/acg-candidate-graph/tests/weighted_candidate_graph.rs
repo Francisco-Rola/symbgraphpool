@@ -1,6 +1,6 @@
 use acg_candidate_graph::{
-    CandidateGraphBuilder, CandidateGraphError, CandidateTransaction, EdgeProvenance,
-    WeightedCandidateGraphConfig,
+    CandidateGraphBuilder, CandidateGraphError, CandidateTransaction, CostAwareEdgePolicyConfig,
+    EdgeClass, EdgeProvenance, RiskBoundedSchedulerConfig, WeightedCandidateGraphConfig,
 };
 use acg_core::{ConflictKinds, ContractCodeHash, InstanceId, RuntimeId, TxId, TxIndex};
 use acg_feedback::{
@@ -71,6 +71,7 @@ fn weighted_config(epoch: u64, threshold: f64) -> WeightedCandidateGraphConfig {
     WeightedCandidateGraphConfig {
         epoch,
         edge_materialization_threshold: threshold,
+        cost_policy: Default::default(),
     }
 }
 
@@ -112,6 +113,8 @@ fn weighted_static_edge_carries_posterior_confidence_kinds_and_provenance() {
     );
     assert!((edge.probability() - estimate.probability).abs() <= Q16_EPSILON);
     assert!((edge.confidence() - estimate.confidence).abs() <= Q16_EPSILON);
+    assert!((edge.scheduling_risk() - edge.probability()).abs() <= Q16_EPSILON);
+    assert_eq!(edge.replay_cost_confidence(), 0.0);
     assert!(!edge.is_historical_override());
 }
 
@@ -405,6 +408,7 @@ fn legacy_binary_builder_preserves_pre_brick4_behavior() {
     let edge = &candidate.edges()[0];
     assert_eq!(edge.profile_edge_index(), Some(edge_index));
     assert_eq!(edge.probability(), 1.0);
+    assert_eq!(edge.scheduling_risk(), 1.0);
     assert_eq!(edge.confidence(), 0.0);
 }
 
@@ -446,4 +450,99 @@ fn invalid_weighted_materialization_threshold_is_rejected() {
         error,
         CandidateGraphError::InvalidMaterializationThreshold(value) if value.is_nan()
     ));
+}
+
+#[test]
+fn replay_cost_changes_scheduling_risk_without_rewriting_raw_conflict_probability() {
+    let graph = graph();
+    let credit = profile_id(&graph, "execute::Credit");
+    let edge_index = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let feedback_config = AdaptiveFeedbackConfig {
+        retention_factor: 1.0,
+        confidence_scale: 1.0,
+        ..AdaptiveFeedbackConfig::default()
+    };
+    let cost_policy = CostAwareEdgePolicyConfig {
+        serialization_cost_reference_nanos: 100_000,
+        invalidation_fanout_weight: 1.0,
+    };
+
+    let build_store = |replay_cost_nanos, invalidated_descendants| {
+        let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+        let mut observations = ObservationBuffer::default();
+        for offset in 0..8_u64 {
+            observations.push(
+                ConflictObservation::independent(
+                    credit,
+                    credit,
+                    TxId(100 + offset * 2),
+                    TxId(101 + offset * 2),
+                    ObservationSource::CanonicalExecution,
+                    ObservationTarget::Static { edge_index },
+                    1.0,
+                    1,
+                    true,
+                )
+                .unwrap(),
+            );
+        }
+        observations.push(
+            ConflictObservation::conflict(
+                credit,
+                credit,
+                TxId(200),
+                TxId(201),
+                ConflictKinds::WRITE_WRITE,
+                ObservationSource::Replay,
+                ObservationTarget::Static { edge_index },
+                4.0,
+                1,
+                true,
+            )
+            .unwrap()
+            .with_replay_impact(replay_cost_nanos, invalidated_descendants),
+        );
+        store
+            .apply_batch(&graph, observations, &feedback_config)
+            .unwrap();
+        store
+    };
+
+    let cheap_store = build_store(25_000, 0);
+    let expensive_store = build_store(2_000_000, 3);
+    let transactions = || {
+        vec![
+            tx(&graph, 1, "execute::Credit", 1, json!({"account":"alice"})),
+            tx(&graph, 2, "execute::Credit", 1, json!({"account":"alice"})),
+        ]
+    };
+    let config = WeightedCandidateGraphConfig {
+        epoch: 1,
+        edge_materialization_threshold: 0.0,
+        cost_policy,
+    };
+    let cheap = CandidateGraphBuilder::new(&graph)
+        .build_weighted(transactions(), &cheap_store, &feedback_config, config)
+        .unwrap();
+    let expensive = CandidateGraphBuilder::new(&graph)
+        .build_weighted(transactions(), &expensive_store, &feedback_config, config)
+        .unwrap();
+    let cheap_edge = cheap.edge_between(TxIndex(0), TxIndex(1)).unwrap();
+    let expensive_edge = expensive.edge_between(TxIndex(0), TxIndex(1)).unwrap();
+
+    assert!((cheap_edge.probability() - expensive_edge.probability()).abs() <= Q16_EPSILON);
+    assert_eq!(cheap_edge.expected_replay_cost_nanos, 25_000);
+    assert_eq!(expensive_edge.expected_replay_cost_nanos, 2_000_000);
+    assert_eq!(expensive_edge.expected_invalidated_descendants(), 3.0);
+    assert!(expensive_edge.scheduling_risk() > cheap_edge.scheduling_risk() + 0.5);
+
+    let scheduler = RiskBoundedSchedulerConfig {
+        soft_threshold: 0.20,
+        hard_threshold: 0.70,
+        risk_budget: 0.20,
+        max_wave_width: None,
+        independent_observations_before_softening: 8,
+    };
+    assert_eq!(scheduler.classify(cheap_edge), EdgeClass::Soft);
+    assert_eq!(scheduler.classify(expensive_edge), EdgeClass::Hard);
 }
