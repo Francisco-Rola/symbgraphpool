@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "physical_core_limit": 6,
+  "record_schema_version": 1,
+  "policy_file": "../policies/release-tuning.json",
+  "base_run": {
+    "workload": "conflictlab",
+    "parameters": {
+      "execution_backend": "wasm",
+      "transactions": "200",
+      "warmup_blocks": "4",
+      "accounts": "16",
+      "hot_account_probability_bps": "0",
+      "work_iterations": "32768",
+      "storage_rounds": "2",
+      "payload_bytes": "256",
+      "complexity": "medium",
+      "sim.admission_tps": "25000",
+      "sim.block_interval_ms": "2000",
+      "sim.block_size": "200",
+      "sim.mempool_policy": "fifo",
+      "acg.feedback_retention_factor": "0.99",
+      "acg.feedback_confidence_scale": "20.0"
+    }
+  },
+  "order_seed": 20260813,
+  "experiment_id": "conflictlab-release-contention",
+  "matrix": {
+    "modes": [
+      "static",
+      "probability-only",
+      "cost-aware"
+    ],
+    "workers": [
+      6
+    ],
+    "seeds": [
+      11,
+      23,
+      37,
+      53,
+      71
+    ],
+    "parameters": {
+      "accounts": [
+        "1",
+        "2",
+        "4",
+        "8",
+        "16",
+        "64",
+        "200"
+      ],
+      "hot_account_probability_bps": [
+        "0",
+        "2500",
+        "5000",
+        "7500",
+        "9000",
+        "10000"
+      ]
+    },
+    "cases": [
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "heavy",
+          "work_iterations": "262144",
+          "storage_rounds": "4",
+          "payload_bytes": "1024"
+        }
+      }
+    ]
+  }
+}

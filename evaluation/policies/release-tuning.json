@@ -1,0 +1,26 @@
+{
+  "require_started_at_utc": true,
+  "require_git_revision": true,
+  "require_build_profile": true,
+  "require_rustc_version": true,
+  "require_clean_git_tree": false,
+  "required_build_profile": "release",
+  "require_nonempty_parameters": true,
+  "require_serial_reference": true,
+  "require_correctness_digests": true,
+  "require_serial_equivalent": true,
+  "required_environment_keys": [
+    "cpu_model",
+    "git_dirty",
+    "kernel",
+    "logical_cores",
+    "os"
+  ],
+  "performance": {
+    "max_service_inflation_milli": null,
+    "max_scheduler_realization_milli": null,
+    "max_planning_overhead_milli": null,
+    "max_feedback_overhead_milli": null,
+    "min_parallel_speedup_milli": null
+  }
+}

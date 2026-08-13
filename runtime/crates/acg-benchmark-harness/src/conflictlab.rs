@@ -1,4 +1,11 @@
-use std::{hint::black_box, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    hint::black_box,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use acg_core::{ContractCodeHash, RuntimeId};
 use acg_cosmwasm_engine::{
@@ -8,29 +15,27 @@ use acg_cosmwasm_engine::{
 use acg_evaluation::RunIdentity;
 use acg_profile_graph::{EdgeBuildConfig, GraphLoadConfig, ProfileGraph, ProfileGraphArtifact};
 use acg_symbolic_json::{normalize_document, parse_slice, IngestionContext};
-use acg_validator_sim::{BlockProducer, BlockProducerConfig, Mempool, ProducedBlock};
-use cosmwasm_std::{to_json_binary, Binary, Empty, Env, MessageInfo, Reply, Response};
-use serde_json::{json, Value};
+use acg_validator_sim::{
+    BlockProducer, BlockProducerConfig, IngressConfig, Mempool, ProducedBlock,
+    RateControlledIngress, DEFAULT_BENCHMARK_INGRESS_TPS,
+};
+use cosmwasm_std::{to_json_binary, Binary, Empty, Env, MessageInfo, Reply, Response, Uint128};
+use serde::{Deserialize, Serialize};
 
 use crate::{parameter, BenchmarkWorkload, HarnessError, PreparedBenchmark};
 
 const CONFLICTLAB_SYMBOLIC: &[u8] =
     include_bytes!("../../../../benchmarks/symbolic/conflictlab.symbolic.json");
 const BASIS_POINTS: u16 = 10_000;
+const DEFAULT_WASM_RELATIVE_PATH: &str =
+    "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_conflictlab.wasm";
 
-/// Built-in deterministic ConflictLab adapter used to validate and tune the common harness.
+/// ConflictLab is the controlled tuning workload for the common benchmark harness.
 ///
-/// Workload parameters:
-/// - `transactions` (default 200)
-/// - `warmup_blocks` (default 0)
-/// - `accounts` (default 16)
-/// - `hot_account_probability_bps` (default 0)
-/// - `work_iterations` (default 0)
-/// - `warmup_hot_account_probability_bps` (defaults to measured hot probability)
-/// - `warmup_work_iterations` (defaults to measured work iterations)
-///
-/// Keys prefixed with `acg.` are reserved for the common scheduler/feedback tuning layer and are
-/// ignored by this adapter.
+/// It can execute a fast native contract for harness tests or the real release-mode CosmWasm
+/// artifact for performance evaluation. Transaction complexity is varied without changing the
+/// logical conflict relation: every transaction credits one account while optional compute,
+/// repeated storage rounds, and payload bytes add service cost.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConflictLabWorkload;
 
@@ -41,16 +46,22 @@ impl BenchmarkWorkload for ConflictLabWorkload {
 
     fn prepare(&self, run: &RunIdentity) -> Result<Box<dyn PreparedBenchmark>, HarnessError> {
         let config = ConflictLabConfig::from_run(run)?;
-        let engine = CosmWasmEngine::default();
-        let code_id = engine
-            .register_native("conflictlab-harness", Arc::new(ConflictLabRuntime))
-            .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+        let (engine, code_id, environment) = setup_engine(config.execution_backend)?;
         let checksum = engine
             .code_metadata(code_id)
             .ok_or_else(|| {
                 HarnessError::Runtime("registered ConflictLab code metadata missing".to_owned())
             })?
             .checksum;
+        let instantiate_msg = match config.execution_backend {
+            ExecutionBackend::Native => Binary::default(),
+            ExecutionBackend::Wasm => to_json_binary(&ConflictLabInstantiateMsg {
+                admin: None,
+                fee_bps: 0,
+                epoch: 0,
+            })
+            .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+        };
         let contract = engine
             .instantiate(
                 TransactionId(900),
@@ -60,7 +71,7 @@ impl BenchmarkWorkload for ConflictLabWorkload {
                 None,
                 "conflictlab-harness".to_owned(),
                 Vec::new(),
-                Binary::default(),
+                instantiate_msg,
             )
             .map_err(|error| HarnessError::Runtime(error.to_string()))?
             .contract;
@@ -92,16 +103,25 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             let block = generate_block(
                 &contract,
                 &mut generator,
-                config.transactions,
-                next_transaction_id,
-                height,
-                config.warmup_work_iterations,
+                GenerateBlockConfig {
+                    offered_transactions: config.transactions,
+                    first_transaction_id: next_transaction_id,
+                    height,
+                    selection_seed: run.seed ^ height,
+                    work: WorkShape {
+                        work_iterations: config.warmup_work_iterations,
+                        storage_rounds: config.warmup_storage_rounds,
+                        payload_bytes: config.warmup_payload_bytes,
+                    },
+                    simulation: config.simulation,
+                },
             )?;
             next_transaction_id = next_transaction_id.saturating_add(
                 u64::try_from(config.transactions).map_err(|_| HarnessError::NumericOverflow)?,
             );
             blocks.push(block);
         }
+
         generator.hot_bps = config.hot_bps;
         let measured_height = u64::try_from(config.warmup_blocks)
             .map_err(|_| HarnessError::NumericOverflow)?
@@ -109,10 +129,18 @@ impl BenchmarkWorkload for ConflictLabWorkload {
         blocks.push(generate_block(
             &contract,
             &mut generator,
-            config.transactions,
-            next_transaction_id,
-            measured_height,
-            config.work_iterations,
+            GenerateBlockConfig {
+                offered_transactions: config.transactions,
+                first_transaction_id: next_transaction_id,
+                height: measured_height,
+                selection_seed: run.seed ^ measured_height,
+                work: WorkShape {
+                    work_iterations: config.work_iterations,
+                    storage_rounds: config.storage_rounds,
+                    payload_bytes: config.payload_bytes,
+                },
+                simulation: config.simulation,
+            },
         )?);
         let measured_block = blocks.pop().ok_or_else(|| {
             HarnessError::Runtime("ConflictLab produced no measured block".to_owned())
@@ -123,10 +151,57 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             graph,
             contract,
             accounts: config.accounts,
+            environment,
             warmup_blocks: blocks,
             measured_block,
         }))
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutionBackend {
+    Native,
+    Wasm,
+}
+
+impl ExecutionBackend {
+    fn parse(value: &str) -> Result<Self, HarnessError> {
+        match value {
+            "native" => Ok(Self::Native),
+            "wasm" => Ok(Self::Wasm),
+            other => Err(HarnessError::WorkloadParameter(format!(
+                "execution_backend must be native or wasm, got {other:?}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MempoolPolicy {
+    Fifo,
+    ReverseFifo,
+    SeededShuffle,
+}
+
+impl MempoolPolicy {
+    fn parse(value: &str) -> Result<Self, HarnessError> {
+        match value {
+            "fifo" => Ok(Self::Fifo),
+            "reverse-fifo" => Ok(Self::ReverseFifo),
+            "seeded-shuffle" => Ok(Self::SeededShuffle),
+            other => Err(HarnessError::WorkloadParameter(format!(
+                "sim.mempool_policy must be fifo, reverse-fifo, or seeded-shuffle; got {other:?}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SimulationConfig {
+    admission_tps: u64,
+    block_interval_ms: u64,
+    block_size: usize,
+    mempool_policy: MempoolPolicy,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -136,8 +211,14 @@ struct ConflictLabConfig {
     accounts: u64,
     hot_bps: u16,
     work_iterations: u64,
+    storage_rounds: u32,
+    payload_bytes: usize,
     warmup_hot_bps: u16,
     warmup_work_iterations: u64,
+    warmup_storage_rounds: u32,
+    warmup_payload_bytes: usize,
+    execution_backend: ExecutionBackend,
+    simulation: SimulationConfig,
 }
 
 impl ConflictLabConfig {
@@ -148,8 +229,18 @@ impl ConflictLabConfig {
             "accounts",
             "hot_account_probability_bps",
             "work_iterations",
+            "storage_rounds",
+            "payload_bytes",
+            "complexity",
             "warmup_hot_account_probability_bps",
             "warmup_work_iterations",
+            "warmup_storage_rounds",
+            "warmup_payload_bytes",
+            "execution_backend",
+            "sim.admission_tps",
+            "sim.block_interval_ms",
+            "sim.block_size",
+            "sim.mempool_policy",
         ];
         for key in run.parameters.keys() {
             if !key.starts_with("acg.") && !WORKLOAD_KEYS.contains(&key.as_str()) {
@@ -158,11 +249,14 @@ impl ConflictLabConfig {
                 )));
             }
         }
+
         let transactions = parameter(&run.parameters, "transactions", 200_usize)?;
         let warmup_blocks = parameter(&run.parameters, "warmup_blocks", 0_usize)?;
         let accounts = parameter(&run.parameters, "accounts", 16_u64)?;
         let hot_bps = parameter(&run.parameters, "hot_account_probability_bps", 0_u16)?;
         let work_iterations = parameter(&run.parameters, "work_iterations", 0_u64)?;
+        let storage_rounds = parameter(&run.parameters, "storage_rounds", 0_u32)?;
+        let payload_bytes = parameter(&run.parameters, "payload_bytes", 0_usize)?;
         let warmup_hot_bps = parameter(
             &run.parameters,
             "warmup_hot_account_probability_bps",
@@ -170,6 +264,30 @@ impl ConflictLabConfig {
         )?;
         let warmup_work_iterations =
             parameter(&run.parameters, "warmup_work_iterations", work_iterations)?;
+        let warmup_storage_rounds =
+            parameter(&run.parameters, "warmup_storage_rounds", storage_rounds)?;
+        let warmup_payload_bytes =
+            parameter(&run.parameters, "warmup_payload_bytes", payload_bytes)?;
+        let execution_backend = ExecutionBackend::parse(
+            run.parameters
+                .get("execution_backend")
+                .map(String::as_str)
+                .unwrap_or("native"),
+        )?;
+        let block_size = parameter(&run.parameters, "sim.block_size", transactions)?;
+        let admission_tps = parameter(
+            &run.parameters,
+            "sim.admission_tps",
+            DEFAULT_BENCHMARK_INGRESS_TPS,
+        )?;
+        let block_interval_ms = parameter(&run.parameters, "sim.block_interval_ms", 2_000_u64)?;
+        let mempool_policy = MempoolPolicy::parse(
+            run.parameters
+                .get("sim.mempool_policy")
+                .map(String::as_str)
+                .unwrap_or("fifo"),
+        )?;
+
         if transactions == 0 {
             return Err(HarnessError::WorkloadParameter(
                 "transactions must be greater than zero".to_owned(),
@@ -180,25 +298,117 @@ impl ConflictLabConfig {
                 "accounts must be greater than zero".to_owned(),
             ));
         }
-        if hot_bps > BASIS_POINTS {
+        if block_size == 0 {
+            return Err(HarnessError::WorkloadParameter(
+                "sim.block_size must be greater than zero".to_owned(),
+            ));
+        }
+        if admission_tps == 0 {
+            return Err(HarnessError::WorkloadParameter(
+                "sim.admission_tps must be greater than zero".to_owned(),
+            ));
+        }
+        if block_interval_ms == 0 {
+            return Err(HarnessError::WorkloadParameter(
+                "sim.block_interval_ms must be greater than zero".to_owned(),
+            ));
+        }
+        if hot_bps > BASIS_POINTS || warmup_hot_bps > BASIS_POINTS {
             return Err(HarnessError::WorkloadParameter(format!(
-                "hot_account_probability_bps must be <= {BASIS_POINTS}, got {hot_bps}"
+                "hot-account probabilities must be <= {BASIS_POINTS} basis points"
             )));
         }
-        if warmup_hot_bps > BASIS_POINTS {
-            return Err(HarnessError::WorkloadParameter(format!(
-                "warmup_hot_account_probability_bps must be <= {BASIS_POINTS}, got {warmup_hot_bps}"
-            )));
-        }
+
         Ok(Self {
             transactions,
             warmup_blocks,
             accounts,
             hot_bps,
             work_iterations,
+            storage_rounds,
+            payload_bytes,
             warmup_hot_bps,
             warmup_work_iterations,
+            warmup_storage_rounds,
+            warmup_payload_bytes,
+            execution_backend,
+            simulation: SimulationConfig {
+                admission_tps,
+                block_interval_ms,
+                block_size,
+                mempool_policy,
+            },
         })
+    }
+}
+
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn conflictlab_wasm_path() -> PathBuf {
+    env::var_os("ACG_CONFLICTLAB_WASM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join(DEFAULT_WASM_RELATIVE_PATH))
+}
+
+fn setup_engine(
+    backend: ExecutionBackend,
+) -> Result<
+    (
+        CosmWasmEngine,
+        acg_cosmwasm_engine::CodeId,
+        BTreeMap<String, String>,
+    ),
+    HarnessError,
+> {
+    let engine = CosmWasmEngine::default();
+    let mut environment = BTreeMap::new();
+    match backend {
+        ExecutionBackend::Native => {
+            let code_id = engine
+                .register_native("conflictlab-harness", Arc::new(ConflictLabRuntime))
+                .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+            environment.insert("conflictlab_backend".to_owned(), "native".to_owned());
+            Ok((engine, code_id, environment))
+        }
+        ExecutionBackend::Wasm => {
+            let path = conflictlab_wasm_path();
+            let wasm = fs::read(&path).map_err(|error| {
+                HarnessError::Runtime(format!(
+                    "failed to read ConflictLab Wasm at {}: {error}; build it with \
+                     `cargo build --manifest-path benchmarks/Cargo.toml -p \
+                     acg-benchmark-conflictlab --release --target wasm32-unknown-unknown` \
+                     or set ACG_CONFLICTLAB_WASM",
+                    path.display()
+                ))
+            })?;
+            if wasm.is_empty() {
+                return Err(HarnessError::Runtime(format!(
+                    "ConflictLab Wasm artifact is empty: {}",
+                    path.display()
+                )));
+            }
+            let code_id = engine
+                .upload_wasm(wasm)
+                .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+            let checksum = engine
+                .code_metadata(code_id)
+                .ok_or_else(|| {
+                    HarnessError::Runtime("ConflictLab Wasm metadata missing".to_owned())
+                })?
+                .checksum;
+            environment.insert("conflictlab_backend".to_owned(), "wasm".to_owned());
+            environment.insert(
+                "conflictlab_wasm_path".to_owned(),
+                path.display().to_string(),
+            );
+            environment.insert("conflictlab_wasm_checksum".to_owned(), checksum.to_hex());
+            Ok((engine, code_id, environment))
+        }
     }
 }
 
@@ -207,6 +417,7 @@ struct PreparedConflictLab {
     graph: ProfileGraph,
     contract: Address,
     accounts: u64,
+    environment: BTreeMap<String, String>,
     warmup_blocks: Vec<ProducedBlock>,
     measured_block: ProducedBlock,
 }
@@ -228,6 +439,10 @@ impl PreparedBenchmark for PreparedConflictLab {
         &self.measured_block
     }
 
+    fn environment_metadata(&self) -> BTreeMap<String, String> {
+        self.environment.clone()
+    }
+
     fn canonical_state_bytes(&self) -> Result<Vec<u8>, HarnessError> {
         let mut bytes = Vec::new();
         append_bytes(&mut bytes, self.contract.as_str().as_bytes());
@@ -235,17 +450,54 @@ impl PreparedBenchmark for PreparedConflictLab {
         for account_id in 0..self.accounts {
             let account = format!("account-{account_id}");
             append_bytes(&mut bytes, account.as_bytes());
-            let key = format!("balance/{account}");
-            match self.engine.raw_storage(&self.contract, key.as_bytes()) {
-                Some(value) => {
-                    bytes.push(1);
-                    append_bytes(&mut bytes, &value);
-                }
-                None => bytes.push(0),
-            }
+            let outcome = self
+                .engine
+                .query(
+                    BlockContext::default(),
+                    self.contract.clone(),
+                    to_json_binary(&ConflictLabQueryMsg::Balance {
+                        account: account.clone(),
+                    })
+                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                )
+                .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+            append_bytes(&mut bytes, outcome.data.as_slice());
         }
         Ok(bytes)
     }
+}
+
+#[derive(Serialize)]
+struct ConflictLabInstantiateMsg {
+    admin: Option<String>,
+    fee_bps: u16,
+    epoch: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConflictLabExecuteMsg {
+    Credit {
+        account: String,
+        amount: Uint128,
+        #[serde(default)]
+        work_iterations: u64,
+        #[serde(default)]
+        storage_rounds: u32,
+        #[serde(default)]
+        payload: Binary,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConflictLabQueryMsg {
+    Balance { account: String },
+}
+
+#[derive(Serialize, Deserialize)]
+struct AmountResponse {
+    amount: Uint128,
 }
 
 struct ConflictLabRuntime;
@@ -268,42 +520,61 @@ impl NativeContract for ConflictLabRuntime {
         _info: MessageInfo,
         msg: Binary,
     ) -> Result<Response<Empty>, String> {
-        let value: Value =
-            serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
-        let credit = value
-            .get("credit")
-            .and_then(Value::as_object)
-            .ok_or_else(|| "expected credit message".to_owned())?;
-        let account = credit
-            .get("account")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "credit account missing".to_owned())?;
-        let amount = credit
-            .get("amount")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| "credit amount missing".to_owned())?;
-        let work_iterations = credit
-            .get("work_iterations")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
+        let ConflictLabExecuteMsg::Credit {
+            account,
+            amount,
+            work_iterations,
+            storage_rounds,
+            payload,
+        } = serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
         let key = format!("balance/{account}");
-        let current = context
+        let mut current = context
             .storage_get(key.as_bytes())
-            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
-            .map(u64::from_be_bytes)
+            .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+            .map(u128::from_be_bytes)
             .unwrap_or_default();
-        deterministic_work(work_iterations, current ^ amount);
-        context.storage_set(key.as_bytes(), current.saturating_add(amount).to_be_bytes());
-        Ok(Response::new())
+        for _ in 0..storage_rounds {
+            context.storage_set(key.as_bytes(), current.to_be_bytes());
+            current = context
+                .storage_get(key.as_bytes())
+                .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+                .map(u128::from_be_bytes)
+                .unwrap_or_default();
+        }
+        let checksum = deterministic_work(
+            work_iterations,
+            current as u64 ^ amount.u128() as u64,
+            payload.as_slice(),
+        );
+        context.storage_set(
+            key.as_bytes(),
+            current.saturating_add(amount.u128()).to_be_bytes(),
+        );
+        Ok(Response::new().add_attribute("work_checksum", checksum.to_string()))
     }
 
     fn query(
         &self,
-        _context: &mut NativeCallContext,
+        context: &mut NativeCallContext,
         _env: Env,
-        _msg: Binary,
+        msg: Binary,
     ) -> Result<Binary, String> {
-        Ok(Binary::default())
+        let query: ConflictLabQueryMsg =
+            serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
+        match query {
+            ConflictLabQueryMsg::Balance { account } => {
+                let key = format!("balance/{account}");
+                let amount = context
+                    .storage_get(key.as_bytes())
+                    .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
+                    .map(u128::from_be_bytes)
+                    .unwrap_or_default();
+                to_json_binary(&AmountResponse {
+                    amount: Uint128::new(amount),
+                })
+                .map_err(|error| error.to_string())
+            }
+        }
     }
 
     fn reply(
@@ -316,42 +587,102 @@ impl NativeContract for ConflictLabRuntime {
     }
 }
 
+#[derive(Clone, Copy)]
+struct WorkShape {
+    work_iterations: u64,
+    storage_rounds: u32,
+    payload_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct GenerateBlockConfig {
+    offered_transactions: usize,
+    first_transaction_id: u64,
+    height: u64,
+    selection_seed: u64,
+    work: WorkShape,
+    simulation: SimulationConfig,
+}
+
 fn generate_block(
     contract: &Address,
     generator: &mut ConflictLabGenerator,
-    transactions: usize,
-    first_transaction_id: u64,
-    height: u64,
-    work_iterations: u64,
+    config: GenerateBlockConfig,
 ) -> Result<ProducedBlock, HarnessError> {
+    let GenerateBlockConfig {
+        offered_transactions,
+        first_transaction_id,
+        height,
+        selection_seed,
+        work,
+        simulation,
+    } = config;
     let mempool = Mempool::default();
-    for offset in 0..transactions {
+    let mut ingress = RateControlledIngress::new(
+        IngressConfig {
+            transactions_per_second: simulation.admission_tps,
+        },
+        0,
+    )
+    .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+
+    for offset in 0..offered_transactions {
         let transaction_id = first_transaction_id
             .saturating_add(u64::try_from(offset).map_err(|_| HarnessError::NumericOverflow)?);
         let account = generator.next_account();
+        let payload = deterministic_payload(work.payload_bytes, transaction_id ^ selection_seed);
         let request = ExecutionRequest::Execute {
             transaction_id: TransactionId(transaction_id),
             sender: Address::new("client"),
             contract: contract.clone(),
             funds: Vec::new(),
-            msg: to_json_binary(&json!({
-                "credit": {
-                    "account": account,
-                    "amount": 1_u64,
-                    "work_iterations": work_iterations
-                }
-            }))
+            msg: to_json_binary(&ConflictLabExecuteMsg::Credit {
+                account,
+                amount: Uint128::new(1),
+                work_iterations: work.work_iterations,
+                storage_rounds: work.storage_rounds,
+                payload: Binary::from(payload),
+            })
             .map_err(|error| HarnessError::Runtime(error.to_string()))?,
         };
-        mempool.admit(
-            request,
-            u64::try_from(offset).map_err(|_| HarnessError::NumericOverflow)?,
-        );
+        ingress.enqueue(request);
     }
-    let mut block = BlockProducer::fifo(BlockProducerConfig::default())
-        .map_err(|error| HarnessError::Runtime(error.to_string()))?
-        .produce_next(&mempool);
-    block.context.height = height;
+
+    let block_interval = Duration::from_millis(simulation.block_interval_ms);
+    let interval_nanos = block_interval.as_nanos().min(u128::from(u64::MAX)) as u64;
+    ingress.pump_until(interval_nanos, &mempool);
+    if mempool.is_empty() {
+        return Err(HarnessError::WorkloadParameter(format!(
+            "sim.admission_tps={} and sim.block_interval_ms={} admit no transactions in one \
+             block window",
+            simulation.admission_tps, simulation.block_interval_ms
+        )));
+    }
+    let producer_config = BlockProducerConfig {
+        block_interval,
+        first_block_height: height,
+        first_block_time_nanos: interval_nanos,
+        max_transactions_per_block: Some(simulation.block_size),
+        ..BlockProducerConfig::default()
+    };
+    let block = match simulation.mempool_policy {
+        MempoolPolicy::Fifo => BlockProducer::fifo(producer_config)
+            .map_err(|error| HarnessError::Runtime(error.to_string()))?
+            .produce_next(&mempool),
+        MempoolPolicy::ReverseFifo => BlockProducer::reverse_fifo(producer_config)
+            .map_err(|error| HarnessError::Runtime(error.to_string()))?
+            .produce_next(&mempool),
+        MempoolPolicy::SeededShuffle => {
+            { BlockProducer::seeded_shuffle(producer_config, selection_seed) }
+                .map_err(|error| HarnessError::Runtime(error.to_string()))?
+                .produce_next(&mempool)
+        }
+    };
+    if block.transactions.is_empty() {
+        return Err(HarnessError::Runtime(
+            "ConflictLab produced an empty block after admission".to_owned(),
+        ));
+    }
     Ok(block)
 }
 
@@ -400,15 +731,25 @@ impl SplitMix64 {
     }
 }
 
-fn deterministic_work(iterations: u64, seed: u64) {
+fn deterministic_payload(bytes: usize, seed: u64) -> Vec<u8> {
+    let mut rng = SplitMix64::new(seed);
+    (0..bytes).map(|_| rng.next_u64() as u8).collect()
+}
+
+fn deterministic_work(iterations: u64, seed: u64, payload: &[u8]) -> u64 {
     let mut value = seed ^ 0xD6E8_FEB8_6659_FD93;
+    for (index, byte) in payload.iter().copied().enumerate() {
+        value = value
+            .wrapping_add(u64::from(byte).wrapping_mul((index as u64).wrapping_add(1)))
+            .rotate_left((index & 31) as u32);
+    }
     for index in 0..iterations {
         value = value
             .wrapping_add(index.rotate_left((index & 31) as u32))
             .wrapping_mul(0x9E37_79B9_7F4A_7C15)
             ^ value.rotate_right(11);
     }
-    black_box(value);
+    black_box(value)
 }
 
 fn append_bytes(output: &mut Vec<u8>, value: &[u8]) {

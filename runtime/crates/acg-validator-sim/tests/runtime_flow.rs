@@ -371,3 +371,41 @@ fn fifo_block_preview_is_non_destructive_and_matches_next_produced_batch() {
     assert_eq!(mempool.len(), 2);
     assert_eq!(producer.next_block_time_nanos(), 1_400_000_000);
 }
+
+#[test]
+fn diagnostic_block_selection_policies_are_deterministic() {
+    let config = BlockProducerConfig {
+        max_transactions_per_block: Some(5),
+        ..BlockProducerConfig::default()
+    };
+
+    let reverse_pool = Mempool::default();
+    for id in 1_u64..=5 {
+        reverse_pool.admit(placeholder_request(id), id);
+    }
+    let reverse = BlockProducer::reverse_fifo(config.clone())
+        .unwrap()
+        .produce_next(&reverse_pool)
+        .transactions
+        .into_iter()
+        .map(|tx| tx.transaction_id().0)
+        .collect::<Vec<_>>();
+    assert_eq!(reverse, vec![5, 4, 3, 2, 1]);
+
+    let shuffled = |seed| {
+        let mempool = Mempool::default();
+        for id in 1_u64..=5 {
+            mempool.admit(placeholder_request(id), id);
+        }
+        BlockProducer::seeded_shuffle(config.clone(), seed)
+            .unwrap()
+            .produce_next(&mempool)
+            .transactions
+            .into_iter()
+            .map(|tx| tx.transaction_id().0)
+            .collect::<Vec<_>>()
+    };
+    let first = shuffled(42);
+    assert_eq!(first, shuffled(42));
+    assert_ne!(first, vec![1, 2, 3, 4, 5]);
+}

@@ -1,8 +1,6 @@
-# VM test data
+# Engine testdata
 
-`hackatom_1.2.wasm.b64` is a text encoding of the Apache-2.0 licensed CosmWasm Hackatom test
-fixture. The test decodes it in memory to verify that the engine executes real CosmWasm bytecode
-and processes the contract's emitted bank transfer.
+Small Wasm fixtures used by `acg-cosmwasm-engine` correctness tests. They exist to exercise runtime
+behavior such as memory/gas/backend isolation and are not benchmark workloads.
 
-The text representation keeps the repository's incremental patch portable through the standard
-`patch` command; no binary patch support is required.
+Regenerate or replace a fixture only together with the test that documents its expected behavior.

@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "physical_core_limit": 6,
+  "record_schema_version": 1,
+  "policy_file": "../policies/release-tuning.json",
+  "base_run": {
+    "workload": "conflictlab",
+    "parameters": {
+      "execution_backend": "wasm",
+      "transactions": "200",
+      "warmup_blocks": "4",
+      "accounts": "16",
+      "hot_account_probability_bps": "0",
+      "work_iterations": "32768",
+      "storage_rounds": "2",
+      "payload_bytes": "256",
+      "complexity": "medium",
+      "sim.admission_tps": "25000",
+      "sim.block_interval_ms": "2000",
+      "sim.block_size": "200",
+      "sim.mempool_policy": "fifo",
+      "acg.feedback_retention_factor": "0.99",
+      "acg.feedback_confidence_scale": "20.0"
+    }
+  },
+  "order_seed": 20260813,
+  "experiment_id": "conflictlab-release-policy-tuning",
+  "matrix": {
+    "modes": [
+      "cost-aware"
+    ],
+    "workers": [
+      6
+    ],
+    "seeds": [
+      11,
+      23,
+      37,
+      53,
+      71
+    ],
+    "parameters": {
+      "hot_account_probability_bps": [
+        "2500",
+        "5000",
+        "7500",
+        "9000"
+      ]
+    },
+    "cases": [
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.soft_threshold": "0.10"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.soft_threshold": "0.35"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.hard_threshold": "0.65"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.hard_threshold": "0.90"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.risk_budget": "0.10"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.risk_budget": "0.40"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.feedback_retention_factor": "0.95"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.feedback_retention_factor": "0.999"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.feedback_confidence_scale": "5.0"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.feedback_confidence_scale": "50.0"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.independent_observations_before_softening": "2"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256",
+          "acg.independent_observations_before_softening": "16"
+        }
+      }
+    ]
+  }
+}

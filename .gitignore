@@ -8,3 +8,6 @@
 *.profraw
 
 /benchmark-results/
+
+__pycache__/
+*.pyc

@@ -39,7 +39,14 @@
         "acg.feedback_retention_factor": "1.0",
         "acg.feedback_confidence_scale": "1.0",
         "warmup_hot_account_probability_bps": "0",
-        "warmup_work_iterations": "100"
+        "warmup_work_iterations": "100",
+        "execution_backend": "native",
+        "storage_rounds": "0",
+        "payload_bytes": "0",
+        "sim.admission_tps": "25000",
+        "sim.block_interval_ms": "2000",
+        "sim.block_size": "24",
+        "sim.mempool_policy": "fifo"
       }
     },
     {
@@ -57,7 +64,14 @@
         "acg.feedback_retention_factor": "1.0",
         "acg.feedback_confidence_scale": "1.0",
         "warmup_hot_account_probability_bps": "0",
-        "warmup_work_iterations": "100"
+        "warmup_work_iterations": "100",
+        "execution_backend": "native",
+        "storage_rounds": "0",
+        "payload_bytes": "0",
+        "sim.admission_tps": "25000",
+        "sim.block_interval_ms": "2000",
+        "sim.block_size": "24",
+        "sim.mempool_policy": "fifo"
       }
     },
     {
@@ -75,7 +89,14 @@
         "acg.feedback_retention_factor": "1.0",
         "acg.feedback_confidence_scale": "1.0",
         "warmup_hot_account_probability_bps": "0",
-        "warmup_work_iterations": "100"
+        "warmup_work_iterations": "100",
+        "execution_backend": "native",
+        "storage_rounds": "0",
+        "payload_bytes": "0",
+        "sim.admission_tps": "25000",
+        "sim.block_interval_ms": "2000",
+        "sim.block_size": "24",
+        "sim.mempool_policy": "fifo"
       }
     }
   ]

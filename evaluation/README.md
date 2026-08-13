@@ -1,70 +1,49 @@
-# Evaluation manifests and Brick 5F acceptance
+# Evaluation
 
-Brick 5F separates raw `ExperimentRecord` samples from publication acceptance. A benchmark campaign
-first commits an explicit manifest containing every expected run identity and the acceptance policy,
-then validates the resulting JSONL file with the common `acg-evaluate` tool.
+Evaluation is manifest-driven. A declared run is executed with an independent serial reference and
+one speculative policy, produces a stable `ExperimentRecord`, and must pass Brick-5F acceptance.
 
-A run identity is the tuple:
-
-```text
-workload + mode + run_index + seed + workers + exact workload parameters
-```
-
-This makes missing, unexpected, and duplicate samples machine-detectable.
-
-## Publication acceptance
-
-`AcceptancePolicy::publication()` requires:
-
-- non-empty experiment/workload/mode identity;
-- UTC start time, Git revision, build profile, and Rust compiler version;
-- `cpu_model`, `git_dirty`, `kernel`, `logical_cores`, and `os` environment metadata;
-- explicit workload parameters;
-- no execution-worker oversubscription relative to the record or manifest physical-core budget;
-- serial-equivalent work, serial-cost DAG, observed-service DAG, service inflation, and scheduler
-  realization measurements;
-- canonical and serial-reference state digests that match;
-- an explicit `serial_equivalent=true` result;
-- internally consistent edge/dependency counts and timing totals.
-
-Performance thresholds are optional and live in the manifest. Publication validity alone does not
-assume that every workload should achieve a speedup.
-
-## Validate records
+## One manifest
 
 ```bash
-./scripts/validate-experiment-records.sh \
-  evaluation/example-manifest.json \
-  benchmark-results/my-experiment/records.jsonl \
-  benchmark-results/my-experiment/acceptance.json
-```
-
-The command exits 0 only when the complete manifest is accepted, 1 for an acceptance failure, and 2
-for malformed input/tool errors.
-
-`ExperimentAcceptanceReport` classifies failures as:
-
-- `incomplete` — required provenance or measurements are missing;
-- `correctness_failure` — serial equivalence or state digest comparison failed;
-- `configuration_error` — invalid core budgets, inconsistent counters, duplicate/unexpected runs,
-  or malformed experiment identity;
-- `performance_regression` — an explicitly configured performance threshold was violated.
-
-The example manifest is illustrative; benchmark campaigns should generate manifests from committed
-experiment matrices rather than editing result files after execution.
-
-
-## Common benchmark harness
-
-`acg-benchmark-harness` now executes manifest runs directly. Each run prepares an independent serial
-reference and requested speculative ablation, checks deterministic setup, fills Brick 5E serial/DAG
-references and correctness digests, then feeds the records to the Brick 5F manifest evaluator.
-
-Start with:
-
-```bash
-./scripts/run-common-benchmark-harness-diagnostics.sh
 ./scripts/run-benchmark-manifest.sh evaluation/conflictlab-harness-smoke.json
 ```
 
-See [`../docs/common-benchmark-harness.md`](../docs/common-benchmark-harness.md).
+## Generate a matrix
+
+```bash
+python3 scripts/generate-manifest-matrix.py \
+  evaluation/conflictlab/quick.grid.json /tmp/conflictlab.json
+```
+
+A matrix expands modes, workers, seeds, parameter grids and linked complexity cases into exact run
+identities. Unknown workload/tuning parameters are rejected by the harness.
+
+## Aggregate results
+
+```bash
+python3 scripts/aggregate-experiment.py records.jsonl --out-dir aggregate
+```
+
+Outputs:
+
+- `records-flat.csv`: one flattened row per raw sample;
+- `summary-wide.csv`: one grouped row with metric statistics;
+- `plot-long.csv`: tidy/plot-ready metric rows;
+- `summary.json`: record/group counts and exported metric list.
+
+Raw JSONL is always the source of truth. Confidence intervals use the normal 1.96×SEM approximation;
+keep raw samples for any later bootstrap/non-parametric analysis. Matrix files may set `order_seed` to
+deterministically shuffle run order and reduce systematic thermal/order bias.
+
+## Release ConflictLab campaign
+
+```bash
+./scripts/run-conflictlab-release-suite.sh quick
+./scripts/run-conflictlab-release-suite.sh core
+./scripts/run-conflictlab-release-suite.sh full
+```
+
+`quick` validates the release pipeline; `core` covers the primary research axes; `full` additionally
+covers admission/block packing and scheduler-policy tuning. See `conflictlab/README.md` and
+`../docs/tuning-knobs.md`.

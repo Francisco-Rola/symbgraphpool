@@ -65,7 +65,10 @@
       "entrypoint": "execute::Credit",
       "input_parameters": [
         "account",
-        "amount"
+        "amount",
+        "work_iterations",
+        "storage_rounds",
+        "payload"
       ],
       "accesses": [
         {
@@ -84,9 +87,9 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/conflictlab/src/lib.rs",
-            "start_line": 203,
-            "end_line": 220,
-            "code": "BALANCES.may_load(account); BALANCES.save(account, balance + amount);"
+            "start_line": 222,
+            "end_line": 258,
+            "code": "BALANCES.may_load/save(account); optional storage rounds repeat the same account key; final save adds amount."
           },
           "notes": []
         },
@@ -106,9 +109,9 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/conflictlab/src/lib.rs",
-            "start_line": 203,
-            "end_line": 220,
-            "code": "BALANCES.may_load(account); BALANCES.save(account, balance + amount);"
+            "start_line": 222,
+            "end_line": 258,
+            "code": "BALANCES.may_load/save(account); optional storage rounds repeat the same account key; final save adds amount."
           },
           "notes": []
         }

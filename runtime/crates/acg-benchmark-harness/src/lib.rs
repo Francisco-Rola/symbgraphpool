@@ -82,6 +82,11 @@ pub trait PreparedBenchmark: Send {
     fn warmup_blocks(&self) -> &[ProducedBlock];
     fn measured_block(&self) -> &ProducedBlock;
     fn canonical_state_bytes(&self) -> Result<Vec<u8>, HarnessError>;
+
+    /// Extra workload-specific environment metadata copied into the stable experiment record.
+    fn environment_metadata(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
 }
 
 /// Workload adapter boundary used by the common runner.
@@ -283,6 +288,7 @@ impl BenchmarkHarness {
         metadata
             .environment
             .insert("benchmark_adapter".to_owned(), workload.name().to_owned());
+        metadata.environment.extend(adaptive.environment_metadata());
 
         Ok(ExperimentRecord::from_runtime(
             metadata,

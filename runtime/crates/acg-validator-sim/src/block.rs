@@ -24,6 +24,50 @@ impl BlockSelectionPolicy for FifoSelectionPolicy {
     }
 }
 
+/// Deterministic diagnostic policy that reverses the selected FIFO prefix.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReverseFifoSelectionPolicy;
+
+impl BlockSelectionPolicy for ReverseFifoSelectionPolicy {
+    fn select(&self, mempool: &Mempool, limit: usize) -> Vec<PendingTransaction> {
+        let mut selected = mempool.drain_fifo(limit);
+        selected.reverse();
+        selected
+    }
+}
+
+/// Deterministic diagnostic policy that shuffles the selected FIFO prefix from one seed.
+#[derive(Clone, Copy, Debug)]
+pub struct SeededShuffleSelectionPolicy {
+    seed: u64,
+}
+
+impl SeededShuffleSelectionPolicy {
+    pub fn new(seed: u64) -> Self {
+        Self { seed }
+    }
+}
+
+impl BlockSelectionPolicy for SeededShuffleSelectionPolicy {
+    fn select(&self, mempool: &Mempool, limit: usize) -> Vec<PendingTransaction> {
+        let mut selected = mempool.drain_fifo(limit);
+        let mut state = self.seed ^ (selected.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for index in (1..selected.len()).rev() {
+            state = splitmix64(state);
+            let swap_with = (state as usize) % (index + 1);
+            selected.swap(index, swap_with);
+        }
+        selected
+    }
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockProducerConfig {
     pub block_interval: Duration,
@@ -81,6 +125,21 @@ impl BlockProducer<FifoSelectionPolicy> {
             },
             transactions: mempool.peek_fifo(limit),
         }
+    }
+}
+
+impl BlockProducer<ReverseFifoSelectionPolicy> {
+    pub fn reverse_fifo(config: BlockProducerConfig) -> Result<Self, BlockProducerError> {
+        Self::new(config, ReverseFifoSelectionPolicy)
+    }
+}
+
+impl BlockProducer<SeededShuffleSelectionPolicy> {
+    pub fn seeded_shuffle(
+        config: BlockProducerConfig,
+        seed: u64,
+    ) -> Result<Self, BlockProducerError> {
+        Self::new(config, SeededShuffleSelectionPolicy::new(seed))
     }
 }
 

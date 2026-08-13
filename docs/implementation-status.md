@@ -160,10 +160,21 @@ See [`brick-5f.md`](brick-5f.md) and [`../evaluation/README.md`](../evaluation/R
 
 See [`common-benchmark-harness.md`](common-benchmark-harness.md).
 
+## ConflictLab release evaluation suite — implemented
+
+- compact matrix definitions expand deterministically into complete Brick-5F manifests;
+- accepted JSONL can be flattened and aggregated into wide and plot-ready long CSV statistics;
+- ConflictLab release runs can use the real CosmWasm artifact instead of the native smoke contract;
+- transaction complexity independently varies compute iterations, repeated storage rounds, and payload bytes while preserving account-level conflict semantics;
+- release matrices cover transaction granularity, contention, worker scaling, block/planner scaling, phase changes, admission/block packing, and later policy tuning;
+- `sim.admission_tps`, `sim.block_interval_ms`, `sim.block_size`, and deterministic mempool ordering are explicit run parameters.
+
+See [`../evaluation/conflictlab/README.md`](../evaluation/conflictlab/README.md) and [`tuning-knobs.md`](tuning-knobs.md).
+
 ## Proposed follow-on engineering
 
-1. Expand ConflictLab into the controlled ground-truth matrix for conflict probability, transaction cost, fan-out, skew, DAG shape, and phase changes, and add an oracle-conflict baseline.
-2. Connect MiniWarehouse to the exact same harness lifecycle and record/acceptance schemas.
-3. Add repeated-run aggregation/experiment generation utilities so large parameter sweeps are declared rather than hand-written.
-4. Only after those two internal workload families are stable, add external workloads.
-5. Keep VM snapshot/reset/COW work on a separate research branch until the common evaluation identifies VM lifecycle as a limiting factor under accepted workloads.
+1. Run the accepted release ConflictLab matrices and optimize only bottlenecks visible in those data.
+2. Add an oracle-conflict baseline and explicit predicted-block/produced-block perturbation.
+3. Connect MiniWarehouse to the same harness and aggregation pipeline.
+4. Add external workloads after both first-party workload families use the same methodology.
+5. Keep VM snapshot/reset/COW work separate until accepted workloads show it remains a material bottleneck.

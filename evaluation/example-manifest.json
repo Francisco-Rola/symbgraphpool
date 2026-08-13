@@ -45,7 +45,15 @@
         "warmup_hot_account_probability_bps": "0",
         "warmup_work_iterations": "500",
         "acg.feedback_retention_factor": "0.99",
-        "acg.feedback_confidence_scale": "20.0"
+        "acg.feedback_confidence_scale": "20.0",
+        "execution_backend": "wasm",
+        "storage_rounds": "2",
+        "payload_bytes": "256",
+        "complexity": "medium",
+        "sim.admission_tps": "25000",
+        "sim.block_interval_ms": "2000",
+        "sim.block_size": "200",
+        "sim.mempool_policy": "fifo"
       }
     }
   ]

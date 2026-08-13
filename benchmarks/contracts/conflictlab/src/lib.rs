@@ -26,6 +26,12 @@ pub enum ExecuteMsg {
     Credit {
         account: String,
         amount: Uint128,
+        #[serde(default)]
+        work_iterations: u64,
+        #[serde(default)]
+        storage_rounds: u32,
+        #[serde(default)]
+        payload: Binary,
     },
     Transfer {
         from: String,
@@ -166,7 +172,20 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
     match msg {
-        ExecuteMsg::Credit { account, amount } => execute_credit(deps, account, amount),
+        ExecuteMsg::Credit {
+            account,
+            amount,
+            work_iterations,
+            storage_rounds,
+            payload,
+        } => execute_credit(
+            deps,
+            account,
+            amount,
+            work_iterations,
+            storage_rounds,
+            payload,
+        ),
         ExecuteMsg::Transfer { from, to, amount } => execute_transfer(deps, info, from, to, amount),
         ExecuteMsg::Approve {
             owner,
@@ -204,11 +223,29 @@ fn execute_credit(
     deps: DepsMut,
     account: String,
     amount: Uint128,
+    work_iterations: u64,
+    storage_rounds: u32,
+    payload: Binary,
 ) -> Result<Response, ContractError> {
     let account = deps.api.addr_validate(&account)?;
-    let balance = BALANCES
+    let mut balance = BALANCES
         .may_load(deps.storage, account.as_str())?
         .unwrap_or_default();
+
+    // Repeat semantically neutral read/write rounds on the same account key. This deliberately
+    // changes host-storage intensity without changing ConflictLab's conflict relation.
+    for _ in 0..storage_rounds {
+        BALANCES.save(deps.storage, account.as_str(), &balance)?;
+        balance = BALANCES
+            .may_load(deps.storage, account.as_str())?
+            .unwrap_or_default();
+    }
+
+    let checksum = deterministic_work(
+        work_iterations,
+        balance.u128() as u64 ^ amount.u128() as u64,
+        payload.as_slice(),
+    );
     BALANCES.save(
         deps.storage,
         account.as_str(),
@@ -216,7 +253,26 @@ fn execute_credit(
     )?;
     Ok(Response::new()
         .add_attribute("action", "credit")
-        .add_attribute("account", account))
+        .add_attribute("account", account)
+        .add_attribute("work_checksum", checksum.to_string()))
+}
+
+fn deterministic_work(iterations: u64, seed: u64, payload: &[u8]) -> u64 {
+    let mut value = seed ^ 0xD6E8_FEB8_6659_FD93;
+    for (index, byte) in payload.iter().copied().enumerate() {
+        value = value
+            .wrapping_add(u64::from(byte).wrapping_mul((index as u64).wrapping_add(1)))
+            .rotate_left((index & 31) as u32);
+    }
+    for index in 0..iterations {
+        value = value
+            .wrapping_add(index.rotate_left((index & 31) as u32))
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ value.rotate_right(11);
+    }
+    // Returning the checksum as a response attribute makes the work observable and prevents the
+    // optimizer from deleting the loop while keeping persistent state unchanged.
+    value
 }
 
 fn execute_transfer(
@@ -345,7 +401,7 @@ fn execute_receive_transfer(
     account: String,
     amount: Uint128,
 ) -> Result<Response, ContractError> {
-    execute_credit(deps, account, amount)
+    execute_credit(deps, account, amount, 0, 0, Binary::default())
         .map(|response| response.add_attribute("delegated_from", "receive_transfer"))
 }
 
@@ -518,6 +574,9 @@ mod tests {
             ExecuteMsg::Credit {
                 account: "alice".to_owned(),
                 amount: Uint128::new(100),
+                work_iterations: 0,
+                storage_rounds: 0,
+                payload: Binary::default(),
             },
         )
         .unwrap();
@@ -553,6 +612,42 @@ mod tests {
             from_json(query(deps.as_ref(), mock_env(), QueryMsg::Counter { shard_id: 2 }).unwrap())
                 .unwrap();
         assert_eq!(counter.value, 1);
+    }
+
+    #[test]
+    fn credit_complexity_controls_do_not_change_balance_semantics() {
+        let mut deps = mock_dependencies();
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("admin", &[]),
+            InstantiateMsg {
+                admin: None,
+                fee_bps: 0,
+                epoch: 1,
+            },
+        )
+        .unwrap();
+
+        let response = execute(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("client", &[]),
+            ExecuteMsg::Credit {
+                account: "alice".to_owned(),
+                amount: Uint128::new(7),
+                work_iterations: 64,
+                storage_rounds: 3,
+                payload: Binary::from(vec![1, 2, 3, 4]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            BALANCES.load(deps.as_ref().storage, "alice").unwrap(),
+            Uint128::new(7)
+        );
+        assert!(response.attributes.iter().any(|attribute| attribute.key == "work_checksum"));
     }
 
     #[test]

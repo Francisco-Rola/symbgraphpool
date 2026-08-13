@@ -215,3 +215,61 @@ fn unknown_workload_and_worker_oversubscription_are_rejected() {
         Err(HarnessError::Acceptance(_))
     ));
 }
+
+#[test]
+fn conflictlab_simulation_and_complexity_knobs_change_block_without_changing_correctness() {
+    let mut identity = run("cost-aware", 1);
+    identity
+        .parameters
+        .insert("transactions".to_owned(), "20".to_owned());
+    identity
+        .parameters
+        .insert("complexity".to_owned(), "storage-heavy".to_owned());
+    identity
+        .parameters
+        .insert("work_iterations".to_owned(), "1000".to_owned());
+    identity
+        .parameters
+        .insert("storage_rounds".to_owned(), "3".to_owned());
+    identity
+        .parameters
+        .insert("payload_bytes".to_owned(), "128".to_owned());
+    identity
+        .parameters
+        .insert("sim.admission_tps".to_owned(), "1000".to_owned());
+    identity
+        .parameters
+        .insert("sim.block_interval_ms".to_owned(), "1000".to_owned());
+    identity
+        .parameters
+        .insert("sim.block_size".to_owned(), "5".to_owned());
+    identity
+        .parameters
+        .insert("sim.mempool_policy".to_owned(), "seeded-shuffle".to_owned());
+
+    let prepared = ConflictLabWorkload.prepare(&identity).unwrap();
+    assert_eq!(prepared.measured_block().transactions.len(), 5);
+
+    let mut admission_limited = identity.clone();
+    admission_limited
+        .parameters
+        .insert("sim.admission_tps".to_owned(), "2".to_owned());
+    let limited = ConflictLabWorkload.prepare(&admission_limited).unwrap();
+    assert_eq!(limited.measured_block().transactions.len(), 2);
+
+    let manifest = smoke_manifest(vec![identity]);
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness.run_manifest(&manifest).unwrap();
+    assert!(outcome.acceptance.accepted());
+    let record = &outcome.records[0];
+    assert_eq!(record.execution.transactions, 5);
+    assert_eq!(record.correctness.serial_equivalent, Some(true));
+    assert_eq!(
+        record
+            .metadata
+            .environment
+            .get("conflictlab_backend")
+            .map(String::as_str),
+        Some("native")
+    );
+}

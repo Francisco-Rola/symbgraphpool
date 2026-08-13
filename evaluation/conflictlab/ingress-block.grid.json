@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "physical_core_limit": 6,
+  "record_schema_version": 1,
+  "policy_file": "../policies/release-tuning.json",
+  "base_run": {
+    "workload": "conflictlab",
+    "parameters": {
+      "execution_backend": "wasm",
+      "transactions": "1000",
+      "warmup_blocks": "4",
+      "accounts": "16",
+      "hot_account_probability_bps": "0",
+      "work_iterations": "32768",
+      "storage_rounds": "2",
+      "payload_bytes": "256",
+      "complexity": "medium",
+      "sim.admission_tps": "25000",
+      "sim.block_interval_ms": "2000",
+      "sim.block_size": "200",
+      "sim.mempool_policy": "fifo",
+      "acg.feedback_retention_factor": "0.99",
+      "acg.feedback_confidence_scale": "20.0"
+    }
+  },
+  "order_seed": 20260813,
+  "experiment_id": "conflictlab-release-ingress-block",
+  "matrix": {
+    "modes": [
+      "static",
+      "cost-aware"
+    ],
+    "workers": [
+      6
+    ],
+    "seeds": [
+      11,
+      23,
+      37,
+      53,
+      71
+    ],
+    "parameters": {
+      "sim.admission_tps": [
+        "50",
+        "100",
+        "500",
+        "1000",
+        "5000",
+        "25000"
+      ],
+      "sim.block_interval_ms": [
+        "250",
+        "500",
+        "1000",
+        "2000"
+      ],
+      "sim.block_size": [
+        "50",
+        "200",
+        "500"
+      ]
+    },
+    "cases": [
+      {
+        "parameters": {}
+      }
+    ]
+  }
+}

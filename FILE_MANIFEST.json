@@ -6,8 +6,8 @@
   },
   {
     "path": ".gitignore",
-    "bytes": 111,
-    "sha256": "8f3a327b637ffcf310df5e9bc83aa87abc92cc3b55afa536e4d17e67dc2a4d1e"
+    "bytes": 131,
+    "sha256": "d0031678b08c09f7005995c495aa49722a830dde40e35e99d28e617d24948632"
   },
   {
     "path": "CONTRIBUTING.md",
@@ -31,18 +31,18 @@
   },
   {
     "path": "README.md",
-    "bytes": 10499,
-    "sha256": "a4bbeb6a279db8bb7ae14b96e957c902113bc0de0098a03956aa4b1d1d8c85e5"
+    "bytes": 2609,
+    "sha256": "bd3c2ea882271dceffc0cdae1d97fa7ec89f35f065463a508bc8611c71ef9994"
   },
   {
     "path": "TREE.txt",
-    "bytes": 6636,
-    "sha256": "467760e3523a1ac8245460c5227fced2153f7e2ac520266390a58ba6c801e42b"
+    "bytes": 7305,
+    "sha256": "add9571119613d7de4c0f7061e0b97e145f7c0b1f6b287fe01e96aed51e67a2e"
   },
   {
     "path": "VALIDATION.md",
-    "bytes": 23218,
-    "sha256": "236aa5648d10121ef35009f2c57d7bc11269781a9cc1eba39b4611ff3b200d17"
+    "bytes": 1120,
+    "sha256": "0654607ba78fe88f84f719ee44925fc3477d699a616984e9d01e0e93ce118783"
   },
   {
     "path": "benchmarks/Cargo.toml",
@@ -51,8 +51,8 @@
   },
   {
     "path": "benchmarks/README.md",
-    "bytes": 9043,
-    "sha256": "0b9b664cf942eef6bc8754fdc90a6c24201dcf16f8b3c9119d5cb9b0a1510d1c"
+    "bytes": 901,
+    "sha256": "27b58978f1c7df4f4d8332c482b4e7201f8445d7868aff73cd11f1d510d540fd"
   },
   {
     "path": "benchmarks/contracts/conflictlab/Cargo.toml",
@@ -61,8 +61,8 @@
   },
   {
     "path": "benchmarks/contracts/conflictlab/src/lib.rs",
-    "bytes": 17528,
-    "sha256": "e1298401be83b55134f8e91ee4c79b0d8e85dfb8c169d359897e13e45e23bcb2"
+    "bytes": 20531,
+    "sha256": "51b77f14329b111ce013e2469983cfd20fb35187e687598dc8a22fff0846ebba"
   },
   {
     "path": "benchmarks/contracts/miniwarehouse/Cargo.toml",
@@ -76,8 +76,8 @@
   },
   {
     "path": "benchmarks/symbolic/conflictlab.symbolic.json",
-    "bytes": 30875,
-    "sha256": "c9ef53ebc610334baab4d4408f3d929843deff6488681c046fc95d3d2af585c8"
+    "bytes": 31027,
+    "sha256": "ea68be7f205559a65ff608fe749efe000afce189fdc3f19272f67c29f5967194"
   },
   {
     "path": "benchmarks/symbolic/miniwarehouse.symbolic.json",
@@ -321,18 +321,18 @@
   },
   {
     "path": "docs/common-benchmark-harness.md",
-    "bytes": 5114,
-    "sha256": "0a7119184669cd6ca36f8c3b723e099c25f585f205656a8aa5118e3ccd935d23"
+    "bytes": 1178,
+    "sha256": "365aed948e085cbfdf3d7ba008cb9df13dd948d80ffd591bfba5af83d97474e6"
   },
   {
     "path": "docs/implementation-status.md",
-    "bytes": 9878,
-    "sha256": "4addd5c5b1d2f74295a82d2457e0f52dd5a6aaa7cd6bfc188da596ecc70119e2"
+    "bytes": 10606,
+    "sha256": "cad4345b947de505d5fb3c0b6d479382cddd0ca6890f09dea487872aa245507a"
   },
   {
     "path": "docs/next-brick.md",
-    "bytes": 2649,
-    "sha256": "026065e58c940049d01276306c80bc1947edf968d2741c0890b530ba88fbbe75"
+    "bytes": 1012,
+    "sha256": "92660eadbd0e251be533f192745859093ab0cab440a11c26ea94cacb93d85389"
   },
   {
     "path": "docs/runtime-simulation.md",
@@ -340,19 +340,69 @@
     "sha256": "b6c3c11fc306351d8345eb91c0cefa5701b76baec6edf4ef0268a907fbb981ac"
   },
   {
+    "path": "docs/tuning-knobs.md",
+    "bytes": 5644,
+    "sha256": "120d37f0ec669565204fa9240dc486500123bc306e4674b4f3748dcdb81c2c2f"
+  },
+  {
     "path": "evaluation/README.md",
-    "bytes": 2894,
-    "sha256": "95efb455689c9989bb91a54e6fc326e54265c847e4341c4bfcb06c4832528415"
+    "bytes": 1684,
+    "sha256": "ebf509058babb3ad71beb836d62b0436a8398e9c5bc266e4275dde35a245e86e"
   },
   {
     "path": "evaluation/conflictlab-harness-smoke.json",
-    "bytes": 2385,
-    "sha256": "0caa25a935c09f7f1d9df672b94ee897fbd5745fc8cc49907afe19b5f01dda95"
+    "bytes": 3132,
+    "sha256": "5e569acaa8f540aafd1ea4fd6b69d9349cc40b8e5169b2a053f30ee3daf69474"
+  },
+  {
+    "path": "evaluation/conflictlab/README.md",
+    "bytes": 1768,
+    "sha256": "f6f3b0088717e7a8ce31d730d0baa32bb023c87d43079d7c692774db6b3169ca"
+  },
+  {
+    "path": "evaluation/conflictlab/block-scaling.grid.json",
+    "bytes": 3623,
+    "sha256": "617fb44495250d2cdd0c4cbd12d0b437630e1fb95f8268c91a9a9ac5f524db21"
+  },
+  {
+    "path": "evaluation/conflictlab/contention.grid.json",
+    "bytes": 1703,
+    "sha256": "2f94fbf4672a80cbdac9193a46e6164522327a0b8dbf32b2f309c2aa7fa5a5a6"
+  },
+  {
+    "path": "evaluation/conflictlab/granularity.grid.json",
+    "bytes": 2140,
+    "sha256": "f3eacb7a721bff9899689f62e354f285d5912866a1ab4d2917abb68e9b675c90"
+  },
+  {
+    "path": "evaluation/conflictlab/ingress-block.grid.json",
+    "bytes": 1391,
+    "sha256": "e580d80fc03e781ed04814ea28735af612ee06884f3fc6422a65ea88feef1d2a"
+  },
+  {
+    "path": "evaluation/conflictlab/phase-change.grid.json",
+    "bytes": 2851,
+    "sha256": "678316e2ced30174628611cdef24043eaa223d2a9d89e5fa42016b53e632ebff"
+  },
+  {
+    "path": "evaluation/conflictlab/policy-tuning.grid.json",
+    "bytes": 4156,
+    "sha256": "ebd024024361b16f78694327d971ffdd77b3aec9b32585428c0f0c9f246967c1"
+  },
+  {
+    "path": "evaluation/conflictlab/quick.grid.json",
+    "bytes": 1670,
+    "sha256": "9d4933e8234ffe0b110352aab25020855fa75687409068b845ef669a04562c00"
   },
   {
     "path": "evaluation/example-manifest.json",
-    "bytes": 1444,
-    "sha256": "b2fa00e5f37b450d6da594fe2438b62802f5a8aafd06e6dacb208777d3c5baf1"
+    "bytes": 1726,
+    "sha256": "cbaa31f17f2249c97000061610691887c8196d31d555889fcf940f3bdaff3ff7"
+  },
+  {
+    "path": "evaluation/policies/release-tuning.json",
+    "bytes": 707,
+    "sha256": "cb43184eba1aad60fc56d010993eb03adc253c7d25ed45883adbaeaf55c923d4"
   },
   {
     "path": "research/vm-lifecycle/ARCHIVE_MANIFEST.txt",
@@ -361,8 +411,8 @@
   },
   {
     "path": "research/vm-lifecycle/README.md",
-    "bytes": 4101,
-    "sha256": "63ad922839bf5affe902b322d84f13611b7264d41438d7079a63f2419cd38eed"
+    "bytes": 564,
+    "sha256": "b4979a5befb12ef92a71ed3f27446e518b1a342b13e7dccbc7fcc2d15f059652"
   },
   {
     "path": "research/vm-lifecycle/archive.zip",
@@ -376,8 +426,8 @@
   },
   {
     "path": "runtime/README.md",
-    "bytes": 12012,
-    "sha256": "33e8acc37687fe880010a590ee0d0f98a9ba4cf643c09d334c93f51e893c89a9"
+    "bytes": 1264,
+    "sha256": "0566e7371eef292f344c1a58caa7b9036212234dac835d386248a1e6a65bff44"
   },
   {
     "path": "runtime/THIRD_PARTY_NOTICES.md",
@@ -396,18 +446,18 @@
   },
   {
     "path": "runtime/crates/acg-benchmark-harness/src/conflictlab.rs",
-    "bytes": 14389,
-    "sha256": "cde7bedec03893d681c3b3c48615735a1b3e9f73d3f2b7991efeb711dc9ff0ba"
+    "bytes": 25552,
+    "sha256": "12c3d3721c524d00cbd2137ae03ce051863949eaf572213e8cfe033c8704a440"
   },
   {
     "path": "runtime/crates/acg-benchmark-harness/src/lib.rs",
-    "bytes": 27045,
-    "sha256": "43c619f91a158afea9bc5e8051d5d1fe5cc3728501afa88e33229018b0ee38aa"
+    "bytes": 27306,
+    "sha256": "27f359750ce59d8f16cc78e407e89e736e7528e5106c2189ea33e1701cf31d78"
   },
   {
     "path": "runtime/crates/acg-benchmark-harness/tests/harness.rs",
-    "bytes": 7859,
-    "sha256": "d2043de74ebe639dc24ad411403351663b0045400a6cd740a09f144b39fba994"
+    "bytes": 9691,
+    "sha256": "7248498485f62723a336799b56b19e3b9497d42f68445a916c356bf4c56fdf43"
   },
   {
     "path": "runtime/crates/acg-cosmwasm-adapter/Cargo.toml",
@@ -506,8 +556,8 @@
   },
   {
     "path": "runtime/crates/acg-cosmwasm-engine/testdata/README.md",
-    "bytes": 408,
-    "sha256": "0fe0feda4e3955e298e924e044856f53e61820b32fbcabefb87d521450a51f98"
+    "bytes": 297,
+    "sha256": "56181c212fb74797807bcb5f0d2a256c846e3a1288b3502c0f23a21f2e3fbce9"
   },
   {
     "path": "runtime/crates/acg-cosmwasm-engine/testdata/hackatom_1.2.wasm.b64",
@@ -666,8 +716,8 @@
   },
   {
     "path": "runtime/crates/acg-validator-sim/src/block.rs",
-    "bytes": 4236,
-    "sha256": "b0f61e5d89b91803da9e866a97f0e2d1276ce3dcc863ad9eea0cc8f12d70117b"
+    "bytes": 6175,
+    "sha256": "5406adf3ef16f19e34ce3dc10412b974dcb2ab8a27469dda0d54ccf40ab8354b"
   },
   {
     "path": "runtime/crates/acg-validator-sim/src/executor.rs",
@@ -681,8 +731,8 @@
   },
   {
     "path": "runtime/crates/acg-validator-sim/src/lib.rs",
-    "bytes": 1357,
-    "sha256": "2ab3573902467389ada653e074fd0abde383983b6976b25ea87102a3ba332919"
+    "bytes": 1415,
+    "sha256": "8f249add9defefdaa79e7fe5adcb8fd0a86cbb10aafe812b87ffeb8e99cb26d6"
   },
   {
     "path": "runtime/crates/acg-validator-sim/src/mempool.rs",
@@ -701,8 +751,8 @@
   },
   {
     "path": "runtime/crates/acg-validator-sim/tests/runtime_flow.rs",
-    "bytes": 12969,
-    "sha256": "1db771bafdb2c694e5fa2d375ffb738d37d2c3657f88b84e138c6b024f2b80bb"
+    "bytes": 14115,
+    "sha256": "232fb7464126e9a04e7e73d3473092d6a1131b6d0ddd293cf99ce0ced6cf996e"
   },
   {
     "path": "runtime/crates/acg-validator-sim/tests/speculative_parallel.rs",
@@ -718,6 +768,16 @@
     "path": "rustfmt.toml",
     "bytes": 90,
     "sha256": "04b020c0e54facf5a64d41919e9241b06748c67f9ca4c33a1f196c4d94fd8c35"
+  },
+  {
+    "path": "scripts/aggregate-experiment.py",
+    "bytes": 7672,
+    "sha256": "b46f77dad6235bb2b3922e68afc9272311cccefafe3d611fe70e5d6fc8e5eea9"
+  },
+  {
+    "path": "scripts/generate-manifest-matrix.py",
+    "bytes": 4660,
+    "sha256": "f044dca40861e0eb9f8cd2d1d9c1ec0108f5a440cc4e27fcbae089a6e7aade1c"
   },
   {
     "path": "scripts/run-benchmark-manifest.sh",
@@ -750,6 +810,21 @@
     "sha256": "f9352e4c3d1728a99b4344cbe8b19ea5bc6ebe1a1cfc81bbf0aa95cf3126aa02"
   },
   {
+    "path": "scripts/run-conflictlab-release-matrix.sh",
+    "bytes": 1347,
+    "sha256": "d6d40f39cc8c0bc64d74a0cf68cd44323a8ec34764ad0b4bd7945b484a1ecb2a"
+  },
+  {
+    "path": "scripts/run-conflictlab-release-suite.sh",
+    "bytes": 2609,
+    "sha256": "cf614d997fb263ab9b320f8367bb8f04afd58a2e39ac1112bf08c90a4841c31c"
+  },
+  {
+    "path": "scripts/run-evaluation-tools-tests.sh",
+    "bytes": 184,
+    "sha256": "9c78ff12098ea0f223283540230a5bce0f9f017299c61080a239a9257e5c92d8"
+  },
+  {
     "path": "scripts/run-miniwarehouse-5c7-mvcc-diagnostics.sh",
     "bytes": 3592,
     "sha256": "35205d4fd45909c2afd7826d190cddd2172d7cf65ffc36a1ac32b8f9166a3177"
@@ -758,6 +833,11 @@
     "path": "scripts/run-miniwarehouse-5c7-sweep.sh",
     "bytes": 4702,
     "sha256": "990661fb1750472f108e2c9bbf8996f22cb6809bdae5324d337103781c2fc4df"
+  },
+  {
+    "path": "scripts/tests/test_evaluation_tools.py",
+    "bytes": 6040,
+    "sha256": "af9ebc13024bb69115b15ce75f178e63abcae13bb11980a92d829cfb87c23fbe"
   },
   {
     "path": "scripts/validate-experiment-records.sh",

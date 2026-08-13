@@ -14,7 +14,7 @@ mod scheduler;
 
 pub use crate::block::{
     BlockProducer, BlockProducerConfig, BlockProducerError, BlockSelectionPolicy,
-    FifoSelectionPolicy, ProducedBlock,
+    FifoSelectionPolicy, ProducedBlock, ReverseFifoSelectionPolicy, SeededShuffleSelectionPolicy,
 };
 pub use crate::executor::{
     BlockExecutionError, BlockExecutionReport, BlockExecutor, ReconciliationTransactionDiagnostic,
