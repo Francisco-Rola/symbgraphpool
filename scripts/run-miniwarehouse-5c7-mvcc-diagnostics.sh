@@ -5,8 +5,16 @@ WAREHOUSES="${ACG_MW_WAREHOUSES:-16}"
 BLOCK_SIZE="${ACG_MW_BLOCK_SIZE:-200}"
 TOTAL_TXS="${ACG_MW_TOTAL_TXS:-1000}"
 REPEATS="${ACG_MW_DIAG_REPEATS:-1}"
-WORKERS_LIST="${ACG_MW_DIAG_WORKERS:-1 2 4 8}"
+PHYSICAL_CORES="${ACG_PHYSICAL_CORES:-6}"
+WORKERS_LIST="${ACG_MW_DIAG_WORKERS:-1 2 4 6}"
 SOFTEN_AFTER="${ACG_MW_SYMBOLIC_HARD_SOFTEN_AFTER:-8}"
+
+for workers_requested in $WORKERS_LIST; do
+  if (( workers_requested > PHYSICAL_CORES )); then
+    echo "refusing worker count $workers_requested: physical-core budget is $PHYSICAL_CORES" >&2
+    exit 2
+  fi
+done
 BLOCK_INTERVAL_MS="${ACG_MW_BLOCK_INTERVAL_MS:-700}"
 CONSENSUS_MS="${ACG_MW_CONSENSUS_MS:-700}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

@@ -1,42 +1,19 @@
-# Next brick: weighted candidate graph and adaptive scheduling
+# Next implementation work after Brick 5C.7
 
-Brick 3 now translates concrete execution/validation evidence into decayed Beta statistics and
-persistent runtime-discovered fallback edges. The next work is Brick 4.
+Brick 5C.7 is the current production execution substrate: dependency-driven READY-DAG speculative execution over block-local persistent MVCC, followed by canonical receipt validation/reuse/replay.
 
-## Brick 4: weighted scheduling
+The next production work is **not** another VM pool or cache-sharding strategy. Those experiments are archived under `research/vm-lifecycle/` and are intentionally absent from the production engine.
 
-### Brick 4A policy: runtime evidence can override symbolic pruning
+## Near-term priorities
 
-Concrete execution is authoritative evidence for scheduling belief, while symbolic predicates remain
-advisory. There are two miss classes:
+1. **Brick 5F acceptance matrix** — define stable serial-equivalence, replay/reuse, and performance acceptance gates for ConflictLab, MiniWarehouse, and controlled synthetic workloads.
+2. **Brick 5E production metrics** — productize only the metrics that are useful for diagnosing exposed parallelism, observed service inflation, and scheduler realization without carrying research policy knobs into the engine API.
+3. **MiniWarehouse scan/iterator diagnosis** — if workload-specific service inflation remains significant, isolate range/iterator behavior separately from point MVCC.
+4. **Granularity-aware execution policy research** — measure whether fewer workers help very small transactions; keep any policy advisory and correctness-independent.
+5. **Brick 5D broader adaptive learning** — extend validation/replay-driven feedback once the execution/performance baseline is stable.
 
-- **topology miss:** no static profile edge exists; Brick 3 creates a persistent runtime-discovered
-  fallback edge;
-- **predicate/materialization miss:** a static profile edge exists, but the concrete candidate pair was
-  pruned and execution later proves a conflict.
+## Separate VM research branch
 
-Brick 4A persists `candidate_miss_observations` on the affected adaptive statistics. Brick 4B will use
-that history as the gate for bypassing an otherwise-false symbolic predicate. A symbolic prior or
-unrelated positive history alone must not turn every false concrete predicate into an edge. Once a
-real candidate miss has been observed, however, the symbolic predicate is no longer treated as an
-absolute proof of independence; the learned posterior may materialize the relationship subject to the
-weighted graph's normal probability threshold.
+A correct pristine VM snapshot/reset/copy-on-write mechanism remains a potentially high-value optimization. It requires state-reset semantics below the current public `cosmwasm_vm::Instance` abstraction and must not enter production until adversarial isolation tests cover memory, mutable globals, tables, gas, memory growth, traps/out-of-gas, storage/querier rebinding, and end-to-end world-state equivalence.
 
-Brick 4A also exposes non-mutating current-epoch estimates for static and runtime-discovered edges
-and maintains profile adjacency for fallback edges so candidate construction can traverse learned
-topology without a global fallback-edge scan.
-
-1. Expose current-epoch probability/confidence estimates for static and fallback profile edges.
-2. Materialize fallback profile relationships into the candidate transaction graph.
-3. Attach compact conflict probabilities to concrete transaction edges.
-4. Define configurable hard and soft thresholds.
-5. Orient hard dependencies by predicted block order.
-6. Implement the risk-bounded wave scheduler using cumulative soft-edge risk.
-7. Keep FIFO/serial scheduling as a baseline implementation.
-8. Add deterministic ConflictLab tests for threshold boundaries and wave placement.
-9. Add MiniWarehouse tests for local/remote stock contention and workload skew.
-10. Add scheduler metrics for edge classes, wave width, estimated risk, and construction latency.
-
-Speculative parallel commit remains disabled until Brick 5 introduces isolated execution,
-canonical validation, invalidation, and selective replay. Brick 4 can therefore validate scheduling
-logic while the serial executor remains the correctness baseline.
+See [`implementation-status.md`](implementation-status.md) and [`../research/vm-lifecycle/README.md`](../research/vm-lifecycle/README.md).

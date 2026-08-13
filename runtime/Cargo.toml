@@ -48,3 +48,4 @@ uuid = { version = "=1.18.1", default-features = false }
 rayon = "=1.10.0"
 rayon-core = "=1.12.1"
 backtrace = "=0.3.74"
+libc = "=0.2.158"

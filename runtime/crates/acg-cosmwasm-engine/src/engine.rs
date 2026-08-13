@@ -611,7 +611,7 @@ impl CosmWasmEngine {
         let wasm_cache_before = self.wasm_cache_metrics();
 
         let worker_phase_started = Instant::now();
-        std::thread::scope(|scope| {
+        let worker_result: EngineResult<()> = std::thread::scope(|scope| {
             for worker_index in 0..worker_count {
                 let shared = shared.clone();
                 let versions = versions.clone();
@@ -752,7 +752,9 @@ impl CosmWasmEngine {
                     *worker_diagnostics[worker_index].lock() = diagnostics;
                 });
             }
+            Ok(())
         });
+        worker_result?;
         let worker_phase_wall = worker_phase_started.elapsed();
         let wasm_cache_after = self.wasm_cache_metrics();
 
@@ -1569,6 +1571,39 @@ struct SubmessageOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn acquire_execution_wasm_instance(
+    core: &Arc<EngineCore>,
+    checksum: &cosmwasm_std::Checksum,
+    tx: SharedTx,
+    contract: Address,
+    block: BlockContext,
+    depth: u32,
+    diagnostics: &Option<Arc<ExecutionHotPathDiagnostics>>,
+) -> EngineResult<cosmwasm_vm::Instance<EngineApi, EngineStorage, EngineQuerier>> {
+    let backend_started = Instant::now();
+    let backend = Backend {
+        api: EngineApi,
+        storage: EngineStorage::new(contract.clone(), depth, tx.clone()),
+        querier: EngineQuerier::new(core.clone(), tx, contract, block, depth),
+    };
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.record_backend_construction(backend_started.elapsed());
+    }
+    let acquire_started = Instant::now();
+    let instance = core.wasm_cache.get_instance(
+        checksum,
+        backend,
+        InstanceOptions {
+            gas_limit: core.config.gas_limit,
+        },
+    );
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.record_wasm_instance_acquire(acquire_started.elapsed());
+    }
+    instance
+}
+
+#[allow(clippy::too_many_arguments)]
 fn invoke_contract(
     core: Arc<EngineCore>,
     tx: SharedTx,
@@ -1582,7 +1617,8 @@ fn invoke_contract(
 ) -> EngineResult<Response<Empty>> {
     ensure_depth(&core, depth)?;
     let code_id = code_id_of(&tx, &contract)?;
-    let artifact = core.code(code_id)?.artifact;
+    let code = core.code(code_id)?;
+    let artifact = code.artifact;
     let env = make_env(&block, &contract);
     let diagnostics = tx.lock().diagnostics();
 
@@ -1614,27 +1650,15 @@ fn invoke_contract(
             result.map_err(EngineError::Native)
         }
         CodeArtifact::Wasm(checksum) => {
-            let backend_started = Instant::now();
-            let backend = Backend {
-                api: EngineApi,
-                storage: EngineStorage::new(contract.clone(), depth, tx.clone()),
-                querier: EngineQuerier::new(core.clone(), tx, contract, block, depth),
-            };
-            if let Some(diagnostics) = &diagnostics {
-                diagnostics.record_backend_construction(backend_started.elapsed());
-            }
-            let acquire_started = Instant::now();
-            let instance = core.wasm_cache.get_instance(
+            let mut instance = acquire_execution_wasm_instance(
+                &core,
                 &checksum,
-                backend,
-                InstanceOptions {
-                    gas_limit: core.config.gas_limit,
-                },
-            );
-            if let Some(diagnostics) = &diagnostics {
-                diagnostics.record_wasm_instance_acquire(acquire_started.elapsed());
-            }
-            let mut instance = instance?;
+                tx,
+                contract,
+                block,
+                depth,
+                &diagnostics,
+            )?;
             let info = MessageInfo {
                 sender: Addr::unchecked(caller.as_str()),
                 funds,
@@ -1672,7 +1696,8 @@ fn invoke_reply(
 ) -> EngineResult<Response<Empty>> {
     ensure_depth(&core, depth)?;
     let code_id = code_id_of(&tx, &contract)?;
-    let artifact = core.code(code_id)?.artifact;
+    let code = core.code(code_id)?;
+    let artifact = code.artifact;
     let env = make_env(&block, &contract);
     let diagnostics = tx.lock().diagnostics();
     match artifact {
@@ -1691,27 +1716,15 @@ fn invoke_reply(
                 .map_err(EngineError::Native)
         }
         CodeArtifact::Wasm(checksum) => {
-            let backend_started = Instant::now();
-            let backend = Backend {
-                api: EngineApi,
-                storage: EngineStorage::new(contract.clone(), depth, tx.clone()),
-                querier: EngineQuerier::new(core.clone(), tx, contract, block, depth),
-            };
-            if let Some(diagnostics) = &diagnostics {
-                diagnostics.record_backend_construction(backend_started.elapsed());
-            }
-            let acquire_started = Instant::now();
-            let instance = core.wasm_cache.get_instance(
+            let mut instance = acquire_execution_wasm_instance(
+                &core,
                 &checksum,
-                backend,
-                InstanceOptions {
-                    gas_limit: core.config.gas_limit,
-                },
-            );
-            if let Some(diagnostics) = &diagnostics {
-                diagnostics.record_wasm_instance_acquire(acquire_started.elapsed());
-            }
-            let mut instance = instance?;
+                tx,
+                contract,
+                block,
+                depth,
+                &diagnostics,
+            )?;
             let entrypoint_started = Instant::now();
             let result = call_reply(&mut instance, &env, &reply).map_err(EngineError::from);
             if let Some(diagnostics) = &diagnostics {
@@ -1741,7 +1754,8 @@ pub(crate) fn query_contract_shared(
     let trace_start = checkpoint.accesses.len();
     let dependency_start = checkpoint.read_dependencies.len();
     let code_id = code_id_of(&tx, &contract)?;
-    let artifact = core.code(code_id)?.artifact;
+    let code = core.code(code_id)?;
+    let artifact = code.artifact;
     let env = make_env(&block, &contract);
     let diagnostics = tx.lock().diagnostics();
 
@@ -1760,27 +1774,15 @@ pub(crate) fn query_contract_shared(
                 .map_err(EngineError::Native)
         }
         CodeArtifact::Wasm(checksum) => {
-            let backend_started = Instant::now();
-            let backend = Backend {
-                api: EngineApi,
-                storage: EngineStorage::new(contract.clone(), depth, tx.clone()),
-                querier: EngineQuerier::new(core.clone(), tx.clone(), contract, block, depth),
-            };
-            if let Some(diagnostics) = &diagnostics {
-                diagnostics.record_backend_construction(backend_started.elapsed());
-            }
-            let acquire_started = Instant::now();
-            let instance = core.wasm_cache.get_instance(
+            let mut instance = acquire_execution_wasm_instance(
+                &core,
                 &checksum,
-                backend,
-                InstanceOptions {
-                    gas_limit: core.config.gas_limit,
-                },
-            );
-            if let Some(diagnostics) = &diagnostics {
-                diagnostics.record_wasm_instance_acquire(acquire_started.elapsed());
-            }
-            let mut instance = instance?;
+                tx.clone(),
+                contract,
+                block,
+                depth,
+                &diagnostics,
+            )?;
             let entrypoint_started = Instant::now();
             let result = call_query(&mut instance, &env, &msg).map_err(EngineError::from);
             if let Some(diagnostics) = &diagnostics {

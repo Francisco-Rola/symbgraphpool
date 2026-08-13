@@ -13,11 +13,19 @@ TOTAL_TXS="${ACG_MW_TOTAL_TXS:-1000}"
 BLOCK_INTERVAL_MS="${ACG_MW_BLOCK_INTERVAL_MS:-700}"
 CONSENSUS_MS="${ACG_MW_CONSENSUS_MS:-700}"
 BLOCK_SIZES="${ACG_MW_SWEEP_BLOCK_SIZES:-25 50 100 200}"
-WORKERS="${ACG_MW_SWEEP_WORKERS:-1 2 4 8}"
+PHYSICAL_CORES="${ACG_PHYSICAL_CORES:-6}"
+WORKERS="${ACG_MW_SWEEP_WORKERS:-1 2 4 6}"
 SEED="${ACG_MW_SEED:-42}"
 SYMBOLIC_HARD_SOFTEN_AFTER="${ACG_MW_SYMBOLIC_HARD_SOFTEN_AFTER:-8}"
 
 RESULTS_ROOT="${ACG_MW_RESULTS_DIR:-$ROOT_DIR/benchmark-results/miniwarehouse-5c7}"
+
+for workers_requested in $WORKERS; do
+  if (( workers_requested > PHYSICAL_CORES )); then
+    echo "refusing worker count $workers_requested: physical-core budget is $PHYSICAL_CORES" >&2
+    exit 2
+  fi
+done
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RESULTS_DIR="$RESULTS_ROOT/$RUN_ID"
 mkdir -p "$RESULTS_DIR"

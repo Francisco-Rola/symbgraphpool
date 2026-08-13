@@ -9,8 +9,9 @@ use acg_core::{ContractCodeHash, RuntimeId};
 use acg_cosmwasm_adapter::{CosmWasmAdapterConfig, CosmWasmCandidateAdapter};
 use acg_cosmwasm_engine::{
     Address, BlockContext, CanonicalTxDisposition, CosmWasmEngine,
-    DependencyPreexecutionDiagnostics, ExecutionOutcome, ExecutionRequest, ParallelExecutionConfig,
-    PreparedSpeculativeBlock, StateWriteSet, TransactionId, ValidationConflict,
+    DependencyPreexecutionDiagnostics, EngineConfig, ExecutionOutcome, ExecutionRequest,
+    ParallelExecutionConfig, PreparedSpeculativeBlock, StateWriteSet, TransactionId,
+    ValidationConflict,
 };
 use acg_feedback::AdaptiveFeedbackConfig;
 use acg_miniwarehouse_workload::{
@@ -54,20 +55,34 @@ fn miniwarehouse_wasm_path() -> PathBuf {
         .unwrap_or_else(|| repository_root().join(DEFAULT_WASM_RELATIVE_PATH))
 }
 
-fn load_miniwarehouse_wasm() -> (PathBuf, Vec<u8>) {
+fn load_miniwarehouse_wasm() -> Option<(PathBuf, Vec<u8>)> {
+    let explicit_path = env::var_os("ACG_MW_WASM").is_some();
     let path = miniwarehouse_wasm_path();
-    let bytes = fs::read(&path).unwrap_or_else(|error| {
-        panic!(
-            "failed to read MiniWarehouse Wasm at {}: {error}; build it with `cargo build --manifest-path benchmarks/Cargo.toml -p acg-benchmark-miniwarehouse --release --target wasm32-unknown-unknown` or set ACG_MW_WASM",
-            path.display()
-        )
-    });
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if !explicit_path && error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "skipping MiniWarehouse parallelism metrics: Wasm artifact not found at {}; \
+                 build it with `cargo build --manifest-path benchmarks/Cargo.toml \
+                 -p acg-benchmark-miniwarehouse --release --target wasm32-unknown-unknown` \
+                 or set ACG_MW_WASM",
+                path.display()
+            );
+            return None;
+        }
+        Err(error) => {
+            panic!(
+                "failed to read MiniWarehouse Wasm at {}: {error}; build it with `cargo build --manifest-path benchmarks/Cargo.toml -p acg-benchmark-miniwarehouse --release --target wasm32-unknown-unknown` or set ACG_MW_WASM",
+                path.display()
+            )
+        }
+    };
     assert!(!bytes.is_empty(), "MiniWarehouse Wasm artifact is empty");
-    (path, bytes)
+    Some((path, bytes))
 }
 
 fn setup_engine(wasm: &[u8]) -> (CosmWasmEngine, Address, ContractCodeHash) {
-    let engine = CosmWasmEngine::default();
+    let engine = CosmWasmEngine::new(EngineConfig::default());
     let code_id = engine.upload_wasm(wasm.to_vec()).unwrap();
     let checksum = engine.code_metadata(code_id).unwrap().checksum;
     let instantiate_msg = Binary::from(br#"{"admin":null}"#.to_vec());
@@ -116,6 +131,10 @@ struct MeasurementConfig {
 }
 
 impl MeasurementConfig {
+    fn effective_preexecution_workers(&self) -> usize {
+        self.preexecution_workers
+    }
+
     fn from_env() -> Self {
         let total_transactions = env_usize_alias("ACG_MW_TOTAL_TXS", "ACG_MW_TXS", 1_000);
         let block_size = env_usize("ACG_MW_BLOCK_SIZE", 50);
@@ -133,7 +152,7 @@ impl MeasurementConfig {
         );
 
         let default_workers = std::thread::available_parallelism()
-            .map(|count| count.get().min(8))
+            .map(|count| count.get().min(6))
             .unwrap_or(1);
         let total_workers =
             env_usize_alias("ACG_MW_TOTAL_WORKERS", "ACG_MW_WORKERS", default_workers);
@@ -1489,7 +1508,9 @@ fn print_ranked_counts(title: &str, counts: &BTreeMap<String, u64>, limit: usize
 #[test]
 fn miniwarehouse_prints_expected_vs_realized_parallelism() {
     let measurement = MeasurementConfig::from_env();
-    let (wasm_path, wasm) = load_miniwarehouse_wasm();
+    let Some((wasm_path, wasm)) = load_miniwarehouse_wasm() else {
+        return;
+    };
     let (serial_engine, serial_contract, code_hash) = setup_engine(&wasm);
     let (adaptive_engine, adaptive_contract, adaptive_code_hash) = setup_engine(&wasm);
     assert_eq!(serial_contract, adaptive_contract);
@@ -1588,7 +1609,7 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
         totals.theoretical_ideal += ideal_cost_time(
             &serial_tx_costs[index],
             &prepared_current.plan.speculative_execution_plan,
-            measurement.preexecution_workers,
+            measurement.effective_preexecution_workers(),
         );
         add_planning(&mut totals.planning, prepared_current.planning);
         totals.preexecution += prepared_current.preexecution;
@@ -1907,16 +1928,17 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
             .as_secs_f64()
             / totals.serial_transaction_work.as_secs_f64()
     };
-    let effective_contract_concurrency = if dependency_diagnostics.worker_phase_wall.is_zero() {
+    let execution_phase_wall = dependency_diagnostics.worker_phase_wall;
+    let effective_contract_concurrency = if execution_phase_wall.is_zero() {
         0.0
     } else {
         dependency_diagnostics
             .aggregate_contract_execution
             .as_secs_f64()
-            / dependency_diagnostics.worker_phase_wall.as_secs_f64()
+            / execution_phase_wall.as_secs_f64()
     };
-    let worker_capacity = dependency_diagnostics.worker_phase_wall.as_secs_f64()
-        * measurement.preexecution_workers as f64;
+    let execution_threads = measurement.preexecution_workers;
+    let worker_capacity = execution_phase_wall.as_secs_f64() * execution_threads as f64;
     let aggregate_worker_busy = dependency_diagnostics
         .aggregate_worker_stage_time()
         .saturating_sub(dependency_diagnostics.aggregate_ready_wait);
@@ -2023,8 +2045,12 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
     );
     println!("post-consensus validation:     1 worker (serial)");
     println!(
-        "post-commit preexec workers:   {}",
+        "post-commit worker budget:     {}",
         measurement.preexecution_workers
+    );
+    println!(
+        "post-commit execution workers:  {}",
+        measurement.effective_preexecution_workers()
     );
     println!("dependency executor:           READY-DAG / block-local MVCC");
     println!(
@@ -2315,6 +2341,10 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
     println!(
         "  worker phase wall:           {:>10.3} ms",
         dependency_diagnostics.worker_phase_wall.as_secs_f64() * 1e3
+    );
+    println!(
+        "  execution phase wall excl fill:{:>8.3} ms",
+        execution_phase_wall.as_secs_f64() * 1e3
     );
     println!(
         "  aggregate ready/lock wait:   {:>10.3} ms",

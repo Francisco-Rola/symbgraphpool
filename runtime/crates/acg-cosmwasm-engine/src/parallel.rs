@@ -5,10 +5,10 @@ use crate::types::TransactionId;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-/// Bounded worker configuration for dependency-driven speculative execution.
+/// Bounded thread configuration for dependency-driven speculative execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParallelExecutionConfig {
-    /// Maximum number of speculative transactions executing concurrently.
+    /// Total speculative worker-thread budget.
     pub workers: usize,
 }
 

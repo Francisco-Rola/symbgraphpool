@@ -6,6 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+# Requires a locally patched cosmwasm-vm/Wasmer memory-tunables backend. The default build never
+# depends on this research integration point.
+snapshot-cow-native = []
+
 [dependencies]
 backtrace.workspace = true
 base64ct.workspace = true
@@ -14,6 +20,7 @@ cosmwasm-std.workspace = true
 cosmwasm-vm.workspace = true
 hex.workspace = true
 indexmap.workspace = true
+libc.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true
 rayon-core.workspace = true

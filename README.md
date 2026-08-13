@@ -163,3 +163,8 @@ dense `ProfileId` reassignment. See [`docs/brick-3.md`](docs/brick-3.md).
 
 Before publishing, replace the placeholder repository URL, select project governance, add a code
 of conduct, and document the analyzer JSON compatibility policy.
+
+## Implementation checkpoint and research archives
+
+Current production/research status is summarized in [`docs/implementation-status.md`](docs/implementation-status.md).
+VM-pool, adaptive-preparation, acquisition-throttling, unsafe-retained-instance, and fresh-cache-shard experiments are intentionally excluded from the production engine and preserved under [`research/vm-lifecycle/`](research/vm-lifecycle/README.md).
