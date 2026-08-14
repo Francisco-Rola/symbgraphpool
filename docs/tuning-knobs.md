@@ -96,32 +96,30 @@ Prediction-quality modes are controlled experiments, not claims about analyzer e
   payload marker inside Wasm. This deliberately creates candidate misses so runtime fallback/replay
   learning can be evaluated.
 
-For forced-speculation experiments, `acg.hard_threshold=0.95` and a larger risk budget are used to
-allow unresolved candidate relationships to overlap initially. These settings are calibration tools,
-not recommended production defaults.
+For the coarse policy experiment, `acg.hard_threshold=0.95` is paired with a risk-budget sweep
+(`0.50`, `0.75`, `0.90`). The sweep is deliberately below the previous `1.0` forced-speculation
+setting so learned probability/cost classifications can change actual waves and dependencies instead
+of every run collapsing to one fully speculative wave. These settings are calibration tools, not
+recommended production defaults.
 
 ## Control-plane / evaluation metrics
 
-ExperimentRecord schema v2 keeps the original metrics and adds:
+ExperimentRecord schema v3 keeps the schema-v2 control-plane metrics and additionally records:
 
-- `scheduling.pre_reduction_dependencies`: dependencies before exact hard-DAG transitive reduction;
-- `scheduling.scheduled_dependencies`: dependencies actually handed to READY-DAG;
-- `scheduling.edges_elided_by_reduction`: exact reachability-preserving hard edges removed;
-- `feedback.observation_batches_applied`: learned profile relationships mutated after batching;
-- `feedback.serialization_cost_batches_applied`: serialization-cost relationships mutated;
-- `parallelism.observed_service_work_nanos`: aggregate observed speculative service work;
-- `parallelism.worker_capacity_bound_nanos`: aggregate service divided by worker count;
-- `parallelism.parallel_lower_bound_nanos`: max(observed critical path, worker-capacity bound);
-- `parallelism.scheduler_realization_corrected_milli`: actual READY-DAG wall divided by that feasible
-  lower bound.
+- all schema-v2 dependency-reduction, feedback-batching, and finite-worker lower-bound fields;
+- `pipeline_timing.planning_nanos`, `preexecution_nanos`, and both feedback/reconciliation stages;
+- `pipeline_timing.total_adaptive_block_nanos`: measured wall from planning start through completion
+  of post-consensus feedback;
+- `pipeline_timing.serial_reference_execution_nanos` and `end_to_end_speedup_milli`: comparison of
+  the full adaptive measured-block wall against the deterministic serial execution baseline.
 
-The legacy DAG-only scheduler-realization field remains in schema v2 for comparison with older data.
-Raw feedback observation counts are preserved even though updates are batched. Probability/replay
-observations are aggregated once per persisted learned relationship and epoch within each feedback
-phase; pre-execution and post-consensus phases remain separate because the split-phase pipeline can
-consume pre-execution evidence before reconciliation completes. The persisted learner is currently
-profile-edge/runtime-pair scoped, so this optimization does not invent a new clause-specific
-posterior/checkpoint format.
+The legacy DAG-only scheduler-realization field remains for comparison with older data. Raw feedback
+observation counts are preserved, but production runtime collection now aggregates directly at the
+persisted profile-edge/runtime-pair boundary instead of allocating one `ConflictObservation` per
+transaction pair and collapsing it later. Pre-execution and post-consensus phases remain separate
+because the split-phase pipeline can consume pre-execution evidence before reconciliation completes.
+The persisted learner remains profile-edge/runtime-pair scoped; this optimization does not invent a
+new clause-specific posterior/checkpoint format.
 
 ## Lower-level engine knobs
 

@@ -444,6 +444,226 @@ fn collector_emits_positive_and_explicit_negative_evidence_for_candidate_edges()
 }
 
 #[test]
+fn aggregated_collector_matches_pairwise_candidate_feedback() {
+    let graph = profile_graph();
+    let candidate = candidate_graph(
+        &graph,
+        vec![
+            candidate_tx(&graph, 1, "execute::Credit", json!({"account":"alice"})),
+            candidate_tx(&graph, 2, "execute::Credit", json!({"account":"alice"})),
+            candidate_tx(&graph, 3, "execute::Credit", json!({"account":"alice"})),
+        ],
+    );
+    assert_eq!(candidate.edges().len(), 3);
+    let report = report(vec![
+        successful_execution(
+            0,
+            1,
+            vec![access(
+                1,
+                "contract-a",
+                AccessKind::StorageWrite,
+                b"shared",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            1,
+            2,
+            vec![access(
+                2,
+                "contract-a",
+                AccessKind::StorageRead,
+                b"shared",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            2,
+            3,
+            vec![access(
+                3,
+                "contract-a",
+                AccessKind::StorageRead,
+                b"independent",
+                None,
+                false,
+            )],
+        ),
+    ]);
+    let mut pairwise_store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let mut aggregate_store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let collector = collector();
+
+    let pairwise = collector
+        .collect_block(&graph, &candidate, &report, &pairwise_store, 7)
+        .unwrap();
+    let aggregated = collector
+        .collect_block_aggregated(&graph, &candidate, &report, &aggregate_store, 7)
+        .unwrap();
+    assert_eq!(pairwise.len(), 3);
+    assert_eq!(aggregated.raw_observations(), 3);
+
+    let pairwise_summary = pairwise_store
+        .apply_batch(&graph, pairwise, &AdaptiveFeedbackConfig::default())
+        .unwrap();
+    let aggregate_summary = aggregate_store
+        .apply_aggregated_batch(&graph, aggregated, &AdaptiveFeedbackConfig::default())
+        .unwrap();
+    assert_eq!(pairwise_summary, aggregate_summary);
+    assert_eq!(
+        pairwise_store.checkpoint(&graph).unwrap(),
+        aggregate_store.checkpoint(&graph).unwrap()
+    );
+}
+
+#[test]
+fn aggregated_collector_matches_pairwise_fallback_negative_cardinality() {
+    let graph = profile_graph();
+    let seed_candidate = candidate_graph(
+        &graph,
+        vec![
+            candidate_tx(&graph, 1, "execute::Credit", json!({"account":"alice"})),
+            candidate_tx(
+                &graph,
+                2,
+                "execute::IncrementCounter",
+                json!({"shard_id":1}),
+            ),
+        ],
+    );
+    let mut seed_store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let overlap = report(vec![
+        successful_execution(
+            0,
+            1,
+            vec![access(
+                1,
+                "contract-a",
+                AccessKind::StorageWrite,
+                b"fallback-seed",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            1,
+            2,
+            vec![access(
+                2,
+                "contract-a",
+                AccessKind::StorageRead,
+                b"fallback-seed",
+                None,
+                false,
+            )],
+        ),
+    ]);
+    let seed = collector()
+        .collect_block(&graph, &seed_candidate, &overlap, &seed_store, 1)
+        .unwrap();
+    seed_store
+        .apply_batch(&graph, seed, &AdaptiveFeedbackConfig::default())
+        .unwrap();
+    let checkpoint = seed_store.checkpoint(&graph).unwrap();
+
+    let candidate = candidate_graph(
+        &graph,
+        vec![
+            candidate_tx(&graph, 10, "execute::Credit", json!({"account":"alice"})),
+            candidate_tx(&graph, 11, "execute::Credit", json!({"account":"bob"})),
+            candidate_tx(
+                &graph,
+                12,
+                "execute::IncrementCounter",
+                json!({"shard_id":1}),
+            ),
+            candidate_tx(
+                &graph,
+                13,
+                "execute::IncrementCounter",
+                json!({"shard_id":2}),
+            ),
+        ],
+    );
+    let independent = report(vec![
+        successful_execution(
+            0,
+            10,
+            vec![access(
+                10,
+                "contract-a",
+                AccessKind::StorageWrite,
+                b"credit-a",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            1,
+            11,
+            vec![access(
+                11,
+                "contract-a",
+                AccessKind::StorageWrite,
+                b"credit-b",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            2,
+            12,
+            vec![access(
+                12,
+                "contract-a",
+                AccessKind::StorageWrite,
+                b"counter-a",
+                None,
+                false,
+            )],
+        ),
+        successful_execution(
+            3,
+            13,
+            vec![access(
+                13,
+                "contract-a",
+                AccessKind::StorageWrite,
+                b"counter-b",
+                None,
+                false,
+            )],
+        ),
+    ]);
+    let mut pairwise_store = AdaptiveFeedbackStore::restore(&graph, checkpoint.clone(), 1).unwrap();
+    let mut aggregate_store = AdaptiveFeedbackStore::restore(&graph, checkpoint, 1).unwrap();
+    let collector = collector();
+
+    let pairwise = collector
+        .collect_block(&graph, &candidate, &independent, &pairwise_store, 2)
+        .unwrap();
+    let aggregated = collector
+        .collect_block_aggregated(&graph, &candidate, &independent, &aggregate_store, 2)
+        .unwrap();
+    assert_eq!(pairwise.len(), aggregated.raw_observations());
+
+    let pairwise_summary = pairwise_store
+        .apply_batch(&graph, pairwise, &AdaptiveFeedbackConfig::default())
+        .unwrap();
+    let aggregate_summary = aggregate_store
+        .apply_aggregated_batch(&graph, aggregated, &AdaptiveFeedbackConfig::default())
+        .unwrap();
+    assert_eq!(pairwise_summary, aggregate_summary);
+    assert_eq!(
+        pairwise_store.checkpoint(&graph).unwrap(),
+        aggregate_store.checkpoint(&graph).unwrap()
+    );
+}
+
+#[test]
 fn unrelated_successful_transactions_without_overlap_are_not_negative_evidence() {
     let graph = profile_graph();
     let candidate = candidate_graph(

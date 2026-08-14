@@ -24,6 +24,12 @@ METRICS = {
     "scheduler_realization": ("parallelism.scheduler_realization_corrected_milli", 1e-3),
     "planning_ms": ("planning.total_nanos", 1e-6),
     "feedback_ms": ("feedback_timing.total_nanos", 1e-6),
+    "pipeline_total_ms": ("pipeline_timing.total_adaptive_block_nanos", 1e-6),
+    "pipeline_planning_ms": ("pipeline_timing.planning_nanos", 1e-6),
+    "pipeline_preexecution_ms": ("pipeline_timing.preexecution_nanos", 1e-6),
+    "pipeline_reconciliation_ms": ("pipeline_timing.reconciliation_nanos", 1e-6),
+    "pipeline_speedup": ("pipeline_timing.end_to_end_speedup_milli", 1e-3),
+    "feedback_us_per_observation": ("derived.feedback_nanos_per_observation", 1e-3),
     "replay_ms": ("execution.replay_or_missing_execution_nanos", 1e-6),
     "replayed_transactions": ("execution.replayed_transactions", 1.0),
     "invalidated_results": ("execution.invalidated_results", 1.0),
@@ -33,8 +39,11 @@ METRICS = {
     "scheduled_dependencies": ("scheduling.scheduled_dependencies", 1.0),
     "edges_elided_by_reduction": ("scheduling.edges_elided_by_reduction", 1.0),
     "dependency_compression": ("derived.dependency_compression", 1.0),
+    "low_edges": ("scheduling.low_edges", 1.0),
     "soft_edges": ("scheduling.soft_edges", 1.0),
     "hard_edges": ("scheduling.hard_edges", 1.0),
+    "wave_count": ("scheduling.wave_count", 1.0),
+    "soft_dependencies": ("scheduling.soft_dependencies", 1.0),
     "hard_dependencies": ("execution.hard_dependency_count", 1.0),
     "max_in_flight": ("execution.max_in_flight", 1.0),
     "wasm_acquire_ms": ("execution.contract.aggregate_wasm_instance_acquire_nanos", 1e-6),
@@ -105,6 +114,12 @@ def derived_flat(record):
     flat["derived.feedback_batching_factor"] = (
         float(raw_feedback) / float(feedback_batches)
         if feedback_batches not in (None, 0)
+        else None
+    )
+    feedback_nanos = flat.get("feedback_timing.total_nanos")
+    flat["derived.feedback_nanos_per_observation"] = (
+        float(feedback_nanos) / float(raw_feedback)
+        if raw_feedback and feedback_nanos is not None
         else None
     )
     serialization_observations = flat.get("feedback.serialization_cost_observations")

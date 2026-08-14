@@ -105,7 +105,7 @@ def expand_grid(spec: dict, source: Path) -> dict:
     return {
         "schema_version": 1,
         "experiment_id": experiment_id,
-        "record_schema_version": int(spec.get("record_schema_version", 2)),
+        "record_schema_version": int(spec.get("record_schema_version", 3)),
         "physical_core_limit": physical_core_limit,
         "policy": policy,
         "runs": runs,

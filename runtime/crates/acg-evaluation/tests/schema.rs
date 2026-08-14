@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use acg_evaluation::{
     CorrectnessRecord, ExecutionRecord, ExperimentMetadata, ExperimentRecord, FeedbackRecord,
-    FeedbackTimingRecord, ParallelismRecord, PlanningRecord, SchedulingRecord,
-    EXPERIMENT_RECORD_SCHEMA_VERSION,
+    FeedbackTimingRecord, ParallelismRecord, PipelineTimingRecord, PlanningRecord,
+    SchedulingRecord, EXPERIMENT_RECORD_SCHEMA_VERSION,
 };
 
 fn record() -> ExperimentRecord {
@@ -69,6 +69,16 @@ fn record() -> ExperimentRecord {
             reconciliation_update_nanos: 200,
             total_nanos: 500,
         },
+        pipeline_timing: PipelineTimingRecord {
+            planning_nanos: 1_000,
+            preexecution_nanos: 5_500,
+            pre_execution_feedback_nanos: 300,
+            reconciliation_nanos: 700,
+            reconciliation_feedback_nanos: 200,
+            total_adaptive_block_nanos: 8_000,
+            serial_reference_execution_nanos: Some(10_000),
+            end_to_end_speedup_milli: Some(1_250),
+        },
         correctness: CorrectnessRecord {
             canonical_state_digest: Some("abc".to_owned()),
             serial_reference_digest: Some("abc".to_owned()),
@@ -125,10 +135,23 @@ fn experiment_record_schema_v1_remains_readable() {
         feedback.remove("observation_batches_applied");
         feedback.remove("serialization_cost_batches_applied");
     }
+    value.as_object_mut().unwrap().remove("pipeline_timing");
     let bytes = serde_json::to_vec(&value).unwrap();
     let restored = ExperimentRecord::from_json(&bytes).unwrap();
     assert_eq!(restored.schema_version, 1);
     assert_eq!(restored.scheduling.pre_reduction_dependencies, 0);
     assert_eq!(restored.parallelism.parallel_lower_bound_nanos, None);
     assert_eq!(restored.feedback.observation_batches_applied, 0);
+    assert_eq!(restored.pipeline_timing, PipelineTimingRecord::default());
+}
+
+#[test]
+fn experiment_record_schema_v2_remains_readable() {
+    let mut value = serde_json::to_value(record()).unwrap();
+    value["schema_version"] = serde_json::json!(2);
+    value.as_object_mut().unwrap().remove("pipeline_timing");
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let restored = ExperimentRecord::from_json(&bytes).unwrap();
+    assert_eq!(restored.schema_version, 2);
+    assert_eq!(restored.pipeline_timing, PipelineTimingRecord::default());
 }

@@ -1,7 +1,8 @@
 use acg_core::{ConflictKinds, ContractCodeHash, RuntimeId, TxId};
 use acg_feedback::{
-    AdaptiveFeedbackConfig, AdaptiveFeedbackStore, ConflictObservation, FeedbackCheckpoint,
-    ObservationBuffer, ObservationSource, ObservationTarget,
+    AdaptiveFeedbackConfig, AdaptiveFeedbackStore, AggregatedObservationBuffer,
+    ConflictObservation, FeedbackCheckpoint, ObservationBuffer, ObservationSource,
+    ObservationTarget,
 };
 use acg_profile_graph::{EdgeBuildConfig, GraphLoadConfig, ProfileGraph, ProfileGraphArtifact};
 use acg_symbolic_json::{normalize_document, parse_slice, IngestionContext};
@@ -146,6 +147,87 @@ fn same_relationship_observations_are_mutated_once_but_raw_counts_and_weight_are
     let decay = AdaptiveFeedbackConfig::default().retention_factor;
     assert!((after.alpha - (before.alpha * decay + 150.0)).abs() < 1e-9);
     assert!((after.beta - (before.beta * decay + 75.0)).abs() < 1e-9);
+}
+
+#[test]
+fn upstream_aggregate_matches_pairwise_observation_application() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let config = AdaptiveFeedbackConfig::default();
+    let mut pairwise_store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let mut aggregate_store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let mut pairwise = ObservationBuffer::default();
+    let mut aggregate = AggregatedObservationBuffer::default();
+
+    for index in 0..40_u64 {
+        let candidate_present = index != 0;
+        pairwise.push(
+            ConflictObservation::conflict(
+                credit,
+                credit,
+                TxId(index),
+                TxId(index + 100),
+                ConflictKinds::WRITE_WRITE,
+                ObservationSource::PreExecution,
+                ObservationTarget::Static { edge_index: edge },
+                2.0,
+                1,
+                candidate_present,
+            )
+            .unwrap(),
+        );
+        aggregate
+            .record_conflict(
+                credit,
+                credit,
+                ConflictKinds::WRITE_WRITE,
+                ObservationTarget::Static { edge_index: edge },
+                2.0,
+                1,
+                candidate_present,
+            )
+            .unwrap();
+    }
+    for index in 40..100_u64 {
+        pairwise.push(
+            ConflictObservation::independent(
+                credit,
+                credit,
+                TxId(index),
+                TxId(index + 100),
+                ObservationSource::PreExecution,
+                ObservationTarget::Static { edge_index: edge },
+                3.0,
+                1,
+                true,
+            )
+            .unwrap(),
+        );
+    }
+    aggregate
+        .record_independent_count(
+            credit,
+            credit,
+            ObservationTarget::Static { edge_index: edge },
+            3.0,
+            1,
+            60,
+        )
+        .unwrap();
+
+    let pairwise_summary = pairwise_store
+        .apply_batch(&graph, pairwise, &config)
+        .unwrap();
+    let aggregate_summary = aggregate_store
+        .apply_aggregated_batch(&graph, aggregate, &config)
+        .unwrap();
+
+    assert_eq!(aggregate_summary, pairwise_summary);
+    assert_eq!(
+        aggregate_store.static_statistics(edge),
+        pairwise_store.static_statistics(edge)
+    );
 }
 
 #[test]

@@ -107,6 +107,7 @@ fn exact_input_keys_prune_same_profile_cartesian_pairs() {
     assert!(candidate.edge_between(TxIndex(0), TxIndex(1)).is_none());
     let edge = candidate.edge_between(TxIndex(0), TxIndex(2)).unwrap();
     assert_eq!(edge.predicate_result, PredicateResult::True);
+    assert_eq!(candidate.edge_between(TxIndex(2), TxIndex(0)), Some(edge));
     assert!(candidate.edge_between(TxIndex(1), TxIndex(2)).is_none());
 }
 

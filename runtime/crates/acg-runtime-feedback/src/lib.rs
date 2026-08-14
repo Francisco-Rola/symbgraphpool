@@ -10,11 +10,12 @@ pub use adaptive_pipeline::{
 use std::collections::{BTreeMap, BTreeSet};
 
 use acg_candidate_graph::{CandidateGraph, EdgeProvenance};
-use acg_core::{ConflictKinds, ProfileId, TxIndex};
+use acg_core::{ConflictKinds, ProfileEdgeIndex, ProfileId, TxIndex};
 use acg_cosmwasm_engine::{AccessKind, AccessRecord, Address};
 use acg_feedback::{
-    AdaptiveFeedbackConfig, AdaptiveFeedbackStore, ApplySummary, ConflictObservation,
-    FeedbackCheckpoint, FeedbackError, ObservationBuffer, ObservationSource, ObservationTarget,
+    AdaptiveFeedbackConfig, AdaptiveFeedbackStore, AggregatedObservationBuffer, ApplySummary,
+    ConflictObservation, FeedbackCheckpoint, FeedbackError, ObservationBuffer, ObservationSource,
+    ObservationTarget,
 };
 use acg_profile_graph::ProfileGraph;
 use acg_validator_sim::BlockExecutionReport;
@@ -127,6 +128,21 @@ impl AccessConflictDetector {
         &self,
         report: &BlockExecutionReport,
     ) -> Result<Vec<ObservedConflict>, RuntimeFeedbackError> {
+        Ok(self
+            .detect_map(report)?
+            .into_iter()
+            .map(|((left, right), conflict_kinds)| ObservedConflict {
+                left,
+                right,
+                conflict_kinds,
+            })
+            .collect())
+    }
+
+    fn detect_map(
+        &self,
+        report: &BlockExecutionReport,
+    ) -> Result<BTreeMap<(TxIndex, TxIndex), ConflictKinds>, RuntimeFeedbackError> {
         let mut exact = BTreeMap::<ExactLocation, Participants>::new();
         let mut scans = Vec::<ScanAccess>::new();
         let mut seen_indices = BTreeSet::<usize>::new();
@@ -213,14 +229,7 @@ impl AccessConflictDetector {
             }
         }
 
-        Ok(conflicts
-            .into_iter()
-            .map(|((left, right), conflict_kinds)| ObservedConflict {
-                left,
-                right,
-                conflict_kinds,
-            })
-            .collect())
+        Ok(conflicts)
     }
 }
 
@@ -318,6 +327,82 @@ fn canonical_tx_pair(left: TxIndex, right: TxIndex) -> (TxIndex, TxIndex) {
     } else {
         (right, left)
     }
+}
+
+fn canonical_profile_pair(left: ProfileId, right: ProfileId) -> (ProfileId, ProfileId) {
+    if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CollectorRelationship {
+    Static {
+        edge_index: ProfileEdgeIndex,
+        source: ProfileId,
+        target: ProfileId,
+    },
+    Runtime {
+        source: ProfileId,
+        target: ProfileId,
+    },
+}
+
+impl CollectorRelationship {
+    fn source_profile(self) -> ProfileId {
+        match self {
+            Self::Static { source, .. } | Self::Runtime { source, .. } => source,
+        }
+    }
+
+    fn target_profile(self) -> ProfileId {
+        match self {
+            Self::Static { target, .. } | Self::Runtime { target, .. } => target,
+        }
+    }
+
+    fn observation_target(self) -> ObservationTarget {
+        match self {
+            Self::Static { edge_index, .. } => ObservationTarget::Static { edge_index },
+            Self::Runtime { .. } => ObservationTarget::RuntimeDiscovered,
+        }
+    }
+}
+
+fn collector_relationship_for_edge(
+    edge: &acg_candidate_graph::TransactionEdge,
+    profile_pair: (ProfileId, ProfileId),
+) -> CollectorRelationship {
+    match edge.provenance {
+        EdgeProvenance::Static { profile_edge_index } => CollectorRelationship::Static {
+            edge_index: profile_edge_index,
+            source: profile_pair.0,
+            target: profile_pair.1,
+        },
+        EdgeProvenance::RuntimeDiscovered { .. } => CollectorRelationship::Runtime {
+            source: profile_pair.0,
+            target: profile_pair.1,
+        },
+    }
+}
+
+fn collector_relationship_for_profiles(
+    graph: &ProfileGraph,
+    profile_pair: (ProfileId, ProfileId),
+) -> CollectorRelationship {
+    graph
+        .edge_between_profiles(profile_pair.0, profile_pair.1)
+        .map(|edge_index| CollectorRelationship::Static {
+            edge_index,
+            source: profile_pair.0,
+            target: profile_pair.1,
+        })
+        .unwrap_or(CollectorRelationship::Runtime {
+            source: profile_pair.0,
+            target: profile_pair.1,
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,6 +523,200 @@ impl BlockFeedbackCollector {
             self.weights.replay_independent,
             Some(replayed_transactions),
         )
+    }
+
+    pub fn collect_pre_execution_aggregated(
+        &self,
+        profile_graph: &ProfileGraph,
+        candidate_graph: &CandidateGraph,
+        report: &BlockExecutionReport,
+        feedback_store: &AdaptiveFeedbackStore,
+        epoch: u64,
+    ) -> Result<AggregatedObservationBuffer, RuntimeFeedbackError> {
+        self.collect_access_report_aggregated(
+            profile_graph,
+            candidate_graph,
+            report,
+            feedback_store,
+            epoch,
+            self.weights.pre_execution_conflict,
+            self.weights.pre_execution_independent,
+            None,
+        )
+    }
+
+    pub fn collect_block_aggregated(
+        &self,
+        profile_graph: &ProfileGraph,
+        candidate_graph: &CandidateGraph,
+        report: &BlockExecutionReport,
+        feedback_store: &AdaptiveFeedbackStore,
+        epoch: u64,
+    ) -> Result<AggregatedObservationBuffer, RuntimeFeedbackError> {
+        self.collect_access_report_aggregated(
+            profile_graph,
+            candidate_graph,
+            report,
+            feedback_store,
+            epoch,
+            self.weights.canonical_conflict,
+            self.weights.canonical_independent,
+            None,
+        )
+    }
+
+    pub fn collect_replay_execution_aggregated(
+        &self,
+        profile_graph: &ProfileGraph,
+        candidate_graph: &CandidateGraph,
+        report: &BlockExecutionReport,
+        replayed_transactions: &BTreeSet<TxIndex>,
+        feedback_store: &AdaptiveFeedbackStore,
+        epoch: u64,
+    ) -> Result<AggregatedObservationBuffer, RuntimeFeedbackError> {
+        if replayed_transactions.is_empty() {
+            return Ok(AggregatedObservationBuffer::default());
+        }
+        self.collect_access_report_aggregated(
+            profile_graph,
+            candidate_graph,
+            report,
+            feedback_store,
+            epoch,
+            self.weights.replay_conflict,
+            self.weights.replay_independent,
+            Some(replayed_transactions),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_access_report_aggregated(
+        &self,
+        profile_graph: &ProfileGraph,
+        candidate_graph: &CandidateGraph,
+        report: &BlockExecutionReport,
+        feedback_store: &AdaptiveFeedbackStore,
+        epoch: u64,
+        conflict_weight: f64,
+        independent_weight: f64,
+        evidence_participants: Option<&BTreeSet<TxIndex>>,
+    ) -> Result<AggregatedObservationBuffer, RuntimeFeedbackError> {
+        let successful = successful_transactions(report)?;
+        validate_report_candidate_alignment(candidate_graph, report)?;
+        let observed = self.detector.detect_map(report)?;
+
+        let mut buffer = AggregatedObservationBuffer::default();
+        let mut candidate_totals = BTreeMap::<CollectorRelationship, usize>::new();
+        let mut candidate_totals_by_profile = BTreeMap::<(ProfileId, ProfileId), usize>::new();
+
+        for edge in candidate_graph.edges() {
+            let pair = canonical_tx_pair(edge.source, edge.target);
+            if !pair_in_evidence_scope(pair, evidence_participants)
+                || !successful.contains(&pair.0)
+                || !successful.contains(&pair.1)
+            {
+                continue;
+            }
+            let left = candidate_transaction(candidate_graph, pair.0)?;
+            let right = candidate_transaction(candidate_graph, pair.1)?;
+            let profile_pair = canonical_profile_pair(left.profile_id, right.profile_id);
+            let relationship = collector_relationship_for_edge(edge, profile_pair);
+            *candidate_totals.entry(relationship).or_default() += 1;
+            *candidate_totals_by_profile.entry(profile_pair).or_default() += 1;
+        }
+
+        let mut observed_candidate_conflicts = BTreeMap::<CollectorRelationship, usize>::new();
+        let mut observed_conflicts_by_profile = BTreeMap::<(ProfileId, ProfileId), usize>::new();
+        let mut observed_candidate_conflicts_by_profile =
+            BTreeMap::<(ProfileId, ProfileId), usize>::new();
+
+        for (pair, conflict_kinds) in &observed {
+            if !pair_in_evidence_scope(*pair, evidence_participants) {
+                continue;
+            }
+            let left = candidate_transaction(candidate_graph, pair.0)?;
+            let right = candidate_transaction(candidate_graph, pair.1)?;
+            let profile_pair = canonical_profile_pair(left.profile_id, right.profile_id);
+            let relationship = collector_relationship_for_profiles(profile_graph, profile_pair);
+            let candidate_relationship = candidate_graph
+                .edge_between(pair.0, pair.1)
+                .map(|edge| collector_relationship_for_edge(edge, profile_pair));
+            buffer.record_conflict(
+                left.profile_id,
+                right.profile_id,
+                *conflict_kinds,
+                relationship.observation_target(),
+                conflict_weight,
+                epoch,
+                candidate_relationship.is_some(),
+            )?;
+            *observed_conflicts_by_profile
+                .entry(profile_pair)
+                .or_default() += 1;
+            if let Some(candidate_relationship) = candidate_relationship {
+                *observed_candidate_conflicts
+                    .entry(candidate_relationship)
+                    .or_default() += 1;
+                *observed_candidate_conflicts_by_profile
+                    .entry(profile_pair)
+                    .or_default() += 1;
+            }
+        }
+
+        for (relationship, total) in candidate_totals {
+            let conflicts = observed_candidate_conflicts
+                .get(&relationship)
+                .copied()
+                .unwrap_or(0);
+            let independent = total.saturating_sub(conflicts);
+            buffer.record_independent_count(
+                relationship.source_profile(),
+                relationship.target_profile(),
+                relationship.observation_target(),
+                independent_weight,
+                epoch,
+                independent,
+            )?;
+        }
+
+        let successful_buckets = bucket_successful_by_profile(candidate_graph, &successful)?;
+        for fallback in feedback_store.fallback_edges() {
+            let profile_pair = canonical_profile_pair(fallback.source, fallback.target);
+            let eligible = eligible_pairs_for_profile_relationship(
+                &successful_buckets,
+                profile_pair,
+                evidence_participants,
+            );
+            if eligible == 0 {
+                continue;
+            }
+            let conflicts = observed_conflicts_by_profile
+                .get(&profile_pair)
+                .copied()
+                .unwrap_or(0);
+            let candidate_total = candidate_totals_by_profile
+                .get(&profile_pair)
+                .copied()
+                .unwrap_or(0);
+            let candidate_conflicts = observed_candidate_conflicts_by_profile
+                .get(&profile_pair)
+                .copied()
+                .unwrap_or(0);
+            let candidate_independent = candidate_total.saturating_sub(candidate_conflicts);
+            let independent = eligible
+                .saturating_sub(conflicts)
+                .saturating_sub(candidate_independent);
+            buffer.record_independent_count(
+                profile_pair.0,
+                profile_pair.1,
+                ObservationTarget::RuntimeDiscovered,
+                independent_weight,
+                epoch,
+                independent,
+            )?;
+        }
+
+        Ok(buffer)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -563,6 +842,82 @@ impl BlockFeedbackCollector {
             }
         }
 
+        Ok(buffer)
+    }
+
+    pub fn collect_validation_aggregated(
+        &self,
+        profile_graph: &ProfileGraph,
+        candidate_graph: &CandidateGraph,
+        feedback_store: &AdaptiveFeedbackStore,
+        evidence: &[ValidationEvidence],
+        epoch: u64,
+    ) -> Result<AggregatedObservationBuffer, RuntimeFeedbackError> {
+        let mut buffer = AggregatedObservationBuffer::default();
+        for item in evidence {
+            let pair = canonical_tx_pair(item.predecessor, item.transaction);
+            let left = candidate_transaction(candidate_graph, pair.0)?;
+            let right = candidate_transaction(candidate_graph, pair.1)?;
+            let candidate_present = candidate_graph.edge_between(pair.0, pair.1).is_some();
+            let static_edge =
+                profile_graph.edge_between_profiles(left.profile_id, right.profile_id);
+            let fallback_exists = feedback_store
+                .fallback_edge(left.profile_id, right.profile_id)
+                .is_some();
+
+            match item.kind {
+                ValidationEvidenceKind::Independent => {
+                    let target = if let Some(edge_index) = static_edge {
+                        ObservationTarget::Static { edge_index }
+                    } else if fallback_exists {
+                        ObservationTarget::RuntimeDiscovered
+                    } else {
+                        continue;
+                    };
+                    buffer.record_independent_count(
+                        left.profile_id,
+                        right.profile_id,
+                        target,
+                        self.weights.validation_independent,
+                        epoch,
+                        1,
+                    )?;
+                }
+                ValidationEvidenceKind::Invalidated { conflict_kinds } => {
+                    let target = static_edge
+                        .map(|edge_index| ObservationTarget::Static { edge_index })
+                        .unwrap_or(ObservationTarget::RuntimeDiscovered);
+                    buffer.record_conflict(
+                        left.profile_id,
+                        right.profile_id,
+                        conflict_kinds,
+                        target,
+                        self.weights.validation_conflict,
+                        epoch,
+                        candidate_present,
+                    )?;
+                }
+                ValidationEvidenceKind::Replayed {
+                    conflict_kinds,
+                    replay_cost_nanos,
+                    invalidated_descendants,
+                } => {
+                    let target = static_edge
+                        .map(|edge_index| ObservationTarget::Static { edge_index })
+                        .unwrap_or(ObservationTarget::RuntimeDiscovered);
+                    buffer.record_conflict_with_replay(
+                        left.profile_id,
+                        right.profile_id,
+                        conflict_kinds,
+                        target,
+                        self.weights.replay_conflict,
+                        epoch,
+                        candidate_present,
+                        Some((replay_cost_nanos, invalidated_descendants)),
+                    )?;
+                }
+            }
+        }
         Ok(buffer)
     }
 
@@ -737,6 +1092,57 @@ fn bucket_successful_by_profile(
     Ok(buckets)
 }
 
+fn eligible_pairs_for_profile_relationship(
+    buckets: &BTreeMap<ProfileId, Vec<TxIndex>>,
+    profile_pair: (ProfileId, ProfileId),
+    evidence_participants: Option<&BTreeSet<TxIndex>>,
+) -> usize {
+    let Some(source) = buckets.get(&profile_pair.0) else {
+        return 0;
+    };
+    let Some(target) = buckets.get(&profile_pair.1) else {
+        return 0;
+    };
+
+    let participant_count = |bucket: &[TxIndex]| -> usize {
+        evidence_participants.map_or(0, |participants| {
+            bucket
+                .iter()
+                .filter(|index| participants.contains(index))
+                .count()
+        })
+    };
+
+    if profile_pair.0 == profile_pair.1 {
+        let total = choose_two(source.len());
+        match evidence_participants {
+            None => total,
+            Some(_) => {
+                let participants = participant_count(source);
+                total.saturating_sub(choose_two(source.len().saturating_sub(participants)))
+            }
+        }
+    } else {
+        let total = source.len().saturating_mul(target.len());
+        match evidence_participants {
+            None => total,
+            Some(_) => {
+                let source_participants = participant_count(source);
+                let target_participants = participant_count(target);
+                let outside = source
+                    .len()
+                    .saturating_sub(source_participants)
+                    .saturating_mul(target.len().saturating_sub(target_participants));
+                total.saturating_sub(outside)
+            }
+        }
+    }
+}
+
+fn choose_two(count: usize) -> usize {
+    count.saturating_mul(count.saturating_sub(1)) / 2
+}
+
 fn pair_in_evidence_scope(
     pair: (TxIndex, TxIndex),
     evidence_participants: Option<&BTreeSet<TxIndex>>,
@@ -837,7 +1243,7 @@ impl RuntimeFeedbackEngine {
         report: &BlockExecutionReport,
         epoch: u64,
     ) -> Result<ApplySummary, RuntimeFeedbackError> {
-        let observations = self.collector.collect_pre_execution(
+        let observations = self.collector.collect_pre_execution_aggregated(
             profile_graph,
             candidate_graph,
             report,
@@ -846,7 +1252,7 @@ impl RuntimeFeedbackEngine {
         )?;
         Ok(self
             .store
-            .apply_batch(profile_graph, observations, &self.adaptive_config)?)
+            .apply_aggregated_batch(profile_graph, observations, &self.adaptive_config)?)
     }
 
     pub fn process_block(
@@ -856,7 +1262,7 @@ impl RuntimeFeedbackEngine {
         report: &BlockExecutionReport,
         epoch: u64,
     ) -> Result<ApplySummary, RuntimeFeedbackError> {
-        let observations = self.collector.collect_block(
+        let observations = self.collector.collect_block_aggregated(
             profile_graph,
             candidate_graph,
             report,
@@ -865,7 +1271,7 @@ impl RuntimeFeedbackEngine {
         )?;
         Ok(self
             .store
-            .apply_batch(profile_graph, observations, &self.adaptive_config)?)
+            .apply_aggregated_batch(profile_graph, observations, &self.adaptive_config)?)
     }
 
     pub fn process_replay_execution(
@@ -876,7 +1282,7 @@ impl RuntimeFeedbackEngine {
         replayed_transactions: &BTreeSet<TxIndex>,
         epoch: u64,
     ) -> Result<ApplySummary, RuntimeFeedbackError> {
-        let observations = self.collector.collect_replay_execution(
+        let observations = self.collector.collect_replay_execution_aggregated(
             profile_graph,
             candidate_graph,
             report,
@@ -886,7 +1292,7 @@ impl RuntimeFeedbackEngine {
         )?;
         Ok(self
             .store
-            .apply_batch(profile_graph, observations, &self.adaptive_config)?)
+            .apply_aggregated_batch(profile_graph, observations, &self.adaptive_config)?)
     }
 
     pub fn process_validation(
@@ -896,7 +1302,7 @@ impl RuntimeFeedbackEngine {
         evidence: &[ValidationEvidence],
         epoch: u64,
     ) -> Result<ApplySummary, RuntimeFeedbackError> {
-        let observations = self.collector.collect_validation(
+        let observations = self.collector.collect_validation_aggregated(
             profile_graph,
             candidate_graph,
             &self.store,
@@ -905,7 +1311,7 @@ impl RuntimeFeedbackEngine {
         )?;
         Ok(self
             .store
-            .apply_batch(profile_graph, observations, &self.adaptive_config)?)
+            .apply_aggregated_batch(profile_graph, observations, &self.adaptive_config)?)
     }
 
     /// Apply Brick 5E dependency serialization-cost evidence.

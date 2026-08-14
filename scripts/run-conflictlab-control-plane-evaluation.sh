@@ -27,7 +27,7 @@ GRIDS=(
 )
 
 : > "$OUT/records.jsonl"
-printf 'ConflictLab control-plane rerun\noutput: %s\n\n' "$OUT" > "$OUT/summary.txt"
+printf 'ConflictLab production control-plane + coarse policy sweep\noutput: %s\n\n' "$OUT" > "$OUT/summary.txt"
 
 for GRID in "${GRIDS[@]}"; do
   NAME="$(basename "$GRID" .grid.json)"
@@ -49,7 +49,7 @@ python3 "$ROOT/scripts/summarize-conflictlab-control-plane.py" \
   "$OUT/records.jsonl" \
   --output "$OUT/results-summary.txt" | tee -a "$OUT/summary.txt"
 
-echo "PASS: ConflictLab control-plane evaluation completed" | tee -a "$OUT/summary.txt"
+echo "PASS: ConflictLab production control-plane evaluation completed" | tee -a "$OUT/summary.txt"
 echo "upload:"
 echo "  $OUT/results-summary.txt"
 echo "  $OUT/summary.txt"

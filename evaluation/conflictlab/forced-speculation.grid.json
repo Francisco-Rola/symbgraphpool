@@ -1,33 +1,28 @@
 {
   "schema_version": 1,
   "physical_core_limit": 6,
-  "record_schema_version": 2,
+  "record_schema_version": 3,
   "policy_file": "../policies/release-tuning.json",
   "base_run": {
     "workload": "conflictlab",
     "parameters": {
       "execution_backend": "wasm",
-      "transactions": "200",
-      "accounts": "16",
-      "hot_account_probability_bps": "7500",
+      "prediction_quality": "coarse",
       "complexity": "medium",
       "work_iterations": "32768",
       "storage_rounds": "2",
       "payload_bytes": "256",
       "sim.admission_tps": "25000",
       "sim.block_interval_ms": "2000",
-      "sim.block_size": "200",
       "sim.mempool_policy": "fifo",
       "acg.soft_threshold": "0.20",
       "acg.hard_threshold": "0.95",
-      "acg.risk_budget": "1.0",
       "acg.feedback_retention_factor": "0.99",
-      "acg.feedback_confidence_scale": "20.0",
-      "prediction_quality": "exact"
+      "acg.feedback_confidence_scale": "20.0"
     }
   },
-  "order_seed": 2026081402,
-  "experiment_id": "conflictlab-forced-speculation",
+  "order_seed": 2026081404,
+  "experiment_id": "conflictlab-coarse-policy-risk-sweep",
   "matrix": {
     "modes": [
       "static",
@@ -39,22 +34,128 @@
     ],
     "seeds": [
       11,
-      23,
       47
     ],
     "parameters": {
-      "prediction_quality": [
-        "coarse",
-        "opaque"
-      ],
-      "hot_account_probability_bps": [
-        "2500",
-        "7500"
+      "acg.risk_budget": [
+        "0.50",
+        "0.75",
+        "0.90"
       ],
       "warmup_blocks": [
         "0",
         "4"
       ]
-    }
+    },
+    "cases": [
+      {
+        "parameters": {
+          "transactions": "16",
+          "sim.block_size": "16",
+          "accounts": "16",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "16",
+          "sim.block_size": "16",
+          "accounts": "16",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "64",
+          "sim.block_size": "64",
+          "accounts": "64",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "64",
+          "sim.block_size": "64",
+          "accounts": "64",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "256",
+          "sim.block_size": "256",
+          "accounts": "256",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "256",
+          "sim.block_size": "256",
+          "accounts": "256",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500"
+        }
+      }
+    ]
   }
 }

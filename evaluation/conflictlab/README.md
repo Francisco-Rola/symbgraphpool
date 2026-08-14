@@ -35,12 +35,12 @@ about production analyzer accuracy.
 - `quick.grid.json`: 72-run release sanity/tuning sample.
 - `granularity.grid.json`: 1,350-run complexity × contention × 1–6-worker matrix.
 - `contention.grid.json`: 1,260-run account-cardinality/hotspot sweep.
-- `block-scaling.grid.json`: 300-run block-size/planner-scaling sweep.
+- `block-scaling.grid.json`: 360-run production-sized 16/32/64/128/256/512 block/planner sweep.
 - `phase-change.grid.json`: 120-run low↔high contention and cheap↔expensive phase sweep.
 - `ingress-block.grid.json`: 720-run admission-TPS/block-window/block-size packing sweep.
 - `policy-tuning.grid.json`: 260-run one-factor-at-a-time scheduler/feedback tuning sweep after baselines are known.
-- `control-plane-regression.grid.json`: 18-run dense-vs-sparse exact-prediction check for dependency reduction, feedback batching and corrected worker bounds.
-- `forced-speculation.grid.json`: 72-run coarse/opaque calibration matrix that intentionally produces soft edges, replays/negative evidence and candidate misses.
+- `control-plane-regression.grid.json`: 108-run exact-prediction production block-size sweep (16/32/64/128/256/512) for dependency reduction, upstream feedback aggregation, corrected worker bounds, and full adaptive-pipeline timing.
+- `forced-speculation.grid.json`: 432-run **coarse-prediction** risk-budget sweep over the same production block sizes, 25%/75% hotspot contention, 0/4 warm-up blocks, and risk budgets 0.50/0.75/0.90 so learned policy changes can alter actual waves/dependencies.
 
 Run one matrix:
 
@@ -60,13 +60,16 @@ and the generated `plot-long.csv`.
 
 ## Control-plane correction campaign
 
-After applying the batching/reduction/schema-v2 patch, run:
+After applying the upstream-aggregation/pipeline-timing/schema-v3 patch, run:
 
 ```bash
 ./scripts/run-control-plane-corrections-diagnostics.sh
 ./scripts/run-conflictlab-control-plane-evaluation.sh
 ```
 
-The second command runs both focused release matrices, aggregates them, and writes
-`results-summary.txt`. Upload that file together with `summary.txt`, `records.jsonl`,
-`aggregate/summary-wide.csv`, and `aggregate/plot-long.csv` for analysis.
+The second command runs both focused release matrices (108 exact-scaling + 432 coarse-policy runs),
+aggregates them, and writes `results-summary.txt`. For shorter iterations, run
+`run-conflictlab-production-scaling-evaluation.sh` or
+`run-conflictlab-coarse-policy-risk-evaluation.sh` independently. Upload `results-summary.txt`
+together with `summary.txt`, `records.jsonl`, `aggregate/summary-wide.csv`, and
+`aggregate/plot-long.csv` for analysis. All focused measured blocks are capped at 512 transactions.

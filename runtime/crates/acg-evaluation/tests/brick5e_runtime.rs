@@ -13,7 +13,7 @@ use acg_cosmwasm_engine::{
 };
 use acg_evaluation::{
     CorrectnessRecord, ExperimentMetadata, ExperimentRecord, FeedbackTimingRecord,
-    ParallelismReference,
+    ParallelismReference, PipelineTimingRecord,
 };
 use acg_feedback::{AdaptiveFeedbackConfig, ApplySummary};
 use acg_profile_graph::{EdgeBuildConfig, GraphLoadConfig, ProfileGraph, ProfileGraphArtifact};
@@ -323,6 +323,7 @@ fn brick5e_learns_marginal_serialization_cost_and_emits_stable_record() {
             pre_feedback_duration,
             reconciliation_feedback_duration,
         ),
+        PipelineTimingRecord::default(),
         CorrectnessRecord {
             serial_equivalent: Some(true),
             ..CorrectnessRecord::default()

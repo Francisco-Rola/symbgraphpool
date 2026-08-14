@@ -645,6 +645,60 @@ pub fn evaluate_record(
             ),
         ));
     }
+    if record.schema_version >= 3 {
+        let pipeline_stage_total = record
+            .pipeline_timing
+            .planning_nanos
+            .saturating_add(record.pipeline_timing.preexecution_nanos)
+            .saturating_add(record.pipeline_timing.pre_execution_feedback_nanos)
+            .saturating_add(record.pipeline_timing.reconciliation_nanos)
+            .saturating_add(record.pipeline_timing.reconciliation_feedback_nanos);
+        if record.pipeline_timing.total_adaptive_block_nanos == 0 {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::Incomplete,
+                "zero_pipeline_wall",
+                "schema-v3 records must contain a non-zero adaptive pipeline wall time",
+            ));
+        }
+        if record.pipeline_timing.total_adaptive_block_nanos < pipeline_stage_total {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "pipeline_timing_total_smaller_than_stages",
+                format!(
+                    "pipeline stages total {pipeline_stage_total} ns, stored adaptive total is {} ns",
+                    record.pipeline_timing.total_adaptive_block_nanos
+                ),
+            ));
+        }
+        if record.pipeline_timing.pre_execution_feedback_nanos
+            != record.feedback_timing.pre_execution_update_nanos
+            || record.pipeline_timing.reconciliation_feedback_nanos
+                != record.feedback_timing.reconciliation_update_nanos
+        {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "pipeline_feedback_timing_mismatch",
+                "pipeline feedback stages must match feedback_timing",
+            ));
+        }
+        if let Some(serial) = record.pipeline_timing.serial_reference_execution_nanos {
+            let expected = ratio_milli(serial, record.pipeline_timing.total_adaptive_block_nanos);
+            if expected != record.pipeline_timing.end_to_end_speedup_milli {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "pipeline_speedup_mismatch",
+                    "end_to_end_speedup_milli does not match the recorded serial/pipeline wall times",
+                ));
+            }
+        } else if record.pipeline_timing.end_to_end_speedup_milli.is_some() {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "pipeline_speedup_without_serial_reference",
+                "pipeline speedup cannot be present without a serial reference wall time",
+            ));
+        }
+    }
+
     let largest_planning_stage = [
         record.planning.adapter_nanos,
         record.planning.candidate_graph_nanos,
@@ -699,25 +753,39 @@ pub fn evaluate_record(
                 &mut issues,
                 record.parallelism.observed_service_work_nanos,
                 "missing_observed_service_work",
-                "observed_service_work_nanos is required for schema v2 evaluation records",
+                "observed_service_work_nanos is required for schema v2+ evaluation records",
             );
             require_metric(
                 &mut issues,
                 record.parallelism.worker_capacity_bound_nanos,
                 "missing_worker_capacity_bound",
-                "worker_capacity_bound_nanos is required for schema v2 evaluation records",
+                "worker_capacity_bound_nanos is required for schema v2+ evaluation records",
             );
             require_metric(
                 &mut issues,
                 record.parallelism.parallel_lower_bound_nanos,
                 "missing_parallel_lower_bound",
-                "parallel_lower_bound_nanos is required for schema v2 evaluation records",
+                "parallel_lower_bound_nanos is required for schema v2+ evaluation records",
             );
             require_metric(
                 &mut issues,
                 record.parallelism.scheduler_realization_corrected_milli,
                 "missing_corrected_scheduler_realization",
-                "scheduler_realization_corrected_milli is required for schema v2 evaluation records",
+                "scheduler_realization_corrected_milli is required for schema v2+ evaluation records",
+            );
+        }
+        if record.schema_version >= 3 {
+            require_metric(
+                &mut issues,
+                record.pipeline_timing.serial_reference_execution_nanos,
+                "missing_pipeline_serial_reference",
+                "serial_reference_execution_nanos is required for schema v3 evaluation records",
+            );
+            require_metric(
+                &mut issues,
+                record.pipeline_timing.end_to_end_speedup_milli,
+                "missing_pipeline_speedup",
+                "end_to_end_speedup_milli is required for schema v3 evaluation records",
             );
         }
     }

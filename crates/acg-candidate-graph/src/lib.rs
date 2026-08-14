@@ -214,10 +214,11 @@ impl CandidateGraph {
     }
 
     pub fn edge_between(&self, left: TxIndex, right: TxIndex) -> Option<&TransactionEdge> {
-        self.edges.iter().find(|edge| {
-            (edge.source == left && edge.target == right)
-                || (edge.source == right && edge.target == left)
-        })
+        let neighbors = self.neighbors(left);
+        let offset = neighbors
+            .binary_search_by_key(&right, |entry| entry.neighbor)
+            .ok()?;
+        self.edges.get(neighbors[offset].edge_index as usize)
     }
 }
 

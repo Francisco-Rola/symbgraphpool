@@ -4,7 +4,7 @@ use acg_evaluation::{
     acceptance::read_records_jsonl, AcceptancePolicy, CorrectnessRecord, ExecutionRecord,
     ExperimentAcceptanceStatus, ExperimentManifest, ExperimentMetadata, ExperimentRecord,
     FeedbackRecord, FeedbackTimingRecord, ParallelismRecord, PerformanceAcceptancePolicy,
-    PlanningRecord, RunAcceptanceStatus, RunIdentity, SchedulingRecord,
+    PipelineTimingRecord, PlanningRecord, RunAcceptanceStatus, RunIdentity, SchedulingRecord,
     EXPERIMENT_RECORD_SCHEMA_VERSION,
 };
 
@@ -87,6 +87,16 @@ fn complete_record() -> ExperimentRecord {
             pre_execution_update_nanos: 1_000,
             reconciliation_update_nanos: 500,
             total_nanos: 1_500,
+        },
+        pipeline_timing: PipelineTimingRecord {
+            planning_nanos: 70_000,
+            preexecution_nanos: 2_300_000,
+            pre_execution_feedback_nanos: 1_000,
+            reconciliation_nanos: 400_000,
+            reconciliation_feedback_nanos: 500,
+            total_adaptive_block_nanos: 2_800_000,
+            serial_reference_execution_nanos: Some(10_000_000),
+            end_to_end_speedup_milli: Some(3_571),
         },
         correctness: CorrectnessRecord {
             canonical_state_digest: Some("same-state".to_owned()),
@@ -305,7 +315,7 @@ fn smoke_policy_accepts_mechanism_records_without_publication_provenance() {
 }
 
 #[test]
-fn schema_v2_acceptance_requires_consistent_reduction_and_worker_bound_metrics() {
+fn schema_v2_plus_acceptance_requires_consistent_reduction_and_worker_bound_metrics() {
     let base = complete_record();
     let manifest = manifest_for(&base);
 
@@ -333,4 +343,34 @@ fn schema_v2_acceptance_requires_consistent_reduction_and_worker_bound_metrics()
         .issues
         .iter()
         .any(|issue| issue.code == "missing_corrected_scheduler_realization"));
+}
+
+#[test]
+fn schema_v3_acceptance_rejects_inconsistent_pipeline_metrics() {
+    let base = complete_record();
+    let manifest = manifest_for(&base);
+
+    let mut bad_total = base.clone();
+    bad_total.pipeline_timing.total_adaptive_block_nanos = 2_000_000;
+    let report = manifest.evaluate(&[bad_total]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "pipeline_timing_total_smaller_than_stages"));
+
+    let mut bad_speedup = base;
+    bad_speedup.pipeline_timing.end_to_end_speedup_milli = Some(9_999);
+    let report = manifest.evaluate(&[bad_speedup]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "pipeline_speedup_mismatch"));
 }

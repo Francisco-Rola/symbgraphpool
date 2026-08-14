@@ -93,6 +93,16 @@ class EvaluationToolTests(unittest.TestCase):
                         },
                         "planning": {"total_nanos": 100},
                         "feedback_timing": {"total_nanos": 10},
+                        "pipeline_timing": {
+                            "planning_nanos": 100,
+                            "preexecution_nanos": wall,
+                            "pre_execution_feedback_nanos": 10,
+                            "reconciliation_nanos": 100,
+                            "reconciliation_feedback_nanos": 0,
+                            "total_adaptive_block_nanos": wall + 210,
+                            "serial_reference_execution_nanos": 2000,
+                            "end_to_end_speedup_milli": round(2000 * 1000 / (wall + 210)),
+                        },
                         "execution": {
                             "replay_or_missing_execution_nanos": 0,
                             "replayed_transactions": 0,
@@ -116,6 +126,8 @@ class EvaluationToolTests(unittest.TestCase):
                             "edges_elided_by_reduction": 0,
                         },
                         "feedback": {
+                            "positive_observations": 1,
+                            "negative_observations": 1,
                             "serialization_cost_observations": 0,
                             "serialization_cost_batches_applied": 0,
                             "replay_impact_observations": 0,
@@ -136,6 +148,12 @@ class EvaluationToolTests(unittest.TestCase):
             corrected = next(row for row in plot if row["metric"] == "scheduler_realization")
             self.assertEqual(corrected["n"], "2")
             self.assertAlmostEqual(float(corrected["mean"]), 1.0)
+            pipeline = next(row for row in plot if row["metric"] == "pipeline_speedup")
+            self.assertEqual(pipeline["n"], "2")
+            feedback_unit = next(
+                row for row in plot if row["metric"] == "feedback_us_per_observation"
+            )
+            self.assertAlmostEqual(float(feedback_unit["mean"]), 0.005)
 
 
 if __name__ == "__main__":

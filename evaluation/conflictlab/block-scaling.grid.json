@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "physical_core_limit": 6,
-  "record_schema_version": 2,
+  "record_schema_version": 3,
   "policy_file": "../policies/release-tuning.json",
   "base_run": {
     "workload": "conflictlab",
     "parameters": {
       "execution_backend": "wasm",
-      "transactions": "200",
+      "transactions": "16",
       "warmup_blocks": "4",
       "accounts": "16",
       "hot_account_probability_bps": "0",
@@ -17,7 +17,7 @@
       "complexity": "medium",
       "sim.admission_tps": "25000",
       "sim.block_interval_ms": "2000",
-      "sim.block_size": "200",
+      "sim.block_size": "16",
       "sim.mempool_policy": "fifo",
       "acg.feedback_retention_factor": "0.99",
       "acg.feedback_confidence_scale": "20.0",
@@ -47,8 +47,9 @@
     "cases": [
       {
         "parameters": {
-          "transactions": "50",
-          "sim.block_size": "50",
+          "transactions": "16",
+          "sim.block_size": "16",
+          "accounts": "16",
           "complexity": "light",
           "work_iterations": "4096",
           "storage_rounds": "1",
@@ -57,8 +58,9 @@
       },
       {
         "parameters": {
-          "transactions": "50",
-          "sim.block_size": "50",
+          "transactions": "16",
+          "sim.block_size": "16",
+          "accounts": "16",
           "complexity": "medium",
           "work_iterations": "32768",
           "storage_rounds": "2",
@@ -67,8 +69,9 @@
       },
       {
         "parameters": {
-          "transactions": "100",
-          "sim.block_size": "100",
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
           "complexity": "light",
           "work_iterations": "4096",
           "storage_rounds": "1",
@@ -77,8 +80,9 @@
       },
       {
         "parameters": {
-          "transactions": "100",
-          "sim.block_size": "100",
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
           "complexity": "medium",
           "work_iterations": "32768",
           "storage_rounds": "2",
@@ -87,8 +91,9 @@
       },
       {
         "parameters": {
-          "transactions": "200",
-          "sim.block_size": "200",
+          "transactions": "64",
+          "sim.block_size": "64",
+          "accounts": "64",
           "complexity": "light",
           "work_iterations": "4096",
           "storage_rounds": "1",
@@ -97,8 +102,9 @@
       },
       {
         "parameters": {
-          "transactions": "200",
-          "sim.block_size": "200",
+          "transactions": "64",
+          "sim.block_size": "64",
+          "accounts": "64",
           "complexity": "medium",
           "work_iterations": "32768",
           "storage_rounds": "2",
@@ -107,8 +113,9 @@
       },
       {
         "parameters": {
-          "transactions": "500",
-          "sim.block_size": "500",
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
           "complexity": "light",
           "work_iterations": "4096",
           "storage_rounds": "1",
@@ -117,8 +124,9 @@
       },
       {
         "parameters": {
-          "transactions": "500",
-          "sim.block_size": "500",
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
           "complexity": "medium",
           "work_iterations": "32768",
           "storage_rounds": "2",
@@ -127,8 +135,9 @@
       },
       {
         "parameters": {
-          "transactions": "1000",
-          "sim.block_size": "1000",
+          "transactions": "256",
+          "sim.block_size": "256",
+          "accounts": "256",
           "complexity": "light",
           "work_iterations": "4096",
           "storage_rounds": "1",
@@ -137,8 +146,31 @@
       },
       {
         "parameters": {
-          "transactions": "1000",
-          "sim.block_size": "1000",
+          "transactions": "256",
+          "sim.block_size": "256",
+          "accounts": "256",
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "complexity": "light",
+          "work_iterations": "4096",
+          "storage_rounds": "1",
+          "payload_bytes": "64"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
           "complexity": "medium",
           "work_iterations": "32768",
           "storage_rounds": "2",

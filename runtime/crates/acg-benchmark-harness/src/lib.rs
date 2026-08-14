@@ -27,7 +27,7 @@ use acg_cosmwasm_engine::{CosmWasmEngine, ParallelExecutionConfig};
 use acg_evaluation::{
     AcceptanceError, CorrectnessRecord, ExperimentAcceptanceReport, ExperimentManifest,
     ExperimentMetadata, ExperimentRecord, ExperimentRecordError, FeedbackTimingRecord,
-    ParallelismReference, RunIdentity,
+    ParallelismReference, PipelineTimingRecord, RunIdentity,
 };
 use acg_feedback::{AdaptiveFeedbackConfig, ApplySummary};
 use acg_profile_graph::ProfileGraph;
@@ -44,7 +44,7 @@ use thiserror::Error;
 
 pub use conflictlab::ConflictLabWorkload;
 
-pub const BENCHMARK_HARNESS_SCHEMA_VERSION: u16 = 1;
+pub const BENCHMARK_HARNESS_SCHEMA_VERSION: u16 = 2;
 
 /// Built-in speculative policy ablations supported by the common harness.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -304,6 +304,9 @@ impl BenchmarkHarness {
             },
             measured.feedback_summary,
             measured.feedback_timing,
+            measured
+                .pipeline_timing
+                .with_serial_reference(serial_reference.wall),
             correctness,
         ))
     }
@@ -449,6 +452,7 @@ struct MeasuredAdaptiveBlock {
     reconciliation: acg_validator_sim::SplitPhaseSpeculativeExecutionReport,
     feedback_summary: ApplySummary,
     feedback_timing: FeedbackTimingRecord,
+    pipeline_timing: PipelineTimingRecord,
 }
 
 fn execute_adaptive_block(
@@ -459,9 +463,15 @@ fn execute_adaptive_block(
     block: &ProducedBlock,
     measured: bool,
 ) -> Result<Option<MeasuredAdaptiveBlock>, HarnessError> {
+    let total_started = Instant::now();
+
+    let planning_started = Instant::now();
     let (plan, planning_metrics) = pipeline
         .plan_block_with_metrics(executor.engine(), graph, block)
         .map_err(display_error)?;
+    let planning_wall = planning_started.elapsed();
+
+    let preexecution_started = Instant::now();
     let prepared = executor
         .prepare(block, &plan.speculative_execution_plan)
         .map_err(display_error)?;
@@ -469,6 +479,7 @@ fn execute_adaptive_block(
     let preexecution_report = executor
         .pre_execution_report(block, &prepared)
         .map_err(display_error)?;
+    let preexecution_wall = preexecution_started.elapsed();
 
     let pre_feedback_started = Instant::now();
     let pre_summary = match mode {
@@ -491,9 +502,12 @@ fn execute_adaptive_block(
         pre_feedback_started.elapsed()
     };
 
+    let reconciliation_started = Instant::now();
     let reconciliation = executor
         .validate_prepared(block, prepared)
         .map_err(display_error)?;
+    let reconciliation_wall = reconciliation_started.elapsed();
+
     let post_feedback_started = Instant::now();
     let post_summary = match mode {
         HarnessMode::Static => ApplySummary::default(),
@@ -514,6 +528,7 @@ fn execute_adaptive_block(
     } else {
         post_feedback_started.elapsed()
     };
+    let total_adaptive_block_wall = total_started.elapsed();
 
     if !measured {
         return Ok(None);
@@ -528,6 +543,14 @@ fn execute_adaptive_block(
         feedback_timing: FeedbackTimingRecord::from_durations(
             pre_feedback_duration,
             post_feedback_duration,
+        ),
+        pipeline_timing: PipelineTimingRecord::from_durations(
+            planning_wall,
+            preexecution_wall,
+            pre_feedback_duration,
+            reconciliation_wall,
+            post_feedback_duration,
+            total_adaptive_block_wall,
         ),
     }))
 }

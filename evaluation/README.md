@@ -58,5 +58,7 @@ adaptive decisions:
 ./scripts/run-conflictlab-control-plane-evaluation.sh
 ```
 
-ExperimentRecord schema v2 adds dependency-reduction/batching counters and a worker-capacity-aware
-scheduler lower bound while retaining schema-v1 read compatibility.
+ExperimentRecord schema v3 retains the dependency-reduction/batching and finite-worker metrics,
+adds measured adaptive-pipeline stage/wall timings and a serial-reference end-to-end speedup, and
+remains backward-readable for schema-v1/v2 records. The focused matrices sweep measured block sizes
+16, 32, 64, 128, 256, and 512 transactions.

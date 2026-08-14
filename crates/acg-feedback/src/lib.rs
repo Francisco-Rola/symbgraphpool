@@ -689,7 +689,8 @@ enum ObservationBatchTarget {
 
 #[derive(Clone, Debug)]
 struct ObservationAggregate {
-    representative: ConflictObservation,
+    source_profile: ProfileId,
+    target_profile: ProfileId,
     positive_weight: f64,
     negative_weight: f64,
     positive_observations: usize,
@@ -700,9 +701,12 @@ struct ObservationAggregate {
 }
 
 impl ObservationAggregate {
-    fn new(observation: &ConflictObservation) -> Self {
+    fn new(source_profile: ProfileId, target_profile: ProfileId) -> Self {
+        let (source_profile, target_profile) =
+            canonical_profile_pair(source_profile, target_profile);
         Self {
-            representative: observation.clone(),
+            source_profile,
+            target_profile,
             positive_weight: 0.0,
             negative_weight: 0.0,
             positive_observations: 0,
@@ -713,46 +717,206 @@ impl ObservationAggregate {
         }
     }
 
-    fn add(&mut self, observation: &ConflictObservation) -> Result<(), FeedbackError> {
-        validate_weight(observation.weight)?;
+    fn add_observation(&mut self, observation: &ConflictObservation) -> Result<(), FeedbackError> {
         if observation.has_replay_impact()
             && matches!(observation.outcome, ObservationOutcome::Independent)
         {
             return Err(FeedbackError::ReplayImpactRequiresConflict);
         }
         match observation.outcome {
-            ObservationOutcome::Conflict { conflict_kinds } => {
-                self.positive_weight += observation.weight;
-                self.positive_observations = self.positive_observations.saturating_add(1);
-                self.conflict_kinds |= conflict_kinds;
-                if !observation.candidate_edge_present {
-                    self.candidate_misses = self.candidate_misses.saturating_add(1);
-                }
-            }
-            ObservationOutcome::Independent => {
-                self.negative_weight += observation.weight;
-                self.negative_observations = self.negative_observations.saturating_add(1);
-            }
+            ObservationOutcome::Conflict { conflict_kinds } => self.add_conflicts(
+                conflict_kinds,
+                observation.weight,
+                1,
+                usize::from(!observation.candidate_edge_present),
+                observation.has_replay_impact().then_some((
+                    observation.replay_cost_nanos,
+                    observation.invalidated_descendants,
+                )),
+            ),
+            ObservationOutcome::Independent => self.add_independent(observation.weight, 1),
         }
-        if observation.has_replay_impact() {
+    }
+
+    fn add_conflicts(
+        &mut self,
+        conflict_kinds: ConflictKinds,
+        weight: f64,
+        count: usize,
+        candidate_misses: usize,
+        replay_impact: Option<(u64, u32)>,
+    ) -> Result<(), FeedbackError> {
+        validate_weight(weight)?;
+        if conflict_kinds.is_empty() {
+            return Err(FeedbackError::EmptyConflictKinds);
+        }
+        let weighted = weighted_count(weight, count)?;
+        self.positive_weight += weighted;
+        self.positive_observations = self.positive_observations.saturating_add(count);
+        self.candidate_misses = self.candidate_misses.saturating_add(candidate_misses);
+        self.conflict_kinds |= conflict_kinds;
+        if let Some((replay_cost_nanos, invalidated_descendants)) = replay_impact {
+            if count != 1 {
+                return Err(FeedbackError::ReplayImpactRequiresSingleObservation);
+            }
             self.replay_impact.replay_observations =
                 self.replay_impact.replay_observations.saturating_add(1);
-            self.replay_impact.weighted_replay_cost_nanos +=
-                observation.replay_cost_nanos as f64 * observation.weight;
+            self.replay_impact.weighted_replay_cost_nanos += replay_cost_nanos as f64 * weight;
             self.replay_impact.weighted_invalidated_descendants +=
-                f64::from(observation.invalidated_descendants) * observation.weight;
-            self.replay_impact.observation_weight += observation.weight;
+                f64::from(invalidated_descendants) * weight;
+            self.replay_impact.observation_weight += weight;
             self.replay_impact.total_replay_cost_nanos = self
                 .replay_impact
                 .total_replay_cost_nanos
-                .saturating_add(observation.replay_cost_nanos);
+                .saturating_add(replay_cost_nanos);
             self.replay_impact.total_invalidated_descendants = self
                 .replay_impact
                 .total_invalidated_descendants
-                .saturating_add(u64::from(observation.invalidated_descendants));
+                .saturating_add(u64::from(invalidated_descendants));
         }
         Ok(())
     }
+
+    fn add_independent(&mut self, weight: f64, count: usize) -> Result<(), FeedbackError> {
+        validate_weight(weight)?;
+        self.negative_weight += weighted_count(weight, count)?;
+        self.negative_observations = self.negative_observations.saturating_add(count);
+        Ok(())
+    }
+}
+
+/// Per-block feedback accumulator that aggregates directly at the persisted relationship boundary.
+///
+/// Runtime collectors should prefer this type over constructing one [`ConflictObservation`] per
+/// transaction pair. It preserves raw observation counts and total statistical weight while
+/// keeping memory and state-application work proportional to the number of learned relationships.
+#[derive(Clone, Debug, Default)]
+pub struct AggregatedObservationBuffer {
+    aggregates: BTreeMap<(u64, ObservationBatchTarget), ObservationAggregate>,
+}
+
+impl AggregatedObservationBuffer {
+    pub fn record_observation(
+        &mut self,
+        observation: &ConflictObservation,
+    ) -> Result<(), FeedbackError> {
+        let target = observation_batch_target(
+            observation.source_profile,
+            observation.target_profile,
+            observation.target,
+        );
+        let aggregate = self
+            .aggregates
+            .entry((observation.epoch, target))
+            .or_insert_with(|| {
+                ObservationAggregate::new(observation.source_profile, observation.target_profile)
+            });
+        aggregate.add_observation(observation)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_conflict(
+        &mut self,
+        source_profile: ProfileId,
+        target_profile: ProfileId,
+        conflict_kinds: ConflictKinds,
+        target: ObservationTarget,
+        weight: f64,
+        epoch: u64,
+        candidate_edge_present: bool,
+    ) -> Result<(), FeedbackError> {
+        self.record_conflict_with_replay(
+            source_profile,
+            target_profile,
+            conflict_kinds,
+            target,
+            weight,
+            epoch,
+            candidate_edge_present,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_conflict_with_replay(
+        &mut self,
+        source_profile: ProfileId,
+        target_profile: ProfileId,
+        conflict_kinds: ConflictKinds,
+        target: ObservationTarget,
+        weight: f64,
+        epoch: u64,
+        candidate_edge_present: bool,
+        replay_impact: Option<(u64, u32)>,
+    ) -> Result<(), FeedbackError> {
+        let batch_target = observation_batch_target(source_profile, target_profile, target);
+        let aggregate = self
+            .aggregates
+            .entry((epoch, batch_target))
+            .or_insert_with(|| ObservationAggregate::new(source_profile, target_profile));
+        aggregate.add_conflicts(
+            conflict_kinds,
+            weight,
+            1,
+            usize::from(!candidate_edge_present),
+            replay_impact,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_independent_count(
+        &mut self,
+        source_profile: ProfileId,
+        target_profile: ProfileId,
+        target: ObservationTarget,
+        weight: f64,
+        epoch: u64,
+        count: usize,
+    ) -> Result<(), FeedbackError> {
+        if count == 0 {
+            return Ok(());
+        }
+        let batch_target = observation_batch_target(source_profile, target_profile, target);
+        let aggregate = self
+            .aggregates
+            .entry((epoch, batch_target))
+            .or_insert_with(|| ObservationAggregate::new(source_profile, target_profile));
+        aggregate.add_independent(weight, count)
+    }
+
+    pub fn relationship_batches(&self) -> usize {
+        self.aggregates.len()
+    }
+
+    pub fn raw_observations(&self) -> usize {
+        self.aggregates.values().fold(0_usize, |total, aggregate| {
+            total
+                .saturating_add(aggregate.positive_observations)
+                .saturating_add(aggregate.negative_observations)
+        })
+    }
+}
+
+fn observation_batch_target(
+    source_profile: ProfileId,
+    target_profile: ProfileId,
+    target: ObservationTarget,
+) -> ObservationBatchTarget {
+    match target {
+        ObservationTarget::Static { edge_index } => ObservationBatchTarget::Static(edge_index),
+        ObservationTarget::RuntimeDiscovered => {
+            let pair = canonical_profile_pair(source_profile, target_profile);
+            ObservationBatchTarget::Runtime(pair.0, pair.1)
+        }
+    }
+}
+
+fn weighted_count(weight: f64, count: usize) -> Result<f64, FeedbackError> {
+    let weighted = weight * count as f64;
+    if !weighted.is_finite() {
+        return Err(FeedbackError::InvalidAggregatedWeight { weight, count });
+    }
+    Ok(weighted)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1065,55 +1229,53 @@ impl AdaptiveFeedbackStore {
         buffer: ObservationBuffer,
         config: &AdaptiveFeedbackConfig,
     ) -> Result<ApplySummary, FeedbackError> {
-        config.validate()?;
-        let mut aggregates = BTreeMap::<(u64, ObservationBatchTarget), ObservationAggregate>::new();
-        let mut summary = ApplySummary::default();
-
+        let mut aggregated = AggregatedObservationBuffer::default();
         for observation in buffer.into_observations() {
-            let target = match observation.target {
-                ObservationTarget::Static { edge_index } => {
-                    validate_static_target(graph, edge_index, &observation)?;
-                    ObservationBatchTarget::Static(edge_index)
-                }
-                ObservationTarget::RuntimeDiscovered => {
-                    let pair = canonical_profile_pair(
-                        observation.source_profile,
-                        observation.target_profile,
-                    );
-                    ObservationBatchTarget::Runtime(pair.0, pair.1)
-                }
-            };
-            let aggregate = aggregates
-                .entry((observation.epoch, target))
-                .or_insert_with(|| ObservationAggregate::new(&observation));
-            aggregate.add(&observation)?;
-
-            if matches!(observation.outcome, ObservationOutcome::Conflict { .. }) {
-                summary.positive_observations = summary.positive_observations.saturating_add(1);
-            } else {
-                summary.negative_observations = summary.negative_observations.saturating_add(1);
-            }
-            if !observation.candidate_edge_present
-                && matches!(observation.outcome, ObservationOutcome::Conflict { .. })
-            {
-                summary.candidate_misses = summary.candidate_misses.saturating_add(1);
-            }
-            if observation.has_replay_impact() {
-                summary.replay_impact_observations =
-                    summary.replay_impact_observations.saturating_add(1);
-                summary.attributed_replay_cost_nanos = summary
-                    .attributed_replay_cost_nanos
-                    .saturating_add(observation.replay_cost_nanos);
-                summary.attributed_invalidated_descendants = summary
-                    .attributed_invalidated_descendants
-                    .saturating_add(u64::from(observation.invalidated_descendants));
-            }
+            aggregated.record_observation(&observation)?;
         }
+        self.apply_aggregated_batch(graph, aggregated, config)
+    }
 
-        summary.observation_batches_applied = aggregates.len();
-        for ((epoch, target), aggregate) in aggregates {
+    /// Apply feedback that was already aggregated by the runtime collector.
+    ///
+    /// This is the hot-path API for production feedback collection. It preserves the same raw
+    /// observation accounting as [`Self::apply_batch`] without allocating one observation object
+    /// per transaction pair or repeating relationship-key lookups in the store.
+    pub fn apply_aggregated_batch(
+        &mut self,
+        graph: &ProfileGraph,
+        buffer: AggregatedObservationBuffer,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<ApplySummary, FeedbackError> {
+        config.validate()?;
+        let mut summary = ApplySummary {
+            observation_batches_applied: buffer.aggregates.len(),
+            ..ApplySummary::default()
+        };
+
+        for ((epoch, target), aggregate) in buffer.aggregates {
+            summary.positive_observations = summary
+                .positive_observations
+                .saturating_add(aggregate.positive_observations);
+            summary.negative_observations = summary
+                .negative_observations
+                .saturating_add(aggregate.negative_observations);
+            summary.candidate_misses = summary
+                .candidate_misses
+                .saturating_add(aggregate.candidate_misses);
+            summary.replay_impact_observations = summary
+                .replay_impact_observations
+                .saturating_add(aggregate.replay_impact.replay_observations);
+            summary.attributed_replay_cost_nanos = summary
+                .attributed_replay_cost_nanos
+                .saturating_add(aggregate.replay_impact.total_replay_cost_nanos);
+            summary.attributed_invalidated_descendants = summary
+                .attributed_invalidated_descendants
+                .saturating_add(aggregate.replay_impact.total_invalidated_descendants);
+
             match target {
                 ObservationBatchTarget::Static(edge_index) => {
+                    validate_static_aggregate_target(graph, edge_index, &aggregate)?;
                     let statistics = self
                         .static_statistics
                         .get_mut(edge_index.0 as usize)
@@ -1142,14 +1304,10 @@ impl AdaptiveFeedbackStore {
                             target_profile: target,
                         });
                     } else {
-                        let mut representative = aggregate.representative.clone();
-                        representative.outcome = ObservationOutcome::Conflict {
-                            conflict_kinds: aggregate.conflict_kinds,
-                        };
-                        representative.epoch = epoch;
-                        let edge = create_fallback_edge(
+                        let edge = create_fallback_edge_from_aggregate(
                             graph,
-                            &representative,
+                            &aggregate,
+                            epoch,
                             config,
                             self.fallback_edges.len(),
                         )?;
@@ -1408,13 +1566,14 @@ pub struct FallbackEdgeCheckpoint {
     pub serialization_cost_statistics: SerializationCostStatistics,
 }
 
-fn create_fallback_edge(
+fn create_fallback_edge_from_aggregate(
     graph: &ProfileGraph,
-    observation: &ConflictObservation,
+    aggregate: &ObservationAggregate,
+    epoch: u64,
     config: &AdaptiveFeedbackConfig,
     fallback_count: usize,
 ) -> Result<RuntimeDiscoveredEdge, FeedbackError> {
-    let pair = canonical_profile_pair(observation.source_profile, observation.target_profile);
+    let pair = canonical_profile_pair(aggregate.source_profile, aggregate.target_profile);
     let source_key = graph
         .profile(pair.0)
         .ok_or(FeedbackError::UnknownProfile(pair.0))?
@@ -1425,10 +1584,9 @@ fn create_fallback_edge(
         .ok_or(FeedbackError::UnknownProfile(pair.1))?
         .definition
         .stable_key;
-    let conflict_kinds = match observation.outcome {
-        ObservationOutcome::Conflict { conflict_kinds } => conflict_kinds,
-        ObservationOutcome::Independent => ConflictKinds::empty(),
-    };
+    if aggregate.conflict_kinds.is_empty() {
+        return Err(FeedbackError::EmptyFallbackConflictKinds);
+    }
     let id = RuntimeEdgeId(
         u32::try_from(fallback_count).map_err(|_| FeedbackError::TooManyFallbackEdges)?,
     );
@@ -1438,31 +1596,31 @@ fn create_fallback_edge(
         target: pair.1,
         source_key: source_key.min(target_key),
         target_key: source_key.max(target_key),
-        conflict_kinds,
-        discovered_epoch: observation.epoch,
+        conflict_kinds: aggregate.conflict_kinds,
+        discovered_epoch: epoch,
         review_required: true,
         statistics: BetaStatistics::from_probability(
             config.fallback_prior_probability,
             config.fallback_prior_strength,
             config.epsilon,
-            observation.epoch,
+            epoch,
         )?,
-        replay_cost_statistics: ReplayCostStatistics::new(observation.epoch),
-        serialization_cost_statistics: SerializationCostStatistics::new(observation.epoch),
+        replay_cost_statistics: ReplayCostStatistics::new(epoch),
+        serialization_cost_statistics: SerializationCostStatistics::new(epoch),
     })
 }
 
-fn validate_static_target(
+fn validate_static_aggregate_target(
     graph: &ProfileGraph,
     edge_index: ProfileEdgeIndex,
-    observation: &ConflictObservation,
+    aggregate: &ObservationAggregate,
 ) -> Result<(), FeedbackError> {
     let edge = graph
         .edges()
         .get(edge_index.0 as usize)
         .ok_or(FeedbackError::UnknownStaticEdge(edge_index))?;
     let expected = canonical_profile_pair(edge.source, edge.target);
-    let actual = canonical_profile_pair(observation.source_profile, observation.target_profile);
+    let actual = canonical_profile_pair(aggregate.source_profile, aggregate.target_profile);
     if expected != actual {
         return Err(FeedbackError::StaticObservationProfileMismatch {
             edge_index,
@@ -1537,6 +1695,8 @@ fn validate_weight(value: f64) -> Result<(), FeedbackError> {
 pub enum FeedbackError {
     #[error("observation weight must be finite and positive, got {0}")]
     InvalidObservationWeight(f64),
+    #[error("aggregated observation weight overflowed for weight {weight} and count {count}")]
+    InvalidAggregatedWeight { weight: f64, count: usize },
     #[error("probability must be finite and within [0, 1], got {0}")]
     InvalidProbability(f64),
     #[error("alpha must be finite and positive, got {0}")]
@@ -1589,6 +1749,8 @@ pub enum FeedbackError {
     },
     #[error("replay cost/fan-out evidence can only be attached to a conflict observation")]
     ReplayImpactRequiresConflict,
+    #[error("replay impact must be recorded one concrete observation at a time")]
+    ReplayImpactRequiresSingleObservation,
     #[error(
         "replay-cost observation epoch {observation_epoch} precedes the cost model's last update epoch {last_update_epoch}"
     )]

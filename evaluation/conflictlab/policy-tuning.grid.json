@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "physical_core_limit": 6,
-  "record_schema_version": 2,
+  "record_schema_version": 3,
   "policy_file": "../policies/release-tuning.json",
   "base_run": {
     "workload": "conflictlab",

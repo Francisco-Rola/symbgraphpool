@@ -134,7 +134,7 @@ Measured wall time remains validator-local optimization evidence and never becom
 - each scheduled edge learns decayed marginal dependency-ready delay as its serialization cost;
 - 5D's configured 250 us serialization reference is now only a low-confidence fallback and is blended toward learned per-relationship cost;
 - feedback checkpoints are v3 with v1/v2 backward-compatible restore;
-- the `acg-evaluation` runtime crate emits schema-v2 deterministic JSON/JSONL records (with v1 read compatibility) spanning planning, dependency reduction, finite-worker/DAG bounds, VM/host/MVCC execution, replay, batched feedback overhead, and correctness digests.
+- the `acg-evaluation` runtime crate emits schema-v3 deterministic JSON/JSONL records (with v1/v2 read compatibility) spanning planning, dependency reduction, finite-worker/DAG bounds, VM/host/MVCC execution, replay, upstream-aggregated feedback overhead, full measured adaptive-pipeline wall/stages, and correctness digests.
 
 See [`brick-5e.md`](brick-5e.md).
 

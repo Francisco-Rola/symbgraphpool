@@ -24,7 +24,8 @@ use acg_validator_sim::{BlockExecutionReport, SplitPhaseSpeculativeExecutionRepo
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const EXPERIMENT_RECORD_SCHEMA_VERSION: u16 = 2;
+pub const EXPERIMENT_RECORD_SCHEMA_VERSION: u16 = 3;
+const PREVIOUS_EXPERIMENT_RECORD_SCHEMA_VERSION: u16 = 2;
 const LEGACY_EXPERIMENT_RECORD_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -474,6 +475,58 @@ impl FeedbackTimingRecord {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PipelineTimingRecord {
+    /// Wall time spent adapting inputs and producing the execution plan.
+    pub planning_nanos: u64,
+    /// Wall time from speculative prepare through the pre-execution report.
+    pub preexecution_nanos: u64,
+    /// Wall time spent applying pre-execution feedback.
+    pub pre_execution_feedback_nanos: u64,
+    /// Wall time spent validating/reconciling the prepared block.
+    pub reconciliation_nanos: u64,
+    /// Wall time spent applying post-consensus feedback.
+    pub reconciliation_feedback_nanos: u64,
+    /// Measured wall time from planning start through completion of post-consensus feedback.
+    pub total_adaptive_block_nanos: u64,
+    /// Serial measured-block execution wall used as the non-adaptive baseline.
+    pub serial_reference_execution_nanos: Option<u64>,
+    /// `serial_reference_execution / total_adaptive_block`, in milli-units.
+    pub end_to_end_speedup_milli: Option<u64>,
+}
+
+impl PipelineTimingRecord {
+    pub fn from_durations(
+        planning: Duration,
+        preexecution: Duration,
+        pre_execution_feedback: Duration,
+        reconciliation: Duration,
+        reconciliation_feedback: Duration,
+        total_adaptive_block: Duration,
+    ) -> Self {
+        Self {
+            planning_nanos: nanos(planning),
+            preexecution_nanos: nanos(preexecution),
+            pre_execution_feedback_nanos: nanos(pre_execution_feedback),
+            reconciliation_nanos: nanos(reconciliation),
+            reconciliation_feedback_nanos: nanos(reconciliation_feedback),
+            total_adaptive_block_nanos: nanos(total_adaptive_block),
+            serial_reference_execution_nanos: None,
+            end_to_end_speedup_milli: None,
+        }
+    }
+
+    pub fn with_serial_reference(mut self, serial_reference: Duration) -> Self {
+        let serial_reference_execution_nanos = nanos(serial_reference);
+        self.serial_reference_execution_nanos = Some(serial_reference_execution_nanos);
+        self.end_to_end_speedup_milli = ratio_milli(
+            serial_reference_execution_nanos,
+            self.total_adaptive_block_nanos,
+        );
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FeedbackRecord {
     pub positive_observations: u64,
     pub negative_observations: u64,
@@ -532,6 +585,8 @@ pub struct ExperimentRecord {
     pub execution: ExecutionRecord,
     pub feedback: FeedbackRecord,
     pub feedback_timing: FeedbackTimingRecord,
+    #[serde(default)]
+    pub pipeline_timing: PipelineTimingRecord,
     pub correctness: CorrectnessRecord,
 }
 
@@ -548,6 +603,7 @@ impl ExperimentRecord {
         parallelism_reference: ParallelismReference,
         feedback_summary: ApplySummary,
         feedback_timing: FeedbackTimingRecord,
+        pipeline_timing: PipelineTimingRecord,
         correctness: CorrectnessRecord,
     ) -> Self {
         Self {
@@ -564,6 +620,7 @@ impl ExperimentRecord {
             execution: ExecutionRecord::from_reports(preexecution_metrics, reconciliation),
             feedback: feedback_summary.into(),
             feedback_timing,
+            pipeline_timing,
             correctness,
         }
     }
@@ -586,6 +643,7 @@ impl ExperimentRecord {
 
     pub fn validate(&self) -> Result<(), ExperimentRecordError> {
         if self.schema_version != EXPERIMENT_RECORD_SCHEMA_VERSION
+            && self.schema_version != PREVIOUS_EXPERIMENT_RECORD_SCHEMA_VERSION
             && self.schema_version != LEGACY_EXPERIMENT_RECORD_SCHEMA_VERSION
         {
             return Err(ExperimentRecordError::UnsupportedSchemaVersion {

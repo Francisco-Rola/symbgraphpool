@@ -63,7 +63,7 @@ Stable profile keys remain the persistence identity.
 
 ## 5E.3 — stable experiment schema
 
-The runtime workspace now contains `acg-evaluation`. `ExperimentRecord` schema version 2 provides a
+The runtime workspace now contains `acg-evaluation`. `ExperimentRecord` schema version 3 provides a
 single machine-readable record for future ConflictLab, MiniWarehouse, and external benchmark
 adapters. It includes:
 
@@ -76,9 +76,13 @@ adapters. It includes:
 - VM acquisition/entrypoint/recycle, host callback, MVCC, receipt, and cache diagnostics;
 - speculative reuse/invalidation/replay and post-consensus reconciliation timings;
 - raw conflict/replay/serialization feedback counts, batched mutation counts, and update overhead;
+- measured adaptive-pipeline stage timings and total wall from planning through post-consensus feedback,
+  plus a serial-reference end-to-end speedup;
 - optional canonical/serial state digests and an explicit serial-equivalence result.
 
-Records serialize deterministically to JSON and newline-delimited JSON (`JSONL`). Schema v1 remains readable; schema v2 is emitted for new runs. Unknown schema versions are rejected rather than silently interpreted.
+Records serialize deterministically to JSON and newline-delimited JSON (`JSONL`). Schema v1 and v2
+remain readable; schema v3 is emitted for new runs. Unknown schema versions are rejected rather than
+silently interpreted.
 
 ## 5E.4 — instrumentation boundary
 
