@@ -183,20 +183,86 @@ pub struct TransactionAdjacency {
 }
 
 #[derive(Clone, Debug)]
+pub struct CompactCandidateGroup {
+    provenance: EdgeProvenance,
+    members: Vec<TxIndex>,
+    logical_edges: usize,
+    edge_template: TransactionEdge,
+}
+
+impl CompactCandidateGroup {
+    pub fn provenance(&self) -> EdgeProvenance {
+        self.provenance
+    }
+
+    pub fn members(&self) -> &[TxIndex] {
+        &self.members
+    }
+
+    pub fn logical_edges(&self) -> usize {
+        self.logical_edges
+    }
+
+    pub fn edge_template(&self) -> &TransactionEdge {
+        &self.edge_template
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct CandidateGraph {
     transactions: Vec<CandidateTransaction>,
     edges: Vec<TransactionEdge>,
+    compact_groups: Vec<CompactCandidateGroup>,
+    compact_memberships: Vec<Vec<u32>>,
     adjacency_offsets: Vec<u32>,
     adjacency_entries: Vec<TransactionAdjacency>,
 }
 
 impl CandidateGraph {
+    /// Build a transaction-only graph for an explicit serial-bypass plan.
+    ///
+    /// The bypass path deliberately skips candidate-edge materialization and adaptive feedback for
+    /// the block; callers still retain transaction metadata for execution/accounting.
+    pub fn from_transactions(
+        transactions: Vec<CandidateTransaction>,
+    ) -> Result<Self, CandidateGraphError> {
+        u32::try_from(transactions.len())
+            .map_err(|_| CandidateGraphError::TooManyTransactions(transactions.len()))?;
+        for transaction in &transactions {
+            transaction.validate()?;
+        }
+        finish_graph(transactions, Vec::new(), Vec::new())
+    }
+
     pub fn transactions(&self) -> &[CandidateTransaction] {
         &self.transactions
     }
 
     pub fn edges(&self) -> &[TransactionEdge] {
         &self.edges
+    }
+
+    pub fn compact_groups(&self) -> &[CompactCandidateGroup] {
+        &self.compact_groups
+    }
+
+    pub fn logical_edge_count(&self) -> usize {
+        self.edges.len().saturating_add(
+            self.compact_groups
+                .iter()
+                .map(|group| {
+                    group
+                        .logical_edges
+                        .saturating_sub(group.members.len().saturating_sub(1))
+                })
+                .sum::<usize>(),
+        )
+    }
+
+    pub fn provenance_is_compact(&self, provenance: EdgeProvenance) -> bool {
+        self.compact_groups
+            .iter()
+            .any(|group| group.provenance == provenance)
     }
 
     pub fn transaction(&self, index: TxIndex) -> Option<&CandidateTransaction> {
@@ -219,6 +285,37 @@ impl CandidateGraph {
             .binary_search_by_key(&right, |entry| entry.neighbor)
             .ok()?;
         self.edges.get(neighbors[offset].edge_index as usize)
+    }
+
+    pub fn candidate_provenance_between(
+        &self,
+        left: TxIndex,
+        right: TxIndex,
+    ) -> Option<EdgeProvenance> {
+        if let Some(edge) = self.edge_between(left, right) {
+            return Some(edge.provenance);
+        }
+        let left_groups = self.compact_memberships.get(left.0 as usize)?;
+        let right_groups = self.compact_memberships.get(right.0 as usize)?;
+        let mut left_offset = 0;
+        let mut right_offset = 0;
+        while left_offset < left_groups.len() && right_offset < right_groups.len() {
+            match left_groups[left_offset].cmp(&right_groups[right_offset]) {
+                std::cmp::Ordering::Less => left_offset += 1,
+                std::cmp::Ordering::Greater => right_offset += 1,
+                std::cmp::Ordering::Equal => {
+                    return self
+                        .compact_groups
+                        .get(left_groups[left_offset] as usize)
+                        .map(|group| group.provenance);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn contains_candidate_pair(&self, left: TxIndex, right: TxIndex) -> bool {
+        self.candidate_provenance_between(left, right).is_some()
     }
 }
 
@@ -269,6 +366,10 @@ pub struct WeightedCandidateGraphConfig {
     /// Cost-aware Brick 5D policy. With no replay-cost evidence, scheduling risk exactly matches
     /// the Brick 4 posterior probability.
     pub cost_policy: CostAwareEdgePolicyConfig,
+    /// Compact provable equivalence cliques into canonical chains while the relationship is
+    /// guaranteed hard by the scheduler's independence-maturity gate.
+    pub compact_immature_equivalence_edges: bool,
+    pub independent_observations_before_softening: u32,
 }
 
 impl WeightedCandidateGraphConfig {
@@ -317,6 +418,13 @@ impl<'graph> CandidateGraphBuilder<'graph> {
     ) -> Result<CandidateGraph, CandidateGraphError> {
         let (buckets, instance_buckets) = self.prepare_transactions(&transactions)?;
         let mut edges = Vec::<TransactionEdge>::new();
+        let mut compact_groups = Vec::<CompactCandidateGroup>::new();
+        let materialization_context = StaticMaterializationContext {
+            transactions: &transactions,
+            buckets: &buckets,
+            instance_buckets: &instance_buckets,
+            compiled_predicates: &self.compiled_predicates,
+        };
         let mut visited_profile_edges = BTreeSet::<ProfileEdgeIndex>::new();
 
         for (profile_offset, bucket) in buckets.iter().enumerate() {
@@ -334,18 +442,16 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                 }
                 let profile_edge = &self.profile_graph.edges()[adjacency.edge_index.0 as usize];
                 materialize_static_profile_edge(
-                    &transactions,
-                    &buckets,
-                    &instance_buckets,
-                    &self.compiled_predicates,
+                    &materialization_context,
                     &mut edges,
+                    &mut compact_groups,
                     profile_edge,
                     StaticMaterialization::Binary,
                 )?;
             }
         }
 
-        finish_graph(transactions, edges)
+        finish_graph(transactions, edges, compact_groups)
     }
 
     /// Builds an adaptive weighted candidate graph from symbolic predicates plus runtime history.
@@ -364,6 +470,13 @@ impl<'graph> CandidateGraphBuilder<'graph> {
         feedback_config.validate()?;
         let (buckets, instance_buckets) = self.prepare_transactions(&transactions)?;
         let mut edges = Vec::<TransactionEdge>::new();
+        let mut compact_groups = Vec::<CompactCandidateGroup>::new();
+        let materialization_context = StaticMaterializationContext {
+            transactions: &transactions,
+            buckets: &buckets,
+            instance_buckets: &instance_buckets,
+            compiled_predicates: &self.compiled_predicates,
+        };
         let mut visited_profile_edges = BTreeSet::<ProfileEdgeIndex>::new();
         let mut visited_runtime_edges = BTreeSet::<RuntimeEdgeId>::new();
 
@@ -403,13 +516,14 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                     serialization_cost,
                     edge_materialization_threshold: config.edge_materialization_threshold,
                     cost_policy: config.cost_policy,
+                    compact_immature_equivalence_edges: config.compact_immature_equivalence_edges,
+                    independent_observations_before_softening: config
+                        .independent_observations_before_softening,
                 };
                 materialize_static_profile_edge(
-                    &transactions,
-                    &buckets,
-                    &instance_buckets,
-                    &self.compiled_predicates,
+                    &materialization_context,
                     &mut edges,
+                    &mut compact_groups,
                     profile_edge,
                     StaticMaterialization::Adaptive(&adaptive_materialization),
                 )?;
@@ -454,7 +568,7 @@ impl<'graph> CandidateGraphBuilder<'graph> {
             }
         }
 
-        finish_graph(transactions, edges)
+        finish_graph(transactions, edges, compact_groups)
     }
 
     fn prepare_transactions(
@@ -496,6 +610,8 @@ struct AdaptiveMaterialization {
     serialization_cost: SerializationCostEstimate,
     edge_materialization_threshold: f64,
     cost_policy: CostAwareEdgePolicyConfig,
+    compact_immature_equivalence_edges: bool,
+    independent_observations_before_softening: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -505,6 +621,18 @@ enum StaticMaterialization<'a> {
 }
 
 impl StaticMaterialization<'_> {
+    fn may_compact_equivalence_clique(self) -> bool {
+        match self {
+            Self::Binary => false,
+            Self::Adaptive(adaptive) => {
+                adaptive.compact_immature_equivalence_edges
+                    && adaptive.independent_observations_before_softening != 0
+                    && adaptive.estimate.negative_observations
+                        < u64::from(adaptive.independent_observations_before_softening)
+            }
+        }
+    }
+
     fn has_candidate_miss_history(self) -> bool {
         match self {
             Self::Binary => false,
@@ -555,18 +683,23 @@ impl StaticMaterialization<'_> {
     }
 }
 
+struct StaticMaterializationContext<'a> {
+    transactions: &'a [CandidateTransaction],
+    buckets: &'a [Vec<TxIndex>],
+    instance_buckets: &'a [BTreeMap<InstanceId, Vec<TxIndex>>],
+    compiled_predicates: &'a [CompiledPredicate],
+}
+
 fn materialize_static_profile_edge(
-    transactions: &[CandidateTransaction],
-    buckets: &[Vec<TxIndex>],
-    instance_buckets: &[BTreeMap<InstanceId, Vec<TxIndex>>],
-    compiled_predicates: &[CompiledPredicate],
+    context: &StaticMaterializationContext<'_>,
     edges: &mut Vec<TransactionEdge>,
+    compact_groups: &mut Vec<CompactCandidateGroup>,
     profile_edge: &acg_profile_graph::LoadedProfileEdge,
     mode: StaticMaterialization<'_>,
 ) -> Result<(), CandidateGraphError> {
-    let source_bucket = &buckets[profile_edge.source.0 as usize];
-    let target_bucket = &buckets[profile_edge.target.0 as usize];
-    let predicate = &compiled_predicates[profile_edge.index.0 as usize];
+    let source_bucket = &context.buckets[profile_edge.source.0 as usize];
+    let target_bucket = &context.buckets[profile_edge.target.0 as usize];
+    let predicate = &context.compiled_predicates[profile_edge.index.0 as usize];
 
     // Once concrete execution has disproved candidate pruning for this relationship, do not let
     // the predicate's static same-instance fast path hide future pairs before the predicate can be
@@ -574,13 +707,29 @@ fn materialize_static_profile_edge(
     let may_use_instance_fast_path =
         predicate.requires_same_instance() && !mode.has_candidate_miss_history();
 
+    if profile_edge.source == profile_edge.target
+        && may_use_instance_fast_path
+        && mode.may_compact_equivalence_clique()
+        && materialize_equivalence_chains(
+            context.transactions,
+            edges,
+            compact_groups,
+            profile_edge,
+            predicate,
+            source_bucket,
+            mode,
+        )?
+    {
+        return Ok(());
+    }
+
     if may_use_instance_fast_path {
-        let source_instances = &instance_buckets[profile_edge.source.0 as usize];
-        let target_instances = &instance_buckets[profile_edge.target.0 as usize];
+        let source_instances = &context.instance_buckets[profile_edge.source.0 as usize];
+        let target_instances = &context.instance_buckets[profile_edge.target.0 as usize];
         if profile_edge.source == profile_edge.target {
             for instance_bucket in source_instances.values() {
                 materialize_same_bucket_pairs(
-                    transactions,
+                    context.transactions,
                     edges,
                     profile_edge,
                     predicate,
@@ -594,7 +743,7 @@ fn materialize_static_profile_edge(
                     continue;
                 };
                 materialize_cross_bucket_pairs(
-                    transactions,
+                    context.transactions,
                     edges,
                     profile_edge,
                     predicate,
@@ -606,7 +755,7 @@ fn materialize_static_profile_edge(
         }
     } else if profile_edge.source == profile_edge.target {
         materialize_same_bucket_pairs(
-            transactions,
+            context.transactions,
             edges,
             profile_edge,
             predicate,
@@ -615,7 +764,7 @@ fn materialize_static_profile_edge(
         )?;
     } else {
         materialize_cross_bucket_pairs(
-            transactions,
+            context.transactions,
             edges,
             profile_edge,
             predicate,
@@ -625,6 +774,72 @@ fn materialize_static_profile_edge(
         )?;
     }
     Ok(())
+}
+
+fn materialize_equivalence_chains(
+    transactions: &[CandidateTransaction],
+    edges: &mut Vec<TransactionEdge>,
+    compact_groups: &mut Vec<CompactCandidateGroup>,
+    profile_edge: &acg_profile_graph::LoadedProfileEdge,
+    predicate: &CompiledPredicate,
+    bucket: &[TxIndex],
+    mode: StaticMaterialization<'_>,
+) -> Result<bool, CandidateGraphError> {
+    let mut groups = BTreeMap::new();
+    for &tx_index in bucket {
+        let transaction = &transactions[tx_index.0 as usize];
+        let Some(key) =
+            predicate.equivalence_key(transaction.instance_id, &transaction.input_bindings)
+        else {
+            return Ok(false);
+        };
+        groups.entry(key).or_insert_with(Vec::new).push(tx_index);
+    }
+    let metrics = mode.edge_metrics();
+    let provenance = EdgeProvenance::Static {
+        profile_edge_index: profile_edge.index,
+    };
+    for members in groups.into_values().filter(|members| members.len() >= 2) {
+        let logical_edges = members
+            .len()
+            .saturating_mul(members.len().saturating_sub(1))
+            / 2;
+        for pair in members.windows(2) {
+            push_edge(
+                edges,
+                pair[0],
+                pair[1],
+                provenance,
+                PredicateResult::True,
+                profile_edge.conflict_kinds,
+                metrics,
+            );
+        }
+        let edge_template = TransactionEdge {
+            source: members[0],
+            target: members[1],
+            provenance,
+            predicate_result: PredicateResult::True,
+            conflict_kinds: profile_edge.conflict_kinds,
+            probability_q16: metrics.probability_q16,
+            confidence_q16: metrics.confidence_q16,
+            concrete_conflict_observations: metrics.concrete_conflict_observations,
+            concrete_independent_observations: metrics.concrete_independent_observations,
+            scheduling_risk_q16: metrics.scheduling_risk_q16,
+            expected_replay_cost_nanos: metrics.expected_replay_cost_nanos,
+            expected_invalidated_descendants_milli: metrics.expected_invalidated_descendants_milli,
+            replay_cost_confidence_q16: metrics.replay_cost_confidence_q16,
+            expected_serialization_cost_nanos: metrics.expected_serialization_cost_nanos,
+            serialization_cost_confidence_q16: metrics.serialization_cost_confidence_q16,
+        };
+        compact_groups.push(CompactCandidateGroup {
+            provenance,
+            members,
+            logical_edges,
+            edge_template,
+        });
+    }
+    Ok(true)
 }
 
 fn materialize_same_bucket_pairs(
@@ -886,6 +1101,7 @@ fn push_edge(
 fn finish_graph(
     transactions: Vec<CandidateTransaction>,
     mut edges: Vec<TransactionEdge>,
+    compact_groups: Vec<CompactCandidateGroup>,
 ) -> Result<CandidateGraph, CandidateGraphError> {
     edges.sort_by_key(|edge| (edge.source, edge.target, edge.provenance));
     let mut adjacency = vec![Vec::<TransactionAdjacency>::new(); transactions.len()];
@@ -914,9 +1130,23 @@ fn finish_graph(
         );
     }
 
+    let mut compact_memberships = vec![Vec::<u32>::new(); transactions.len()];
+    for (group_index, group) in compact_groups.iter().enumerate() {
+        let group_index = u32::try_from(group_index)
+            .map_err(|_| CandidateGraphError::TooManyEdges(compact_groups.len()))?;
+        for member in &group.members {
+            compact_memberships[member.0 as usize].push(group_index);
+        }
+    }
+    for memberships in &mut compact_memberships {
+        memberships.sort_unstable();
+    }
+
     Ok(CandidateGraph {
         transactions,
         edges,
+        compact_groups,
+        compact_memberships,
         adjacency_offsets,
         adjacency_entries,
     })

@@ -1,11 +1,12 @@
 use std::time::{Duration, Instant};
 
 use acg_cosmwasm_engine::{
-    CanonicalTransaction, CanonicalTxDisposition, CosmWasmEngine, EngineError, ExecutionOutcome,
-    ParallelExecutionConfig, PostConsensusTimings, PredictionMatchMetrics,
-    PreparedSpeculativeBlock, ReconciliationDependencyEvidence, SpeculativeDependency,
-    SpeculativeDependencyClass, SpeculativeExecutionMetrics, SpeculativeWave,
-    SplitPhaseSpeculativeBlockOutcome, StateSnapshot, TransactionId, ValidationOutcome,
+    CanonicalTransaction, CanonicalTxDisposition, ContractExecutionDiagnostics, CosmWasmEngine,
+    EngineError, ExecutionOutcome, ParallelExecutionConfig, PostConsensusTimings,
+    PredictionMatchMetrics, PreparedSpeculativeBlock, ReconciliationDependencyEvidence,
+    SpeculativeDependency, SpeculativeDependencyClass, SpeculativeExecutionMetrics,
+    SpeculativeWave, SplitPhaseSpeculativeBlockOutcome, StateSnapshot, TransactionId,
+    ValidationOutcome,
 };
 use thiserror::Error;
 
@@ -120,6 +121,65 @@ impl SerialBlockExecutor {
             block_time_nanos: block.context.time_nanos,
             transactions: executions,
         })
+    }
+
+    /// Execute a canonical serial block while collecting the same contract/VM lifecycle
+    /// diagnostics used by speculative execution. This path never constructs MVCC state or enters
+    /// the READY-DAG executor.
+    pub fn execute_with_diagnostics(
+        &self,
+        block: &ProducedBlock,
+        plan: &ExecutionPlan,
+    ) -> Result<(BlockExecutionReport, ContractExecutionDiagnostics), BlockExecutionError> {
+        plan.validate()?;
+        for (wave_index, wave) in plan.waves.iter().enumerate() {
+            if wave.transaction_indices.len() > 1 {
+                return Err(BlockExecutionError::ParallelWaveUnsupported {
+                    wave_index,
+                    width: wave.transaction_indices.len(),
+                });
+            }
+        }
+
+        let mut executions = Vec::with_capacity(block.transactions.len());
+        let mut contract_diagnostics = ContractExecutionDiagnostics::default();
+        let phase_started = Instant::now();
+        for wave in &plan.waves {
+            let transaction_index = wave.transaction_indices[0];
+            let pending = &block.transactions[transaction_index];
+            let mut context = block.context.clone();
+            context.transaction_index =
+                Some(u32::try_from(transaction_index).map_err(|_| {
+                    BlockExecutionError::TransactionIndexOverflow(transaction_index)
+                })?);
+            let started_after_phase = phase_started.elapsed();
+            let execution_started = Instant::now();
+            let (result, diagnostics) = self
+                .engine
+                .execute_request_with_diagnostics(context, pending.request.clone());
+            let service_duration = execution_started.elapsed();
+            contract_diagnostics.merge(&diagnostics);
+            let completed_after_phase = phase_started.elapsed();
+            executions.push(TransactionExecution {
+                transaction_index,
+                transaction_id: pending.transaction_id(),
+                result,
+                timing: TransactionExecutionTiming {
+                    started_after_phase,
+                    completed_after_phase,
+                    service_duration,
+                },
+            });
+        }
+
+        Ok((
+            BlockExecutionReport {
+                block_height: block.context.height,
+                block_time_nanos: block.context.time_nanos,
+                transactions: executions,
+            },
+            contract_diagnostics,
+        ))
     }
 }
 

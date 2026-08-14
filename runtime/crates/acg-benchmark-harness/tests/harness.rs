@@ -179,6 +179,19 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
     values.insert("acg.hard_threshold".to_owned(), "0.91".to_owned());
     values.insert("acg.risk_budget".to_owned(), "0.12".to_owned());
     values.insert("acg.max_wave_width".to_owned(), "4".to_owned());
+    values.insert("acg.exploration_rate".to_owned(), "0.40".to_owned());
+    values.insert(
+        "acg.exploration_min_uncertainty".to_owned(),
+        "0.45".to_owned(),
+    );
+    values.insert(
+        "acg.exploration_max_transactions_per_block".to_owned(),
+        "3".to_owned(),
+    );
+    values.insert(
+        "acg.serial_bypass_service_cost_reference_nanos_per_transaction".to_owned(),
+        "175000".to_owned(),
+    );
     values.insert(
         "acg.serialization_cost_reference_nanos".to_owned(),
         "500000".to_owned(),
@@ -188,6 +201,25 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
     assert_eq!(tuning.planning_config.scheduler.hard_threshold, 0.91);
     assert_eq!(tuning.planning_config.scheduler.risk_budget, 0.12);
     assert_eq!(tuning.planning_config.scheduler.max_wave_width, Some(4));
+    assert_eq!(tuning.planning_config.scheduler.exploration_rate, 0.40);
+    assert_eq!(
+        tuning.planning_config.scheduler.exploration_min_uncertainty,
+        0.45
+    );
+    assert_eq!(
+        tuning
+            .planning_config
+            .scheduler
+            .exploration_max_transactions_per_block,
+        3
+    );
+    assert_eq!(
+        tuning
+            .planning_config
+            .serial_bypass
+            .service_cost_reference_nanos_per_transaction,
+        175_000
+    );
     assert_eq!(
         tuning
             .planning_config
@@ -298,6 +330,48 @@ fn conflictlab_simulation_and_complexity_knobs_change_block_without_changing_cor
 }
 
 #[test]
+fn serial_bypass_skips_candidate_graph_after_losing_warmup_economics() {
+    let mut bypass = run("cost-aware", 13);
+    bypass
+        .parameters
+        .insert("transactions".to_owned(), "32".to_owned());
+    bypass
+        .parameters
+        .insert("accounts".to_owned(), "32".to_owned());
+    bypass
+        .parameters
+        .insert("warmup_blocks".to_owned(), "2".to_owned());
+    bypass
+        .parameters
+        .insert("acg.serial_bypass_enabled".to_owned(), "true".to_owned());
+    bypass.parameters.insert(
+        "acg.serial_bypass_min_projected_speedup".to_owned(),
+        "100.0".to_owned(),
+    );
+
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness.run_manifest(&smoke_manifest(vec![bypass])).unwrap();
+    let record = &outcome.records[0];
+    assert!(record.planning.serial_bypassed);
+    assert!(record
+        .planning
+        .serial_bypass_projected_speedup_milli
+        .is_some());
+    assert!(record.planning.serial_bypass_mean_service_nanos.is_some());
+    assert!(record
+        .planning
+        .serial_bypass_admission_score_milli
+        .is_some());
+    assert_eq!(record.scheduling.candidate_edges, 0);
+    assert_eq!(record.execution.dependency_count, 0);
+    assert_eq!(record.execution.workers, 1);
+    assert_eq!(record.execution.canonical_transactions, 32);
+    assert_eq!(record.feedback.positive_observations, 0);
+    assert_eq!(record.feedback.negative_observations, 0);
+    assert_eq!(record.correctness.serial_equivalent, Some(true));
+}
+
+#[test]
 fn conflictlab_prediction_quality_modes_expose_soft_edges_and_runtime_misses() {
     let mut coarse = run("static", 10);
     coarse
@@ -332,6 +406,52 @@ fn conflictlab_prediction_quality_modes_expose_soft_edges_and_runtime_misses() {
         Some("coarse")
     );
 
+    let mut bucketed = run("probability-only", 12);
+    bucketed
+        .parameters
+        .insert("transactions".to_owned(), "32".to_owned());
+    bucketed
+        .parameters
+        .insert("accounts".to_owned(), "32".to_owned());
+    bucketed
+        .parameters
+        .insert("hot_account_probability_bps".to_owned(), "0".to_owned());
+    bucketed
+        .parameters
+        .insert("warmup_blocks".to_owned(), "0".to_owned());
+    bucketed
+        .parameters
+        .insert("prediction_quality".to_owned(), "bucketed".to_owned());
+    bucketed
+        .parameters
+        .insert("prediction_buckets".to_owned(), "4".to_owned());
+    bucketed
+        .parameters
+        .insert("acg.risk_budget".to_owned(), "0.90".to_owned());
+    let bucketed_outcome = harness
+        .run_manifest(&smoke_manifest(vec![bucketed]))
+        .unwrap();
+    let bucketed_record = &bucketed_outcome.records[0];
+    let complete_pairs = 32 * 31 / 2;
+    assert!(bucketed_record.scheduling.candidate_edges > 0);
+    assert!(bucketed_record.scheduling.candidate_edges < complete_pairs);
+    assert_eq!(
+        bucketed_record
+            .metadata
+            .environment
+            .get("conflictlab_prediction_quality")
+            .map(String::as_str),
+        Some("bucketed")
+    );
+    assert_eq!(
+        bucketed_record
+            .metadata
+            .environment
+            .get("conflictlab_prediction_buckets")
+            .map(String::as_str),
+        Some("4")
+    );
+
     let mut opaque = run("cost-aware", 11);
     opaque
         .parameters
@@ -353,4 +473,69 @@ fn conflictlab_prediction_quality_modes_expose_soft_edges_and_runtime_misses() {
     assert!(opaque_record.feedback.candidate_misses > 0);
     assert!(opaque_record.feedback.positive_observations > 0);
     assert_eq!(opaque_record.correctness.serial_equivalent, Some(true));
+}
+
+#[test]
+fn compact_equivalence_planning_keeps_logical_candidate_coverage() {
+    let mut identity = run("probability-only", 14);
+    identity
+        .parameters
+        .insert("transactions".to_owned(), "32".to_owned());
+    identity
+        .parameters
+        .insert("accounts".to_owned(), "1".to_owned());
+    identity
+        .parameters
+        .insert("hot_account_probability_bps".to_owned(), "10000".to_owned());
+    identity
+        .parameters
+        .insert("warmup_blocks".to_owned(), "0".to_owned());
+
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness
+        .run_manifest(&smoke_manifest(vec![identity]))
+        .unwrap();
+    let record = &outcome.records[0];
+    assert_eq!(record.scheduling.candidate_edges, 32 * 31 / 2);
+    assert_eq!(record.scheduling.materialized_candidate_edges, 31);
+    assert_eq!(record.scheduling.scheduled_dependencies, 31);
+    assert_eq!(record.feedback.candidate_misses, 0);
+    assert_eq!(record.feedback.positive_observations, 32 * 31 / 2);
+    assert_eq!(record.correctness.serial_equivalent, Some(true));
+}
+
+#[test]
+fn conflictlab_mixed_complexity_is_deterministic_and_reported() {
+    let mut identity = run("static", 15);
+    identity
+        .parameters
+        .insert("transactions".to_owned(), "64".to_owned());
+    identity
+        .parameters
+        .insert("accounts".to_owned(), "64".to_owned());
+    identity
+        .parameters
+        .insert("complexity_mix".to_owned(), "33-34-33".to_owned());
+    identity
+        .parameters
+        .insert("warmup_blocks".to_owned(), "0".to_owned());
+
+    let left = ConflictLabWorkload.prepare(&identity).unwrap();
+    let right = ConflictLabWorkload.prepare(&identity).unwrap();
+    assert_eq!(left.measured_block(), right.measured_block());
+
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness
+        .run_manifest(&smoke_manifest(vec![identity]))
+        .unwrap();
+    let record = &outcome.records[0];
+    assert_eq!(record.correctness.serial_equivalent, Some(true));
+    assert_eq!(
+        record
+            .metadata
+            .environment
+            .get("conflictlab_complexity_mix")
+            .map(String::as_str),
+        Some("33-34-33")
+    );
 }

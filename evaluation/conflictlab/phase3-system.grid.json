@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "physical_core_limit": 6,
+  "record_schema_version": 3,
+  "policy_file": "../policies/release-tuning.json",
+  "base_run": {
+    "workload": "conflictlab",
+    "parameters": {
+      "execution_backend": "wasm",
+      "prediction_buckets": "8",
+      "warmup_blocks": "4",
+      "sim.admission_tps": "25000",
+      "sim.block_interval_ms": "2000",
+      "sim.mempool_policy": "fifo",
+      "acg.soft_threshold": "0.20",
+      "acg.hard_threshold": "0.95",
+      "acg.feedback_retention_factor": "0.99",
+      "acg.feedback_confidence_scale": "20.0",
+      "acg.exploration_rate": "0.05",
+      "acg.exploration_risk_budget": "0.90",
+      "acg.serial_bypass_min_transactions": "32",
+      "acg.serial_bypass_min_projected_speedup": "1.05"
+    }
+  },
+  "order_seed": 2026081405,
+  "experiment_id": "conflictlab-phase3-system",
+  "matrix": {
+    "modes": [
+      "static",
+      "probability-only",
+      "cost-aware"
+    ],
+    "workers": [
+      6
+    ],
+    "seeds": [
+      11,
+      47
+    ],
+    "parameters": {
+      "prediction_quality": [
+        "exact",
+        "bucketed"
+      ],
+      "acg.serial_bypass_enabled": [
+        "false",
+        "true"
+      ],
+      "acg.risk_budget": [
+        "0.50",
+        "0.90"
+      ]
+    },
+    "cases": [
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "light",
+          "work_iterations": "4096",
+          "storage_rounds": "1",
+          "payload_bytes": "64"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "light",
+          "work_iterations": "4096",
+          "storage_rounds": "1",
+          "payload_bytes": "64"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "heavy",
+          "work_iterations": "262144",
+          "storage_rounds": "4",
+          "payload_bytes": "1024"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "heavy",
+          "work_iterations": "262144",
+          "storage_rounds": "4",
+          "payload_bytes": "1024"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "light",
+          "work_iterations": "4096",
+          "storage_rounds": "1",
+          "payload_bytes": "64"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "light",
+          "work_iterations": "4096",
+          "storage_rounds": "1",
+          "payload_bytes": "64"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "heavy",
+          "work_iterations": "262144",
+          "storage_rounds": "4",
+          "payload_bytes": "1024"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "heavy",
+          "work_iterations": "262144",
+          "storage_rounds": "4",
+          "payload_bytes": "1024"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "light",
+          "work_iterations": "4096",
+          "storage_rounds": "1",
+          "payload_bytes": "64"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "light",
+          "work_iterations": "4096",
+          "storage_rounds": "1",
+          "payload_bytes": "64"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "medium",
+          "work_iterations": "32768",
+          "storage_rounds": "2",
+          "payload_bytes": "256"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "heavy",
+          "work_iterations": "262144",
+          "storage_rounds": "4",
+          "payload_bytes": "1024"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "heavy",
+          "work_iterations": "262144",
+          "storage_rounds": "4",
+          "payload_bytes": "1024"
+        }
+      }
+    ]
+  }
+}

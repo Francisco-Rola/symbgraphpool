@@ -72,6 +72,8 @@ fn weighted_config(epoch: u64, threshold: f64) -> WeightedCandidateGraphConfig {
         epoch,
         edge_materialization_threshold: threshold,
         cost_policy: Default::default(),
+        compact_immature_equivalence_edges: false,
+        independent_observations_before_softening: 8,
     }
 }
 
@@ -520,6 +522,8 @@ fn replay_cost_changes_scheduling_risk_without_rewriting_raw_conflict_probabilit
         epoch: 1,
         edge_materialization_threshold: 0.0,
         cost_policy,
+        compact_immature_equivalence_edges: false,
+        independent_observations_before_softening: 8,
     };
     let cheap = CandidateGraphBuilder::new(&graph)
         .build_weighted(transactions(), &cheap_store, &feedback_config, config)
@@ -541,6 +545,10 @@ fn replay_cost_changes_scheduling_risk_without_rewriting_raw_conflict_probabilit
         hard_threshold: 0.70,
         risk_budget: 0.20,
         max_wave_width: None,
+        exploration_rate: 0.0,
+        exploration_risk_budget: 0.90,
+        exploration_min_uncertainty: 0.35,
+        exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
     };
     assert_eq!(scheduler.classify(cheap_edge), EdgeClass::Soft);
@@ -626,6 +634,8 @@ fn learned_serialization_cost_changes_risk_while_preserving_replay_and_probabili
         epoch: 1,
         edge_materialization_threshold: 0.0,
         cost_policy,
+        compact_immature_equivalence_edges: false,
+        independent_observations_before_softening: 8,
     };
     let cheap = CandidateGraphBuilder::new(&graph)
         .build_weighted(
@@ -656,4 +666,51 @@ fn learned_serialization_cost_changes_risk_while_preserving_replay_and_probabili
     assert!(cheap_edge.serialization_cost_confidence() > 0.99);
     assert!(expensive_edge.serialization_cost_confidence() > 0.99);
     assert!(cheap_edge.scheduling_risk() > expensive_edge.scheduling_risk() + 0.5);
+}
+
+#[test]
+fn immature_equivalence_clique_is_materialized_as_a_chain_with_logical_coverage() {
+    let graph = graph();
+    let store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let feedback_config = feedback_config();
+    let transactions = (0..8_u64)
+        .map(|offset| {
+            tx(
+                &graph,
+                offset + 1,
+                "execute::Credit",
+                1,
+                json!({"account":"alice"}),
+            )
+        })
+        .collect();
+    let candidate = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            transactions,
+            &store,
+            &feedback_config,
+            WeightedCandidateGraphConfig {
+                epoch: 0,
+                edge_materialization_threshold: 0.0,
+                cost_policy: Default::default(),
+                compact_immature_equivalence_edges: true,
+                independent_observations_before_softening: 8,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(candidate.logical_edge_count(), 28);
+    assert_eq!(candidate.edges().len(), 7);
+    assert_eq!(candidate.compact_groups().len(), 1);
+    assert!(candidate.contains_candidate_pair(TxIndex(0), TxIndex(7)));
+    assert!(candidate.edge_between(TxIndex(0), TxIndex(7)).is_none());
+
+    let scheduler =
+        acg_candidate_graph::RiskBoundedScheduler::new(RiskBoundedSchedulerConfig::default())
+            .unwrap();
+    let schedule = scheduler.schedule(&candidate).unwrap();
+    assert_eq!(schedule.ordering_dependencies.len(), 7);
+    schedule
+        .validate_against(&candidate, scheduler.config())
+        .unwrap();
 }

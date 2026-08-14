@@ -211,9 +211,14 @@ fn setup_with_runtime(
                 hard_threshold: 0.70,
                 risk_budget: 0.30,
                 max_wave_width: None,
+                exploration_rate: 0.0,
+                exploration_risk_budget: 0.90,
+                exploration_min_uncertainty: 0.35,
+                exploration_max_transactions_per_block: 0,
                 independent_observations_before_softening: 8,
             },
             cost_policy: Default::default(),
+            serial_bypass: Default::default(),
         },
     )
     .unwrap();

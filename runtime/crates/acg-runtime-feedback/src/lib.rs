@@ -4,7 +4,8 @@ mod adaptive_pipeline;
 
 pub use adaptive_pipeline::{
     AdaptiveBlockPlan, AdaptiveBlockRun, AdaptivePipelineError, AdaptivePlanningConfig,
-    AdaptivePlanningMetrics, AdaptiveSerialPipeline, ReplayAttribution, SerializationAttribution,
+    AdaptivePlanningMetrics, AdaptiveSerialPipeline, ReplayAttribution, SerialBypassConfig,
+    SerializationAttribution,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -371,11 +372,11 @@ impl CollectorRelationship {
     }
 }
 
-fn collector_relationship_for_edge(
-    edge: &acg_candidate_graph::TransactionEdge,
+fn collector_relationship_for_provenance(
+    provenance: EdgeProvenance,
     profile_pair: (ProfileId, ProfileId),
 ) -> CollectorRelationship {
-    match edge.provenance {
+    match provenance {
         EdgeProvenance::Static { profile_edge_index } => CollectorRelationship::Static {
             edge_index: profile_edge_index,
             source: profile_pair.0,
@@ -386,6 +387,13 @@ fn collector_relationship_for_edge(
             target: profile_pair.1,
         },
     }
+}
+
+fn collector_relationship_for_edge(
+    edge: &acg_candidate_graph::TransactionEdge,
+    profile_pair: (ProfileId, ProfileId),
+) -> CollectorRelationship {
+    collector_relationship_for_provenance(edge.provenance, profile_pair)
 }
 
 fn collector_relationship_for_profiles(
@@ -431,6 +439,30 @@ pub struct SerializationCostEvidence {
     pub predecessor: TxIndex,
     pub transaction: TxIndex,
     pub marginal_ready_delay_nanos: u64,
+}
+
+/// Upstream-aggregated Brick-5E serialization evidence keyed by learned relationship.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AggregatedSerializationCostBuffer {
+    batches: BTreeMap<EdgeProvenance, (u64, usize)>,
+}
+
+impl AggregatedSerializationCostBuffer {
+    pub fn record(&mut self, provenance: EdgeProvenance, marginal_ready_delay_nanos: u64) {
+        let entry = self.batches.entry(provenance).or_default();
+        entry.0 = entry.0.saturating_add(marginal_ready_delay_nanos);
+        entry.1 = entry.1.saturating_add(1);
+    }
+
+    pub fn observations(&self) -> usize {
+        self.batches
+            .values()
+            .fold(0_usize, |total, (_, count)| total.saturating_add(*count))
+    }
+
+    pub fn relationship_batches(&self) -> usize {
+        self.batches.len()
+    }
 }
 
 /// Converts concrete execution/validation evidence into runtime-independent observations.
@@ -610,6 +642,9 @@ impl BlockFeedbackCollector {
         let mut candidate_totals_by_profile = BTreeMap::<(ProfileId, ProfileId), usize>::new();
 
         for edge in candidate_graph.edges() {
+            if candidate_graph.provenance_is_compact(edge.provenance) {
+                continue;
+            }
             let pair = canonical_tx_pair(edge.source, edge.target);
             if !pair_in_evidence_scope(pair, evidence_participants)
                 || !successful.contains(&pair.0)
@@ -623,6 +658,30 @@ impl BlockFeedbackCollector {
             let relationship = collector_relationship_for_edge(edge, profile_pair);
             *candidate_totals.entry(relationship).or_default() += 1;
             *candidate_totals_by_profile.entry(profile_pair).or_default() += 1;
+        }
+
+        for group in candidate_graph.compact_groups() {
+            let eligible_members = group
+                .members()
+                .iter()
+                .copied()
+                .filter(|index| successful.contains(index))
+                .collect::<Vec<_>>();
+            if eligible_members.len() < 2 {
+                continue;
+            }
+            let scoped_pairs =
+                eligible_pairs_within_group(&eligible_members, evidence_participants);
+            if scoped_pairs == 0 {
+                continue;
+            }
+            let left = candidate_transaction(candidate_graph, eligible_members[0])?;
+            let right = candidate_transaction(candidate_graph, eligible_members[1])?;
+            let profile_pair = canonical_profile_pair(left.profile_id, right.profile_id);
+            let relationship =
+                collector_relationship_for_provenance(group.provenance(), profile_pair);
+            *candidate_totals.entry(relationship).or_default() += scoped_pairs;
+            *candidate_totals_by_profile.entry(profile_pair).or_default() += scoped_pairs;
         }
 
         let mut observed_candidate_conflicts = BTreeMap::<CollectorRelationship, usize>::new();
@@ -639,8 +698,8 @@ impl BlockFeedbackCollector {
             let profile_pair = canonical_profile_pair(left.profile_id, right.profile_id);
             let relationship = collector_relationship_for_profiles(profile_graph, profile_pair);
             let candidate_relationship = candidate_graph
-                .edge_between(pair.0, pair.1)
-                .map(|edge| collector_relationship_for_edge(edge, profile_pair));
+                .candidate_provenance_between(pair.0, pair.1)
+                .map(|provenance| collector_relationship_for_provenance(provenance, profile_pair));
             buffer.record_conflict(
                 left.profile_id,
                 right.profile_id,
@@ -750,7 +809,8 @@ impl BlockFeedbackCollector {
             }
             let left = candidate_transaction(candidate_graph, conflict.left)?;
             let right = candidate_transaction(candidate_graph, conflict.right)?;
-            let candidate_edge = candidate_graph.edge_between(conflict.left, conflict.right);
+            let candidate_present =
+                candidate_graph.contains_candidate_pair(conflict.left, conflict.right);
             let target = static_or_runtime_target(profile_graph, left.profile_id, right.profile_id);
             buffer.push(ConflictObservation::conflict(
                 left.profile_id,
@@ -762,12 +822,15 @@ impl BlockFeedbackCollector {
                 target,
                 conflict_weight,
                 epoch,
-                candidate_edge.is_some(),
+                candidate_present,
             )?);
             compared_pairs.insert(canonical_tx_pair(conflict.left, conflict.right));
         }
 
         for edge in candidate_graph.edges() {
+            if candidate_graph.provenance_is_compact(edge.provenance) {
+                continue;
+            }
             let pair = canonical_tx_pair(edge.source, edge.target);
             if !pair_in_evidence_scope(pair, evidence_participants)
                 || !successful.contains(&pair.0)
@@ -796,6 +859,45 @@ impl BlockFeedbackCollector {
                 epoch,
                 true,
             )?);
+        }
+
+        for group in candidate_graph.compact_groups() {
+            for (left_offset, &left_index) in group.members().iter().enumerate() {
+                for &right_index in group.members().iter().skip(left_offset + 1) {
+                    let pair = canonical_tx_pair(left_index, right_index);
+                    if !pair_in_evidence_scope(pair, evidence_participants)
+                        || !successful.contains(&pair.0)
+                        || !successful.contains(&pair.1)
+                        || observed_map.contains_key(&pair)
+                        || !compared_pairs.insert(pair)
+                    {
+                        continue;
+                    }
+                    let left = candidate_transaction(candidate_graph, pair.0)?;
+                    let right = candidate_transaction(candidate_graph, pair.1)?;
+                    let target = match group.provenance() {
+                        EdgeProvenance::Static { profile_edge_index } => {
+                            ObservationTarget::Static {
+                                edge_index: profile_edge_index,
+                            }
+                        }
+                        EdgeProvenance::RuntimeDiscovered { .. } => {
+                            ObservationTarget::RuntimeDiscovered
+                        }
+                    };
+                    buffer.push(ConflictObservation::independent(
+                        left.profile_id,
+                        right.profile_id,
+                        left.tx_id,
+                        right.tx_id,
+                        observation_source,
+                        target,
+                        independent_weight,
+                        epoch,
+                        true,
+                    )?);
+                }
+            }
         }
 
         let successful_buckets = bucket_successful_by_profile(candidate_graph, &successful)?;
@@ -858,7 +960,7 @@ impl BlockFeedbackCollector {
             let pair = canonical_tx_pair(item.predecessor, item.transaction);
             let left = candidate_transaction(candidate_graph, pair.0)?;
             let right = candidate_transaction(candidate_graph, pair.1)?;
-            let candidate_present = candidate_graph.edge_between(pair.0, pair.1).is_some();
+            let candidate_present = candidate_graph.contains_candidate_pair(pair.0, pair.1);
             let static_edge =
                 profile_graph.edge_between_profiles(left.profile_id, right.profile_id);
             let fallback_exists = feedback_store
@@ -934,7 +1036,7 @@ impl BlockFeedbackCollector {
             let pair = canonical_tx_pair(item.predecessor, item.transaction);
             let left = candidate_transaction(candidate_graph, pair.0)?;
             let right = candidate_transaction(candidate_graph, pair.1)?;
-            let candidate_present = candidate_graph.edge_between(pair.0, pair.1).is_some();
+            let candidate_present = candidate_graph.contains_candidate_pair(pair.0, pair.1);
             let static_edge =
                 profile_graph.edge_between_profiles(left.profile_id, right.profile_id);
             let fallback_exists = feedback_store
@@ -1139,6 +1241,23 @@ fn eligible_pairs_for_profile_relationship(
     }
 }
 
+fn eligible_pairs_within_group(
+    members: &[TxIndex],
+    evidence_participants: Option<&BTreeSet<TxIndex>>,
+) -> usize {
+    let total = choose_two(members.len());
+    match evidence_participants {
+        None => total,
+        Some(participants) => {
+            let participant_count = members
+                .iter()
+                .filter(|index| participants.contains(index))
+                .count();
+            total.saturating_sub(choose_two(members.len().saturating_sub(participant_count)))
+        }
+    }
+}
+
 fn choose_two(count: usize) -> usize {
     count.saturating_mul(count.saturating_sub(1)) / 2
 }
@@ -1184,7 +1303,7 @@ fn maybe_add_fallback_negative(
         ObservationTarget::RuntimeDiscovered,
         weight,
         epoch,
-        graph.edge_between(pair.0, pair.1).is_some(),
+        graph.contains_candidate_pair(pair.0, pair.1),
     )?);
     Ok(())
 }
@@ -1324,7 +1443,7 @@ impl RuntimeFeedbackEngine {
         evidence: &[SerializationCostEvidence],
         epoch: u64,
     ) -> Result<ApplySummary, RuntimeFeedbackError> {
-        let mut batches = BTreeMap::<EdgeProvenance, (u64, usize)>::new();
+        let mut buffer = AggregatedSerializationCostBuffer::default();
         for item in evidence {
             let edge = candidate_graph
                 .edge_between(item.predecessor, item.transaction)
@@ -1334,13 +1453,19 @@ impl RuntimeFeedbackEngine {
                         transaction: item.transaction,
                     },
                 )?;
-            let entry = batches.entry(edge.provenance).or_default();
-            entry.0 = entry.0.saturating_add(item.marginal_ready_delay_nanos);
-            entry.1 = entry.1.saturating_add(1);
+            buffer.record(edge.provenance, item.marginal_ready_delay_nanos);
         }
+        self.process_serialization_cost_aggregates(buffer, epoch)
+    }
 
+    /// Apply serialization evidence that was already grouped by learned relationship upstream.
+    pub fn process_serialization_cost_aggregates(
+        &mut self,
+        buffer: AggregatedSerializationCostBuffer,
+        epoch: u64,
+    ) -> Result<ApplySummary, RuntimeFeedbackError> {
         let mut summary = ApplySummary::default();
-        for (provenance, (total_cost_nanos, observations)) in batches {
+        for (provenance, (total_cost_nanos, observations)) in buffer.batches {
             let applied = match provenance {
                 EdgeProvenance::Static { profile_edge_index } => {
                     self.store.record_static_serialization_cost_batch(

@@ -126,6 +126,25 @@ fn wildcard_tuple_keeps_array_indices_synchronized() {
 }
 
 #[test]
+fn conditional_same_instance_input_equality_exposes_equivalence_key() {
+    let predicate = CompiledPredicate::compile(&clause(
+        input_equality("account", "account"),
+        ("true", DependencyKind::None),
+    ));
+    let alice = InputBindings::from_value(json!({"account":"alice"}));
+    let bob = InputBindings::from_value(json!({"account":"bob"}));
+
+    let alice_key = predicate.equivalence_key(InstanceId(7), &alice).unwrap();
+    let same_alice_key = predicate.equivalence_key(InstanceId(7), &alice).unwrap();
+    let bob_key = predicate.equivalence_key(InstanceId(7), &bob).unwrap();
+    let other_instance_key = predicate.equivalence_key(InstanceId(8), &alice).unwrap();
+
+    assert_eq!(alice_key, same_alice_key);
+    assert_ne!(alice_key, bob_key);
+    assert_ne!(alice_key, other_instance_key);
+}
+
+#[test]
 fn same_instance_requirement_prunes_cross_contract_storage() {
     let predicate = CompiledPredicate::compile(&clause(
         input_equality("account", "account"),

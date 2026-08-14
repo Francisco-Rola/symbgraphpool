@@ -51,6 +51,18 @@ pub struct ExperimentMetadata {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PlanningRecord {
+    /// Whether the validator-local economics gate skipped adaptive graph construction.
+    #[serde(default)]
+    pub serial_bypassed: bool,
+    /// Previous-block projected speedup that triggered bypass, in milli-x.
+    #[serde(default)]
+    pub serial_bypass_projected_speedup_milli: Option<u64>,
+    /// Previous-block mean service cost used by the complexity-aware admission gate.
+    #[serde(default)]
+    pub serial_bypass_mean_service_nanos: Option<u64>,
+    /// Complexity-discounted admission score, in milli-x.
+    #[serde(default)]
+    pub serial_bypass_admission_score_milli: Option<u64>,
     pub adapter_nanos: u64,
     pub candidate_graph_nanos: u64,
     pub scheduler_nanos: u64,
@@ -62,6 +74,10 @@ pub struct PlanningRecord {
 impl From<AdaptivePlanningMetrics> for PlanningRecord {
     fn from(metrics: AdaptivePlanningMetrics) -> Self {
         Self {
+            serial_bypassed: false,
+            serial_bypass_projected_speedup_milli: None,
+            serial_bypass_mean_service_nanos: None,
+            serial_bypass_admission_score_milli: None,
             adapter_nanos: nanos(metrics.adapter),
             candidate_graph_nanos: nanos(metrics.candidate_graph),
             scheduler_nanos: nanos(metrics.scheduler),
@@ -72,19 +88,34 @@ impl From<AdaptivePlanningMetrics> for PlanningRecord {
     }
 }
 
+impl PlanningRecord {
+    fn from_runtime(metrics: AdaptivePlanningMetrics, plan: &AdaptiveBlockPlan) -> Self {
+        let mut record = Self::from(metrics);
+        record.serial_bypassed = plan.serial_bypassed;
+        record.serial_bypass_projected_speedup_milli = plan.serial_bypass_projected_speedup_milli;
+        record.serial_bypass_mean_service_nanos = plan.serial_bypass_mean_service_nanos;
+        record.serial_bypass_admission_score_milli = plan.serial_bypass_admission_score_milli;
+        record
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SchedulingRecord {
+    /// Logical candidate relationships, including compact equivalence groups.
     pub candidate_edges: u64,
+    /// Candidate edges actually materialized in memory before scheduling.
+    #[serde(default)]
+    pub materialized_candidate_edges: u64,
     pub low_edges: u64,
     pub soft_edges: u64,
     pub hard_edges: u64,
-    /// Dependencies implied by classification/wave placement before hard-edge transitive reduction.
+    /// Dependencies implied by classification/wave placement before final ordering-DAG reduction.
     #[serde(default)]
     pub pre_reduction_dependencies: u64,
-    /// Final execution dependency count after exact hard-edge transitive reduction.
+    /// Final execution dependency count after exact ordering-DAG transitive reduction.
     #[serde(default)]
     pub scheduled_dependencies: u64,
-    /// Hard edges removed because another hard path already preserved the same reachability.
+    /// Ordering edges removed because another retained path already preserved the same reachability.
     #[serde(default)]
     pub edges_elided_by_reduction: u64,
     /// Legacy schema-v1 name for the final scheduled dependency count.
@@ -108,7 +139,10 @@ impl SchedulingRecord {
         let scheduled_dependencies =
             u64::try_from(plan.schedule.ordering_dependencies.len()).unwrap_or(u64::MAX);
         let mut record = Self {
-            candidate_edges: u64::try_from(plan.candidate_graph.edges().len()).unwrap_or(u64::MAX),
+            candidate_edges: u64::try_from(plan.candidate_graph.logical_edge_count())
+                .unwrap_or(u64::MAX),
+            materialized_candidate_edges: u64::try_from(plan.candidate_graph.edges().len())
+                .unwrap_or(u64::MAX),
             pre_reduction_dependencies: u64::try_from(
                 plan.schedule.pre_reduction_ordering_dependencies,
             )
@@ -125,31 +159,14 @@ impl SchedulingRecord {
         };
 
         for edge in plan.candidate_graph.edges() {
-            match config.scheduler.classify(edge) {
-                EdgeClass::Low => record.low_edges = record.low_edges.saturating_add(1),
-                EdgeClass::Soft => record.soft_edges = record.soft_edges.saturating_add(1),
-                EdgeClass::Hard => record.hard_edges = record.hard_edges.saturating_add(1),
+            if plan.candidate_graph.provenance_is_compact(edge.provenance) {
+                continue;
             }
-            record.probability_q16_sum = record
-                .probability_q16_sum
-                .saturating_add(u64::from(edge.probability_q16));
-            record.scheduling_risk_q16_sum = record
-                .scheduling_risk_q16_sum
-                .saturating_add(u64::from(edge.scheduling_risk_q16));
-            if edge.replay_cost_confidence_q16 != 0 {
-                record.replay_cost_evidence_edges =
-                    record.replay_cost_evidence_edges.saturating_add(1);
-            }
-            if edge.serialization_cost_confidence_q16 != 0 {
-                record.serialization_cost_evidence_edges =
-                    record.serialization_cost_evidence_edges.saturating_add(1);
-            }
-            record.expected_replay_cost_nanos_sum = record
-                .expected_replay_cost_nanos_sum
-                .saturating_add(edge.expected_replay_cost_nanos);
-            record.expected_serialization_cost_nanos_sum = record
-                .expected_serialization_cost_nanos_sum
-                .saturating_add(edge.expected_serialization_cost_nanos);
+            accumulate_candidate_edge(&mut record, edge, config.scheduler.classify(edge), 1);
+        }
+        for group in plan.candidate_graph.compact_groups() {
+            let count = u64::try_from(group.logical_edges()).unwrap_or(u64::MAX);
+            accumulate_candidate_edge(&mut record, group.edge_template(), EdgeClass::Hard, count);
         }
 
         for dependency in &plan.schedule.ordering_dependencies {
@@ -165,6 +182,39 @@ impl SchedulingRecord {
         }
         record
     }
+}
+
+fn accumulate_candidate_edge(
+    record: &mut SchedulingRecord,
+    edge: &acg_candidate_graph::TransactionEdge,
+    class: EdgeClass,
+    count: u64,
+) {
+    match class {
+        EdgeClass::Low => record.low_edges = record.low_edges.saturating_add(count),
+        EdgeClass::Soft => record.soft_edges = record.soft_edges.saturating_add(count),
+        EdgeClass::Hard => record.hard_edges = record.hard_edges.saturating_add(count),
+    }
+    record.probability_q16_sum = record
+        .probability_q16_sum
+        .saturating_add(u64::from(edge.probability_q16).saturating_mul(count));
+    record.scheduling_risk_q16_sum = record
+        .scheduling_risk_q16_sum
+        .saturating_add(u64::from(edge.scheduling_risk_q16).saturating_mul(count));
+    if edge.replay_cost_confidence_q16 != 0 {
+        record.replay_cost_evidence_edges = record.replay_cost_evidence_edges.saturating_add(count);
+    }
+    if edge.serialization_cost_confidence_q16 != 0 {
+        record.serialization_cost_evidence_edges = record
+            .serialization_cost_evidence_edges
+            .saturating_add(count);
+    }
+    record.expected_replay_cost_nanos_sum = record
+        .expected_replay_cost_nanos_sum
+        .saturating_add(edge.expected_replay_cost_nanos.saturating_mul(count));
+    record.expected_serialization_cost_nanos_sum = record
+        .expected_serialization_cost_nanos_sum
+        .saturating_add(edge.expected_serialization_cost_nanos.saturating_mul(count));
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -189,6 +239,10 @@ pub struct ContractExecutionRecord {
     pub aggregate_mvcc_lock_wait_nanos: u64,
     pub aggregate_mvcc_publish_nanos: u64,
     pub wasm_instance_acquires: u64,
+    #[serde(default)]
+    pub wasm_instance_reuse_hits: u64,
+    #[serde(default)]
+    pub wasm_instance_pool_misses: u64,
     pub wasm_entrypoint_calls: u64,
     pub wasm_instance_recycles: u64,
     pub host_storage_gets: u64,
@@ -242,6 +296,8 @@ impl From<&ContractExecutionDiagnostics> for ContractExecutionRecord {
             aggregate_mvcc_lock_wait_nanos: nanos(diagnostics.aggregate_mvcc_lock_wait),
             aggregate_mvcc_publish_nanos: nanos(diagnostics.aggregate_mvcc_publish),
             wasm_instance_acquires: diagnostics.wasm_instance_acquires,
+            wasm_instance_reuse_hits: diagnostics.wasm_instance_reuse_hits,
+            wasm_instance_pool_misses: diagnostics.wasm_instance_pool_misses,
             wasm_entrypoint_calls: diagnostics.wasm_entrypoint_calls,
             wasm_instance_recycles: diagnostics.wasm_instance_recycles,
             host_storage_gets: diagnostics.host_storage_gets,
@@ -352,6 +408,28 @@ impl ExecutionRecord {
             contract: (&diagnostics.contract).into(),
         }
     }
+
+    fn from_serial_bypass(
+        report: &BlockExecutionReport,
+        execution_wall: Duration,
+        diagnostics: &ContractExecutionDiagnostics,
+    ) -> Self {
+        let transactions = u64::try_from(report.transactions.len()).unwrap_or(u64::MAX);
+        Self {
+            transactions,
+            workers: 1,
+            dependency_count: 0,
+            hard_dependency_count: 0,
+            preexecution_executor_total_nanos: nanos(execution_wall),
+            preexecution_worker_wall_nanos: nanos(execution_wall),
+            aggregate_contract_execution_nanos: nanos(diagnostics.aggregate_request_execution),
+            max_in_flight: u64::from(!report.transactions.is_empty()),
+            canonical_transactions: transactions,
+            decided_transactions: transactions,
+            contract: diagnostics.into(),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -450,6 +528,40 @@ impl ParallelismRecord {
             scheduler_realization_milli: observed_service_dag_bound_nanos
                 .and_then(|observed| ratio_milli(actual_execution_wall_nanos, observed)),
             scheduler_realization_corrected_milli: parallel_lower_bound_nanos
+                .and_then(|bound| ratio_milli(actual_execution_wall_nanos, bound)),
+        }
+    }
+
+    fn from_serial_bypass(
+        plan: &AdaptiveBlockPlan,
+        report: &BlockExecutionReport,
+        execution_wall: Duration,
+        reference: ParallelismReference,
+    ) -> Self {
+        let observed_services = service_nanos_by_transaction(plan, report);
+        let observed_service_work_nanos = observed_services
+            .as_ref()
+            .map(|values| values.iter().copied().fold(0_u64, u64::saturating_add));
+        let observed_service_dag_bound_nanos = observed_service_work_nanos;
+        let actual_execution_wall_nanos = nanos(execution_wall);
+        Self {
+            serial_equivalent_work_nanos: reference.serial_equivalent_work_nanos,
+            serial_cost_dag_bound_nanos: reference.serial_cost_dag_bound_nanos,
+            observed_service_dag_bound_nanos,
+            observed_service_work_nanos,
+            worker_capacity_bound_nanos: observed_service_work_nanos,
+            parallel_lower_bound_nanos: observed_service_work_nanos,
+            actual_execution_wall_nanos,
+            service_inflation_milli: match (
+                observed_service_dag_bound_nanos,
+                reference.serial_cost_dag_bound_nanos,
+            ) {
+                (Some(observed), Some(serial)) => ratio_milli(observed, serial),
+                _ => None,
+            },
+            scheduler_realization_milli: observed_service_dag_bound_nanos
+                .and_then(|bound| ratio_milli(actual_execution_wall_nanos, bound)),
+            scheduler_realization_corrected_milli: observed_service_work_nanos
                 .and_then(|bound| ratio_milli(actual_execution_wall_nanos, bound)),
         }
     }
@@ -609,7 +721,7 @@ impl ExperimentRecord {
         Self {
             schema_version: EXPERIMENT_RECORD_SCHEMA_VERSION,
             metadata,
-            planning: planning_metrics.into(),
+            planning: PlanningRecord::from_runtime(planning_metrics, plan),
             scheduling: SchedulingRecord::from_plan(plan, planning_config),
             parallelism: ParallelismRecord::from_reports(
                 plan,
@@ -620,6 +732,42 @@ impl ExperimentRecord {
             execution: ExecutionRecord::from_reports(preexecution_metrics, reconciliation),
             feedback: feedback_summary.into(),
             feedback_timing,
+            pipeline_timing,
+            correctness,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_serial_bypass(
+        metadata: ExperimentMetadata,
+        planning_metrics: AdaptivePlanningMetrics,
+        planning_config: &AdaptivePlanningConfig,
+        plan: &AdaptiveBlockPlan,
+        serial_report: &BlockExecutionReport,
+        serial_execution_wall: Duration,
+        serial_contract_diagnostics: &ContractExecutionDiagnostics,
+        parallelism_reference: ParallelismReference,
+        pipeline_timing: PipelineTimingRecord,
+        correctness: CorrectnessRecord,
+    ) -> Self {
+        Self {
+            schema_version: EXPERIMENT_RECORD_SCHEMA_VERSION,
+            metadata,
+            planning: PlanningRecord::from_runtime(planning_metrics, plan),
+            scheduling: SchedulingRecord::from_plan(plan, planning_config),
+            parallelism: ParallelismRecord::from_serial_bypass(
+                plan,
+                serial_report,
+                serial_execution_wall,
+                parallelism_reference,
+            ),
+            execution: ExecutionRecord::from_serial_bypass(
+                serial_report,
+                serial_execution_wall,
+                serial_contract_diagnostics,
+            ),
+            feedback: FeedbackRecord::default(),
+            feedback_timing: FeedbackTimingRecord::default(),
             pipeline_timing,
             correctness,
         }

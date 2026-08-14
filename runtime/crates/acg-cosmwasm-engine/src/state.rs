@@ -50,6 +50,16 @@ impl TransactionState {
         }
     }
 
+    pub(crate) fn new_with_diagnostics(
+        base: SharedWorld,
+        transaction_id: TransactionId,
+        diagnostics: Arc<ExecutionHotPathDiagnostics>,
+    ) -> Self {
+        let mut state = Self::new(base, transaction_id);
+        state.diagnostics = Some(diagnostics);
+        state
+    }
+
     pub fn new_mvcc(
         base: SharedWorld,
         mvcc_view: MvccReadView,

@@ -33,7 +33,7 @@ use acg_feedback::{AdaptiveFeedbackConfig, ApplySummary};
 use acg_profile_graph::ProfileGraph;
 use acg_runtime_feedback::{
     AdaptiveBlockPlan, AdaptivePlanningConfig, AdaptiveSerialPipeline, RuntimeFeedbackEngine,
-    RuntimeFeedbackWeights, TraceConflictConfig,
+    RuntimeFeedbackWeights, SerialBypassConfig, TraceConflictConfig,
 };
 use acg_validator_sim::{
     BlockExecutionReport, ExecutionPlan, ExecutionWave, ProducedBlock, SerialBlockExecutor,
@@ -268,6 +268,10 @@ impl BenchmarkHarness {
         }
         let serial_equivalent_work_nanos = nanos(serial_reference.wall);
         let serial_cost_dag_bound_nanos = dag_bound_from_services(&measured.plan, &serial_services);
+        let parallelism_reference = ParallelismReference {
+            serial_equivalent_work_nanos: Some(serial_equivalent_work_nanos),
+            serial_cost_dag_bound_nanos: Some(serial_cost_dag_bound_nanos),
+        };
 
         let mut metadata = ExperimentMetadata {
             experiment_id: manifest.experiment_id.clone(),
@@ -290,25 +294,38 @@ impl BenchmarkHarness {
             .insert("benchmark_adapter".to_owned(), workload.name().to_owned());
         metadata.environment.extend(adaptive.environment_metadata());
 
-        Ok(ExperimentRecord::from_runtime(
-            metadata,
-            measured.planning_metrics,
-            pipeline.planning_config(),
-            &measured.plan,
-            &measured.preexecution_report,
-            &measured.preexecution_metrics,
-            &measured.reconciliation,
-            ParallelismReference {
-                serial_equivalent_work_nanos: Some(serial_equivalent_work_nanos),
-                serial_cost_dag_bound_nanos: Some(serial_cost_dag_bound_nanos),
-            },
-            measured.feedback_summary,
-            measured.feedback_timing,
-            measured
-                .pipeline_timing
-                .with_serial_reference(serial_reference.wall),
-            correctness,
-        ))
+        let pipeline_timing = measured
+            .pipeline_timing
+            .with_serial_reference(serial_reference.wall);
+        let record = match &measured.execution {
+            MeasuredExecution::Speculative(execution) => ExperimentRecord::from_runtime(
+                metadata,
+                measured.planning_metrics,
+                pipeline.planning_config(),
+                &measured.plan,
+                &execution.preexecution_report,
+                &execution.preexecution_metrics,
+                &execution.reconciliation,
+                parallelism_reference,
+                measured.feedback_summary,
+                measured.feedback_timing,
+                pipeline_timing,
+                correctness,
+            ),
+            MeasuredExecution::SerialBypass(execution) => ExperimentRecord::from_serial_bypass(
+                metadata,
+                measured.planning_metrics,
+                pipeline.planning_config(),
+                &measured.plan,
+                &execution.report,
+                execution.execution_wall,
+                &execution.contract_diagnostics,
+                parallelism_reference,
+                pipeline_timing,
+                correctness,
+            ),
+        };
+        Ok(record)
     }
 }
 
@@ -332,7 +349,15 @@ impl HarnessTuningConfig {
             "acg.hard_threshold",
             "acg.risk_budget",
             "acg.max_wave_width",
+            "acg.exploration_rate",
+            "acg.exploration_risk_budget",
+            "acg.exploration_min_uncertainty",
+            "acg.exploration_max_transactions_per_block",
             "acg.independent_observations_before_softening",
+            "acg.serial_bypass_enabled",
+            "acg.serial_bypass_min_transactions",
+            "acg.serial_bypass_min_projected_speedup",
+            "acg.serial_bypass_service_cost_reference_nanos_per_transaction",
             "acg.serialization_cost_reference_nanos",
             "acg.invalidation_fanout_weight",
             "acg.feedback_retention_factor",
@@ -378,6 +403,28 @@ impl HarnessTuningConfig {
                     "acg.max_wave_width",
                     planning_default.scheduler.max_wave_width,
                 )?,
+                exploration_rate: parameter(
+                    parameters,
+                    "acg.exploration_rate",
+                    planning_default.scheduler.exploration_rate,
+                )?,
+                exploration_risk_budget: parameter(
+                    parameters,
+                    "acg.exploration_risk_budget",
+                    planning_default.scheduler.exploration_risk_budget,
+                )?,
+                exploration_min_uncertainty: parameter(
+                    parameters,
+                    "acg.exploration_min_uncertainty",
+                    planning_default.scheduler.exploration_min_uncertainty,
+                )?,
+                exploration_max_transactions_per_block: parameter(
+                    parameters,
+                    "acg.exploration_max_transactions_per_block",
+                    planning_default
+                        .scheduler
+                        .exploration_max_transactions_per_block,
+                )?,
                 independent_observations_before_softening: parameter(
                     parameters,
                     "acg.independent_observations_before_softening",
@@ -398,6 +445,30 @@ impl HarnessTuningConfig {
                     parameters,
                     "acg.invalidation_fanout_weight",
                     planning_default.cost_policy.invalidation_fanout_weight,
+                )?,
+            },
+            serial_bypass: SerialBypassConfig {
+                enabled: parameter(
+                    parameters,
+                    "acg.serial_bypass_enabled",
+                    planning_default.serial_bypass.enabled,
+                )?,
+                min_transactions: parameter(
+                    parameters,
+                    "acg.serial_bypass_min_transactions",
+                    planning_default.serial_bypass.min_transactions,
+                )?,
+                min_projected_speedup: parameter(
+                    parameters,
+                    "acg.serial_bypass_min_projected_speedup",
+                    planning_default.serial_bypass.min_projected_speedup,
+                )?,
+                service_cost_reference_nanos_per_transaction: parameter(
+                    parameters,
+                    "acg.serial_bypass_service_cost_reference_nanos_per_transaction",
+                    planning_default
+                        .serial_bypass
+                        .service_cost_reference_nanos_per_transaction,
                 )?,
             },
         };
@@ -444,12 +515,27 @@ impl HarnessTuningConfig {
     }
 }
 
-struct MeasuredAdaptiveBlock {
-    plan: AdaptiveBlockPlan,
-    planning_metrics: acg_runtime_feedback::AdaptivePlanningMetrics,
+struct MeasuredSpeculativeExecution {
     preexecution_report: BlockExecutionReport,
     preexecution_metrics: acg_cosmwasm_engine::ParallelSpeculativeExecutionMetrics,
     reconciliation: acg_validator_sim::SplitPhaseSpeculativeExecutionReport,
+}
+
+struct MeasuredSerialBypassExecution {
+    report: BlockExecutionReport,
+    contract_diagnostics: acg_cosmwasm_engine::ContractExecutionDiagnostics,
+    execution_wall: Duration,
+}
+
+enum MeasuredExecution {
+    Speculative(Box<MeasuredSpeculativeExecution>),
+    SerialBypass(Box<MeasuredSerialBypassExecution>),
+}
+
+struct MeasuredAdaptiveBlock {
+    plan: AdaptiveBlockPlan,
+    planning_metrics: acg_runtime_feedback::AdaptivePlanningMetrics,
+    execution: MeasuredExecution,
     feedback_summary: ApplySummary,
     feedback_timing: FeedbackTimingRecord,
     pipeline_timing: PipelineTimingRecord,
@@ -470,6 +556,39 @@ fn execute_adaptive_block(
         .plan_block_with_metrics(executor.engine(), graph, block)
         .map_err(display_error)?;
     let planning_wall = planning_started.elapsed();
+
+    if plan.serial_bypassed {
+        let execution_started = Instant::now();
+        let serial_executor = SerialBlockExecutor::new(executor.engine().clone());
+        let (report, contract_diagnostics) = serial_executor
+            .execute_with_diagnostics(block, &canonical_serial_plan(block.transactions.len()))
+            .map_err(display_error)?;
+        let execution_wall = execution_started.elapsed();
+        let total_adaptive_block_wall = total_started.elapsed();
+        pipeline.observe_block_economics(&report, total_adaptive_block_wall);
+        if !measured {
+            return Ok(None);
+        }
+        return Ok(Some(MeasuredAdaptiveBlock {
+            plan,
+            planning_metrics,
+            execution: MeasuredExecution::SerialBypass(Box::new(MeasuredSerialBypassExecution {
+                report,
+                contract_diagnostics,
+                execution_wall,
+            })),
+            feedback_summary: ApplySummary::default(),
+            feedback_timing: FeedbackTimingRecord::default(),
+            pipeline_timing: PipelineTimingRecord::from_durations(
+                planning_wall,
+                execution_wall,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+                total_adaptive_block_wall,
+            ),
+        }));
+    }
 
     let preexecution_started = Instant::now();
     let prepared = executor
@@ -529,6 +648,7 @@ fn execute_adaptive_block(
         post_feedback_started.elapsed()
     };
     let total_adaptive_block_wall = total_started.elapsed();
+    pipeline.observe_block_economics(&preexecution_report, total_adaptive_block_wall);
 
     if !measured {
         return Ok(None);
@@ -536,9 +656,11 @@ fn execute_adaptive_block(
     Ok(Some(MeasuredAdaptiveBlock {
         plan,
         planning_metrics,
-        preexecution_report,
-        preexecution_metrics,
-        reconciliation,
+        execution: MeasuredExecution::Speculative(Box::new(MeasuredSpeculativeExecution {
+            preexecution_report,
+            preexecution_metrics,
+            reconciliation,
+        })),
         feedback_summary: merge_apply_summaries(pre_summary, post_summary),
         feedback_timing: FeedbackTimingRecord::from_durations(
             pre_feedback_duration,

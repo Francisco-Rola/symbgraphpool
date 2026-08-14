@@ -23,6 +23,10 @@ METRICS = {
     "scheduler_realization_legacy": ("parallelism.scheduler_realization_milli", 1e-3),
     "scheduler_realization": ("parallelism.scheduler_realization_corrected_milli", 1e-3),
     "planning_ms": ("planning.total_nanos", 1e-6),
+    "serial_bypass": ("planning.serial_bypassed", 1.0),
+    "serial_bypass_projected_speedup": ("planning.serial_bypass_projected_speedup_milli", 1e-3),
+    "serial_bypass_mean_service_us": ("planning.serial_bypass_mean_service_nanos", 1e-3),
+    "serial_bypass_admission_score": ("planning.serial_bypass_admission_score_milli", 1e-3),
     "feedback_ms": ("feedback_timing.total_nanos", 1e-6),
     "pipeline_total_ms": ("pipeline_timing.total_adaptive_block_nanos", 1e-6),
     "pipeline_planning_ms": ("pipeline_timing.planning_nanos", 1e-6),
@@ -35,6 +39,8 @@ METRICS = {
     "invalidated_results": ("execution.invalidated_results", 1.0),
     "reused_results": ("execution.reused_results", 1.0),
     "candidate_edges": ("scheduling.candidate_edges", 1.0),
+    "materialized_candidate_edges": ("scheduling.materialized_candidate_edges", 1.0),
+    "candidate_materialization_compression": ("derived.candidate_materialization_compression", 1.0),
     "pre_reduction_dependencies": ("scheduling.pre_reduction_dependencies", 1.0),
     "scheduled_dependencies": ("scheduling.scheduled_dependencies", 1.0),
     "edges_elided_by_reduction": ("scheduling.edges_elided_by_reduction", 1.0),
@@ -47,8 +53,12 @@ METRICS = {
     "hard_dependencies": ("execution.hard_dependency_count", 1.0),
     "max_in_flight": ("execution.max_in_flight", 1.0),
     "wasm_acquire_ms": ("execution.contract.aggregate_wasm_instance_acquire_nanos", 1e-6),
+    "wasm_instance_reuse_hits": ("execution.contract.wasm_instance_reuse_hits", 1.0),
+    "wasm_instance_pool_misses": ("execution.contract.wasm_instance_pool_misses", 1.0),
     "wasm_entrypoint_ms": ("execution.contract.aggregate_wasm_entrypoint_nanos", 1e-6),
     "wasm_recycle_ms": ("execution.contract.aggregate_wasm_recycle_nanos", 1e-6),
+    "wasm_lifecycle_us_per_tx": ("derived.wasm_lifecycle_nanos_per_tx", 1e-3),
+    "wasm_lifecycle_share": ("derived.wasm_lifecycle_share", 1.0),
     "host_storage_ms": ("execution.contract.aggregate_host_storage_nanos", 1e-6),
     "mvcc_point_ms": ("execution.contract.aggregate_mvcc_storage_point_nanos", 1e-6),
     "mvcc_range_ms": ("execution.contract.aggregate_mvcc_storage_range_nanos", 1e-6),
@@ -100,6 +110,13 @@ def derived_flat(record):
     flat["derived.parallel_speedup"] = (
         float(serial) / float(wall) if wall not in (None, 0) and serial is not None else None
     )
+    logical_candidates = flat.get("scheduling.candidate_edges")
+    materialized_candidates = flat.get("scheduling.materialized_candidate_edges")
+    flat["derived.candidate_materialization_compression"] = (
+        float(logical_candidates) / float(materialized_candidates)
+        if materialized_candidates not in (None, 0) and logical_candidates is not None
+        else None
+    )
     pre_dependencies = flat.get("scheduling.pre_reduction_dependencies")
     scheduled_dependencies = flat.get("scheduling.scheduled_dependencies")
     flat["derived.dependency_compression"] = (
@@ -120,6 +137,21 @@ def derived_flat(record):
     flat["derived.feedback_nanos_per_observation"] = (
         float(feedback_nanos) / float(raw_feedback)
         if raw_feedback and feedback_nanos is not None
+        else None
+    )
+    wasm_lifecycle_nanos = (flat.get("execution.contract.aggregate_wasm_instance_acquire_nanos") or 0) + (
+        flat.get("execution.contract.aggregate_wasm_recycle_nanos") or 0
+    )
+    transactions = flat.get("execution.transactions")
+    request_execution_nanos = flat.get("execution.contract.aggregate_request_execution_nanos")
+    flat["derived.wasm_lifecycle_nanos_per_tx"] = (
+        float(wasm_lifecycle_nanos) / float(transactions)
+        if transactions not in (None, 0)
+        else None
+    )
+    flat["derived.wasm_lifecycle_share"] = (
+        float(wasm_lifecycle_nanos) / float(request_execution_nanos)
+        if request_execution_nanos not in (None, 0)
         else None
     )
     serialization_observations = flat.get("feedback.serialization_cost_observations")

@@ -62,3 +62,15 @@ ExperimentRecord schema v3 retains the dependency-reduction/batching and finite-
 adds measured adaptive-pipeline stage/wall timings and a serial-reference end-to-end speedup, and
 remains backward-readable for schema-v1/v2 records. The focused matrices sweep measured block sizes
 16, 32, 64, 128, 256, and 512 transactions.
+
+## Phase 3 system validation
+
+Phase 3 evaluates the final ordering-DAG reduction, upstream serialization-cost aggregation,
+previous-block economics bypass, bucketed prediction, and controlled exploration/marginal replay
+attribution. The focused matrix keeps VM lifecycle cost as a first-class axis by running light,
+medium, and heavy **real Wasm** transactions at B32/B128/B512:
+
+```bash
+./scripts/run-phase3-control-plane-diagnostics.sh
+./scripts/run-conflictlab-phase3-evaluation.sh
+```

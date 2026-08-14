@@ -76,6 +76,8 @@ fn candidate(
                 epoch,
                 edge_materialization_threshold: 0.0,
                 cost_policy,
+                compact_immature_equivalence_edges: false,
+                independent_observations_before_softening: 8,
             },
         )
         .unwrap()
@@ -102,6 +104,10 @@ fn brick5d_closed_loop_hardens_after_expensive_replay_then_relaxes_after_phase_c
         hard_threshold: 0.70,
         risk_budget: 0.20,
         max_wave_width: None,
+        exploration_rate: 0.0,
+        exploration_risk_budget: 0.90,
+        exploration_min_uncertainty: 0.35,
+        exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
     };
     let mut feedback = RuntimeFeedbackEngine::new(

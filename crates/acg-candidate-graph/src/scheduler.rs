@@ -44,6 +44,18 @@ pub struct RiskBoundedSchedulerConfig {
     pub risk_budget: f64,
     /// Optional upper bound on transactions in one reported wave.
     pub max_wave_width: Option<usize>,
+    /// Deterministic fraction of transactions allowed to use the exploration risk budget.
+    /// This keeps conservative policies from permanently starving themselves of replay evidence.
+    pub exploration_rate: f64,
+    /// Risk budget used by transactions selected for controlled exploration.
+    pub exploration_risk_budget: f64,
+    /// Minimum posterior uncertainty (`1 - confidence`) required before a soft relationship is
+    /// eligible for exploration.
+    pub exploration_min_uncertainty: f64,
+    /// Maximum number of transactions in one block that may consume risk above the production
+    /// budget. Since each transaction can be replayed at most once, this bounds exploration-
+    /// induced replay exposure per block.
+    pub exploration_max_transactions_per_block: usize,
     /// Concrete independence observations required before a symbolic/runtime-discovered hard
     /// relationship may be demoted to soft by its adaptive probability. `0` disables hard-to-soft
     /// demotion.
@@ -63,6 +75,10 @@ impl Default for RiskBoundedSchedulerConfig {
             hard_threshold: 0.80,
             risk_budget: 0.20,
             max_wave_width: None,
+            exploration_rate: 0.0,
+            exploration_risk_budget: 0.90,
+            exploration_min_uncertainty: 0.35,
+            exploration_max_transactions_per_block: 8,
             independent_observations_before_softening: 8,
         }
     }
@@ -73,6 +89,12 @@ impl RiskBoundedSchedulerConfig {
         validate_probability("soft_threshold", self.soft_threshold)?;
         validate_probability("hard_threshold", self.hard_threshold)?;
         validate_probability("risk_budget", self.risk_budget)?;
+        validate_probability("exploration_rate", self.exploration_rate)?;
+        validate_probability("exploration_risk_budget", self.exploration_risk_budget)?;
+        validate_probability(
+            "exploration_min_uncertainty",
+            self.exploration_min_uncertainty,
+        )?;
         if self.soft_threshold > self.hard_threshold {
             return Err(SchedulingError::ThresholdOrder {
                 soft_threshold: self.soft_threshold,
@@ -132,9 +154,10 @@ pub struct ScheduledWave {
 pub struct RiskBoundedSchedule {
     pub transaction_count: usize,
     pub waves: Vec<ScheduledWave>,
-    /// Dependencies before exact transitive reduction of the hard-dependency DAG.
+    /// Classified ordering dependencies before exact transitive reduction of the final DAG.
     pub pre_reduction_ordering_dependencies: usize,
-    /// Hard dependencies removed because an alternate hard path already preserves reachability.
+    /// Ordering dependencies removed because an alternate retained path already preserves
+    /// reachability. The legacy field name is retained for source compatibility.
     pub hard_dependencies_elided_by_reduction: usize,
     pub ordering_dependencies: Vec<ScheduledDependency>,
 }
@@ -204,14 +227,14 @@ impl RiskBoundedSchedule {
             return Err(SchedulingError::DependencySetMismatch);
         }
         let expected_pre_reduction = expected.pre_reduction_dependency_count(&assigned_wave)?;
+        let expected_elided = expected_pre_reduction.saturating_sub(expected_dependencies.len());
         if expected_pre_reduction != self.pre_reduction_ordering_dependencies
-            || expected.hard_dependencies_elided_by_reduction
-                != self.hard_dependencies_elided_by_reduction
+            || expected_elided != self.hard_dependencies_elided_by_reduction
         {
             return Err(SchedulingError::DependencyReductionMetadataMismatch {
                 expected_pre_reduction,
                 actual_pre_reduction: self.pre_reduction_ordering_dependencies,
-                expected_elided: expected.hard_dependencies_elided_by_reduction,
+                expected_elided,
                 actual_elided: self.hard_dependencies_elided_by_reduction,
             });
         }
@@ -222,16 +245,26 @@ impl RiskBoundedSchedule {
             .collect::<Vec<_>>();
         canonical_order.sort_by(|left, right| expected.compare_canonical_order(*left, *right));
 
+        let mut exploration_used = 0_usize;
         for tx_index in canonical_order {
             let wave_index = assigned_wave[tx_index.0 as usize].expect("completeness checked");
             let risk = expected.soft_risk(tx_index, wave_index, &placed_wave);
-            if risk > config.risk_budget {
+            let exploration_allowed = expected.should_explore(tx_index, config, exploration_used);
+            let budget = if exploration_allowed {
+                config.risk_budget.max(config.exploration_risk_budget)
+            } else {
+                config.risk_budget
+            };
+            if risk > budget {
                 return Err(SchedulingError::RiskBudgetExceeded {
                     tx_index,
                     wave_index,
                     risk,
-                    budget: config.risk_budget,
+                    budget,
                 });
+            }
+            if exploration_allowed && risk > config.risk_budget {
+                exploration_used = exploration_used.saturating_add(1);
             }
             placed_wave[tx_index.0 as usize] = Some(wave_index);
         }
@@ -286,6 +319,7 @@ impl RiskBoundedScheduler {
 
         let mut waves = Vec::<ScheduledWave>::new();
         let mut assigned_wave = vec![None::<usize>; transaction_count];
+        let mut exploration_used = 0_usize;
 
         for tx_index in order {
             let offset = tx_index.0 as usize;
@@ -305,20 +339,31 @@ impl RiskBoundedScheduler {
             // A soft neighbor that precedes this transaction canonically may either share its
             // wave (accepted speculation) or appear earlier, never later. This prevents arbitrary
             // reordering of known soft relationships while still allowing risk-bounded overlap.
-            for &(neighbor, _) in &analysis.soft_neighbors[offset] {
+            for &(neighbor, _, _) in &analysis.soft_neighbors[offset] {
                 if let Some(neighbor_wave) = assigned_wave[neighbor.0 as usize] {
                     minimum_wave = minimum_wave.max(neighbor_wave);
                 }
             }
 
+            let exploration_allowed =
+                analysis.should_explore(tx_index, &self.config, exploration_used);
+            let effective_budget = if exploration_allowed {
+                self.config
+                    .risk_budget
+                    .max(self.config.exploration_risk_budget)
+            } else {
+                self.config.risk_budget
+            };
             let mut selected_wave = None;
+            let mut selected_risk = 0.0;
             for (wave_index, wave) in waves.iter().enumerate().skip(minimum_wave) {
                 if !wave_has_capacity(wave, self.config.max_wave_width) {
                     continue;
                 }
                 let risk = analysis.soft_risk(tx_index, wave_index, &assigned_wave);
-                if risk <= self.config.risk_budget {
+                if risk <= effective_budget {
                     selected_wave = Some(wave_index);
+                    selected_risk = risk;
                     break;
                 }
             }
@@ -335,15 +380,20 @@ impl RiskBoundedScheduler {
             };
             waves[wave_index].transaction_indices.push(tx_index);
             assigned_wave[offset] = Some(wave_index);
+            if exploration_allowed && selected_risk > self.config.risk_budget {
+                exploration_used = exploration_used.saturating_add(1);
+            }
         }
 
+        let pre_reduction_ordering_dependencies =
+            analysis.pre_reduction_dependency_count(&assigned_wave)?;
         let ordering_dependencies = analysis.dependencies_for_assignment(&assigned_wave)?;
         let schedule = RiskBoundedSchedule {
             transaction_count,
             waves,
-            pre_reduction_ordering_dependencies: analysis
-                .pre_reduction_dependency_count(&assigned_wave)?,
-            hard_dependencies_elided_by_reduction: analysis.hard_dependencies_elided_by_reduction,
+            pre_reduction_ordering_dependencies,
+            hard_dependencies_elided_by_reduction: pre_reduction_ordering_dependencies
+                .saturating_sub(ordering_dependencies.len()),
             ordering_dependencies,
         };
         debug_assert!(schedule.validate_against(graph, &self.config).is_ok());
@@ -355,10 +405,9 @@ impl RiskBoundedScheduler {
 struct SchedulingAnalysis<'graph> {
     graph: &'graph CandidateGraph,
     hard_predecessors: Vec<Vec<TxIndex>>,
-    soft_neighbors: Vec<Vec<(TxIndex, f64)>>,
+    soft_neighbors: Vec<Vec<(TxIndex, f64, f64)>>,
     edge_classes: BTreeMap<(TxIndex, TxIndex), EdgeClass>,
     reduced_hard_dependencies: Vec<ScheduledDependency>,
-    hard_dependencies_elided_by_reduction: usize,
 }
 
 impl<'graph> SchedulingAnalysis<'graph> {
@@ -370,7 +419,6 @@ impl<'graph> SchedulingAnalysis<'graph> {
             soft_neighbors: vec![Vec::new(); transaction_count],
             edge_classes: BTreeMap::new(),
             reduced_hard_dependencies: Vec::new(),
-            hard_dependencies_elided_by_reduction: 0,
         };
 
         for edge in graph.edges() {
@@ -382,10 +430,16 @@ impl<'graph> SchedulingAnalysis<'graph> {
                 EdgeClass::Low => {}
                 EdgeClass::Soft => {
                     let scheduling_risk = edge.scheduling_risk();
-                    analysis.soft_neighbors[edge.source.0 as usize]
-                        .push((edge.target, scheduling_risk));
-                    analysis.soft_neighbors[edge.target.0 as usize]
-                        .push((edge.source, scheduling_risk));
+                    analysis.soft_neighbors[edge.source.0 as usize].push((
+                        edge.target,
+                        scheduling_risk,
+                        edge.confidence(),
+                    ));
+                    analysis.soft_neighbors[edge.target.0 as usize].push((
+                        edge.source,
+                        scheduling_risk,
+                        edge.confidence(),
+                    ));
                 }
                 EdgeClass::Hard => {
                     let (predecessor, successor) =
@@ -396,11 +450,10 @@ impl<'graph> SchedulingAnalysis<'graph> {
         }
 
         for neighbors in &mut analysis.soft_neighbors {
-            neighbors.sort_by_key(|(neighbor, _)| *neighbor);
+            neighbors.sort_by_key(|(neighbor, _, _)| *neighbor);
         }
 
-        let (reduced_hard_dependencies, elided) = analysis.transitively_reduce_hard_dependencies();
-        analysis.hard_dependencies_elided_by_reduction = elided;
+        let (reduced_hard_dependencies, _) = analysis.transitively_reduce_hard_dependencies();
         analysis.reduced_hard_dependencies = reduced_hard_dependencies;
         analysis.hard_predecessors = vec![Vec::new(); transaction_count];
         for dependency in &analysis.reduced_hard_dependencies {
@@ -475,7 +528,59 @@ impl<'graph> SchedulingAnalysis<'graph> {
         }
         dependencies.sort_unstable();
         dependencies.dedup();
-        Ok(dependencies)
+        Ok(self.transitively_reduce_ordering_dependencies(dependencies))
+    }
+
+    /// Exact transitive reduction of the final ordering DAG, including selected soft edges.
+    ///
+    /// A separated soft relationship is an execution dependency just like a hard relationship.
+    /// Once wave placement is fixed, any direct edge whose reachability is already preserved by
+    /// another retained path is redundant and can be omitted from the READY-DAG executor.
+    fn transitively_reduce_ordering_dependencies(
+        &self,
+        dependencies: Vec<ScheduledDependency>,
+    ) -> Vec<ScheduledDependency> {
+        let transaction_count = self.graph.transactions().len();
+        if dependencies.len() <= 1 || transaction_count <= 1 {
+            return dependencies;
+        }
+
+        let mut canonical_order = (0..transaction_count)
+            .map(|offset| TxIndex(offset as u32))
+            .collect::<Vec<_>>();
+        canonical_order.sort_by(|left, right| self.compare_canonical_order(*left, *right));
+        let mut rank = vec![0_usize; transaction_count];
+        for (position, tx) in canonical_order.iter().copied().enumerate() {
+            rank[tx.0 as usize] = position;
+        }
+
+        let mut outgoing = vec![Vec::<ScheduledDependency>::new(); transaction_count];
+        for dependency in dependencies {
+            outgoing[dependency.predecessor.0 as usize].push(dependency);
+        }
+        for successors in &mut outgoing {
+            successors.sort_by_key(|dependency| rank[dependency.successor.0 as usize]);
+            successors.dedup();
+        }
+
+        let words = transaction_count.div_ceil(64);
+        let mut reachable = vec![vec![0_u64; words]; transaction_count];
+        let mut reduced = Vec::new();
+        for predecessor in canonical_order.iter().copied().rev() {
+            let predecessor_index = predecessor.0 as usize;
+            for dependency in outgoing[predecessor_index].iter().copied() {
+                let successor_index = dependency.successor.0 as usize;
+                if bit_is_set(&reachable[predecessor_index], successor_index) {
+                    continue;
+                }
+                reduced.push(dependency);
+                set_bit(&mut reachable[predecessor_index], successor_index);
+                let successor_reachability = reachable[successor_index].clone();
+                union_bits(&mut reachable[predecessor_index], &successor_reachability);
+            }
+        }
+        reduced.sort_unstable();
+        reduced
     }
 
     fn pre_reduction_dependency_count(
@@ -569,6 +674,30 @@ impl<'graph> SchedulingAnalysis<'graph> {
         (reduced, elided)
     }
 
+    fn should_explore(
+        &self,
+        tx_index: TxIndex,
+        config: &RiskBoundedSchedulerConfig,
+        exploration_used: usize,
+    ) -> bool {
+        if config.exploration_rate <= 0.0
+            || config.exploration_max_transactions_per_block == 0
+            || exploration_used >= config.exploration_max_transactions_per_block
+        {
+            return false;
+        }
+        let uncertainty = self.soft_neighbors[tx_index.0 as usize]
+            .iter()
+            .filter(|(_, risk, _)| *risk > config.risk_budget)
+            .map(|(_, _, confidence)| (1.0 - *confidence).clamp(0.0, 1.0))
+            .fold(0.0_f64, f64::max);
+        if uncertainty < config.exploration_min_uncertainty {
+            return false;
+        }
+        deterministic_exploration_sample(tx_index)
+            < (config.exploration_rate * uncertainty).clamp(0.0, 1.0)
+    }
+
     fn soft_risk(
         &self,
         tx_index: TxIndex,
@@ -576,7 +705,7 @@ impl<'graph> SchedulingAnalysis<'graph> {
         assigned_wave: &[Option<usize>],
     ) -> f64 {
         let mut independence_probability = 1.0;
-        for &(neighbor, probability) in &self.soft_neighbors[tx_index.0 as usize] {
+        for &(neighbor, probability, _) in &self.soft_neighbors[tx_index.0 as usize] {
             if assigned_wave[neighbor.0 as usize] == Some(wave_index) {
                 independence_probability *= 1.0 - probability;
             }
@@ -604,6 +733,14 @@ fn wave_has_capacity(wave: &ScheduledWave, max_wave_width: Option<usize>) -> boo
         return wave.transaction_indices.len() < maximum;
     }
     true
+}
+
+fn deterministic_exploration_sample(tx_index: TxIndex) -> f64 {
+    let mut value = u64::from(tx_index.0).wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 31;
+    value as f64 / u64::MAX as f64
 }
 
 fn validate_probability(name: &'static str, value: f64) -> Result<(), SchedulingError> {
@@ -766,7 +903,7 @@ mod tests {
         transactions: Vec<CandidateTransaction>,
         edges: Vec<TransactionEdge>,
     ) -> CandidateGraph {
-        finish_graph(transactions, edges).unwrap()
+        finish_graph(transactions, edges, Vec::new()).unwrap()
     }
 
     fn config(soft: f64, hard: f64, risk: f64) -> RiskBoundedSchedulerConfig {
@@ -775,6 +912,10 @@ mod tests {
             hard_threshold: hard,
             risk_budget: risk,
             max_wave_width: None,
+            exploration_rate: 0.0,
+            exploration_risk_budget: 0.90,
+            exploration_min_uncertainty: 0.35,
+            exploration_max_transactions_per_block: 0,
             independent_observations_before_softening: 8,
         }
     }
@@ -913,6 +1054,68 @@ mod tests {
             malformed.validate_against(&graph, scheduler.config()),
             Err(SchedulingError::DependencyReductionMetadataMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn dense_soft_ordering_is_transitively_reduced_after_wave_placement() {
+        let graph = graph(
+            vec![tx(1, 0), tx(2, 1), tx(3, 2), tx(4, 3)],
+            vec![
+                soft_unknown(0, 1, 0.30),
+                soft_unknown(0, 2, 0.30),
+                soft_unknown(0, 3, 0.30),
+                soft_unknown(1, 2, 0.30),
+                soft_unknown(1, 3, 0.30),
+                soft_unknown(2, 3, 0.30),
+            ],
+        );
+        let scheduler = RiskBoundedScheduler::new(config(0.20, 0.80, 0.0)).unwrap();
+        let schedule = scheduler.schedule(&graph).unwrap();
+
+        assert_eq!(schedule.pre_reduction_ordering_dependencies, 6);
+        assert_eq!(schedule.hard_dependencies_elided_by_reduction, 3);
+        assert_eq!(schedule.ordering_dependencies.len(), 3);
+        assert!(schedule
+            .ordering_dependencies
+            .iter()
+            .all(|dependency| dependency.class == EdgeClass::Soft));
+        schedule
+            .validate_against(&graph, scheduler.config())
+            .unwrap();
+    }
+
+    #[test]
+    fn deterministic_exploration_can_raise_the_effective_soft_risk_budget() {
+        let mut cfg = config(0.20, 0.80, 0.20);
+        cfg.exploration_rate = 1.0;
+        cfg.exploration_risk_budget = 0.90;
+        cfg.exploration_min_uncertainty = 0.35;
+        cfg.exploration_max_transactions_per_block = 1;
+        let graph = graph(vec![tx(1, 0), tx(2, 1)], vec![soft_unknown(0, 1, 0.50)]);
+        let schedule = RiskBoundedScheduler::new(cfg)
+            .unwrap()
+            .schedule(&graph)
+            .unwrap();
+        assert_eq!(schedule.waves.len(), 1);
+        assert!(schedule.ordering_dependencies.is_empty());
+    }
+
+    #[test]
+    fn targeted_exploration_skips_confident_soft_relationships() {
+        let mut cfg = config(0.20, 0.80, 0.20);
+        cfg.exploration_rate = 1.0;
+        cfg.exploration_risk_budget = 0.90;
+        cfg.exploration_min_uncertainty = 0.35;
+        cfg.exploration_max_transactions_per_block = 1;
+        let mut edge = soft_unknown(0, 1, 0.50);
+        edge.confidence_q16 = quantize_q16(0.90);
+        let graph = graph(vec![tx(1, 0), tx(2, 1)], vec![edge]);
+        let schedule = RiskBoundedScheduler::new(cfg)
+            .unwrap()
+            .schedule(&graph)
+            .unwrap();
+        assert_eq!(schedule.waves.len(), 2);
+        assert_eq!(schedule.ordering_dependencies.len(), 1);
     }
 
     #[test]

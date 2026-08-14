@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use cosmwasm_std::{
@@ -6,6 +6,7 @@ use cosmwasm_std::{
     ContractResult, Empty, QueryRequest, SystemError, SystemResult, WasmQuery,
 };
 use cosmwasm_vm::{BackendError, BackendResult, GasInfo, Querier};
+use parking_lot::Mutex;
 
 use crate::engine::{query_contract_shared, EngineCore};
 use crate::error::EngineError;
@@ -13,13 +14,42 @@ use crate::parallel::ExecutionHotPathDiagnostics;
 use crate::state::SharedTx;
 use crate::types::{Address, BlockContext};
 
-pub(crate) struct EngineQuerier {
-    core: Arc<EngineCore>,
+struct EngineQuerierContext {
+    core: Weak<EngineCore>,
     tx: SharedTx,
     caller_contract: Address,
     block: BlockContext,
     depth: u32,
     diagnostics: Option<Arc<ExecutionHotPathDiagnostics>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct EngineQuerierBinding {
+    inner: Arc<Mutex<EngineQuerierContext>>,
+}
+
+impl EngineQuerierBinding {
+    pub(crate) fn rebind(
+        &self,
+        core: Arc<EngineCore>,
+        tx: SharedTx,
+        caller_contract: Address,
+        block: BlockContext,
+        depth: u32,
+    ) {
+        let diagnostics = tx.lock().diagnostics();
+        let mut context = self.inner.lock();
+        context.core = Arc::downgrade(&core);
+        context.tx = tx;
+        context.caller_contract = caller_contract;
+        context.block = block;
+        context.depth = depth;
+        context.diagnostics = diagnostics;
+    }
+}
+
+pub(crate) struct EngineQuerier {
+    binding: EngineQuerierBinding,
 }
 
 impl EngineQuerier {
@@ -30,15 +60,33 @@ impl EngineQuerier {
         block: BlockContext,
         depth: u32,
     ) -> Self {
+        Self::rebindable(core, tx, caller_contract, block, depth).0
+    }
+
+    pub(crate) fn rebindable(
+        core: Arc<EngineCore>,
+        tx: SharedTx,
+        caller_contract: Address,
+        block: BlockContext,
+        depth: u32,
+    ) -> (Self, EngineQuerierBinding) {
         let diagnostics = tx.lock().diagnostics();
-        Self {
-            core,
-            tx,
-            caller_contract,
-            block,
-            depth,
-            diagnostics,
-        }
+        let binding = EngineQuerierBinding {
+            inner: Arc::new(Mutex::new(EngineQuerierContext {
+                core: Arc::downgrade(&core),
+                tx,
+                caller_contract,
+                block,
+                depth,
+                diagnostics,
+            })),
+        };
+        (
+            Self {
+                binding: binding.clone(),
+            },
+            binding,
+        )
     }
 }
 
@@ -49,12 +97,13 @@ impl Querier for EngineQuerier {
         _gas_limit: u64,
     ) -> BackendResult<SystemResult<ContractResult<Binary>>> {
         let started = Instant::now();
+        let context = self.binding.inner.lock();
         let mut lock_wait = Duration::ZERO;
         let gas = GasInfo::with_externally_used(request.len() as u64);
         let parsed: QueryRequest<Empty> = match from_json(request) {
             Ok(parsed) => parsed,
             Err(error) => {
-                if let Some(diagnostics) = &self.diagnostics {
+                if let Some(diagnostics) = &context.diagnostics {
                     diagnostics.record_host_query(started.elapsed(), lock_wait);
                 }
                 return (
@@ -71,33 +120,33 @@ impl Querier for EngineQuerier {
             QueryRequest::Bank(BankQuery::Balance { address, denom }) => {
                 let address = Address::new(address);
                 let lock_started = Instant::now();
-                let mut tx = self.tx.lock();
+                let mut tx = context.tx.lock();
                 lock_wait += lock_started.elapsed();
-                let amount = tx.balance(&address, &denom, &self.caller_contract, self.depth);
+                let amount = tx.balance(&address, &denom, &context.caller_contract, context.depth);
                 drop(tx);
                 serialize_contract_response(&BalanceResponse::new(Coin::new(amount.u128(), denom)))
             }
             QueryRequest::Bank(BankQuery::AllBalances { address }) => {
                 let address = Address::new(address);
                 let lock_started = Instant::now();
-                let mut tx = self.tx.lock();
+                let mut tx = context.tx.lock();
                 lock_wait += lock_started.elapsed();
-                let balances = tx.all_balances(&address, &self.caller_contract, self.depth);
+                let balances = tx.all_balances(&address, &context.caller_contract, context.depth);
                 drop(tx);
                 serialize_contract_response(&AllBalanceResponse::new(balances))
             }
             QueryRequest::Wasm(WasmQuery::Raw { contract_addr, key }) => {
                 let target = Address::new(contract_addr.clone());
-                if crate::state::code_id_of(&self.tx, &target).is_err() {
+                if crate::state::code_id_of(&context.tx, &target).is_err() {
                     SystemResult::Err(SystemError::NoSuchContract {
                         addr: contract_addr,
                     })
                 } else {
                     let lock_started = Instant::now();
-                    let mut tx = self.tx.lock();
+                    let mut tx = context.tx.lock();
                     lock_wait += lock_started.elapsed();
                     let value = tx
-                        .storage_get(&target, key.as_slice(), self.depth + 1)
+                        .storage_get(&target, key.as_slice(), context.depth + 1)
                         .unwrap_or_default();
                     drop(tx);
                     SystemResult::Ok(ContractResult::Ok(Binary::new(value)))
@@ -105,13 +154,24 @@ impl Querier for EngineQuerier {
             }
             QueryRequest::Wasm(WasmQuery::Smart { contract_addr, msg }) => {
                 let target = Address::new(contract_addr.clone());
+                let Some(core) = context.core.upgrade() else {
+                    if let Some(diagnostics) = &context.diagnostics {
+                        diagnostics.record_host_query(started.elapsed(), lock_wait);
+                    }
+                    return (
+                        Err(BackendError::user_err(
+                            "CosmWasm engine was dropped while a reusable VM query was active",
+                        )),
+                        gas,
+                    );
+                };
                 match query_contract_shared(
-                    self.core.clone(),
-                    self.tx.clone(),
-                    self.block.clone(),
+                    core,
+                    context.tx.clone(),
+                    context.block.clone(),
                     target,
                     msg,
-                    self.depth + 1,
+                    context.depth + 1,
                 ) {
                     Ok(data) => SystemResult::Ok(ContractResult::Ok(data)),
                     Err(EngineError::UnknownContract(_)) => {
@@ -123,7 +183,7 @@ impl Querier for EngineQuerier {
                         SystemResult::Ok(ContractResult::Err(error))
                     }
                     Err(error) => {
-                        if let Some(diagnostics) = &self.diagnostics {
+                        if let Some(diagnostics) = &context.diagnostics {
                             diagnostics.record_host_query(started.elapsed(), lock_wait);
                         }
                         return (Err(BackendError::user_err(error.to_string())), gas);
@@ -135,7 +195,7 @@ impl Querier for EngineQuerier {
             }),
         };
 
-        if let Some(diagnostics) = &self.diagnostics {
+        if let Some(diagnostics) = &context.diagnostics {
             diagnostics.record_host_query(started.elapsed(), lock_wait);
         }
         (Ok(response), gas)

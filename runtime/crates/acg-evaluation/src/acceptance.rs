@@ -513,7 +513,18 @@ pub fn evaluate_record(
             ),
         ));
     }
-    if record.execution.workers != u64::from(record.metadata.workers) {
+    if record.planning.serial_bypassed {
+        if record.execution.workers != 1 {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "serial_bypass_worker_mismatch",
+                format!(
+                    "serial bypass must execute with exactly 1 worker, got {}",
+                    record.execution.workers
+                ),
+            ));
+        }
+    } else if record.execution.workers != u64::from(record.metadata.workers) {
         issues.push(AcceptanceIssue::new(
             AcceptanceIssueCategory::ConfigurationError,
             "execution_worker_mismatch",
@@ -610,25 +621,58 @@ pub fn evaluate_record(
                 ),
             ));
         }
-        if record.execution.dependency_count != record.scheduling.scheduled_dependencies {
-            issues.push(AcceptanceIssue::new(
-                AcceptanceIssueCategory::ConfigurationError,
-                "execution_dependency_count_mismatch",
-                format!(
-                    "execution dependency_count {} differs from scheduled_dependencies {}",
-                    record.execution.dependency_count, record.scheduling.scheduled_dependencies
-                ),
-            ));
-        }
-        if record.execution.hard_dependency_count != record.scheduling.hard_dependencies {
-            issues.push(AcceptanceIssue::new(
-                AcceptanceIssueCategory::ConfigurationError,
-                "execution_hard_dependency_count_mismatch",
-                format!(
-                    "execution hard_dependency_count {} differs from hard_dependencies {}",
-                    record.execution.hard_dependency_count, record.scheduling.hard_dependencies
-                ),
-            ));
+        if record.planning.serial_bypassed {
+            if record.execution.dependency_count != 0 {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "serial_bypass_execution_dependencies",
+                    format!(
+                        "serial bypass must execute with 0 dependencies, got {}",
+                        record.execution.dependency_count
+                    ),
+                ));
+            }
+            if record.execution.hard_dependency_count != 0 {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "serial_bypass_hard_execution_dependencies",
+                    format!(
+                        "serial bypass must execute with 0 hard dependencies, got {}",
+                        record.execution.hard_dependency_count
+                    ),
+                ));
+            }
+            if record.execution.canonical_transactions != record.execution.transactions {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "serial_bypass_canonical_transaction_mismatch",
+                    format!(
+                        "serial bypass canonical transaction count {} differs from transactions {}",
+                        record.execution.canonical_transactions, record.execution.transactions
+                    ),
+                ));
+            }
+        } else {
+            if record.execution.dependency_count != record.scheduling.scheduled_dependencies {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "execution_dependency_count_mismatch",
+                    format!(
+                        "execution dependency_count {} differs from scheduled_dependencies {}",
+                        record.execution.dependency_count, record.scheduling.scheduled_dependencies
+                    ),
+                ));
+            }
+            if record.execution.hard_dependency_count != record.scheduling.hard_dependencies {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "execution_hard_dependency_count_mismatch",
+                    format!(
+                        "execution hard_dependency_count {} differs from hard_dependencies {}",
+                        record.execution.hard_dependency_count, record.scheduling.hard_dependencies
+                    ),
+                ));
+            }
         }
     }
     let feedback_total = record

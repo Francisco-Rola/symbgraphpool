@@ -100,6 +100,8 @@ fn build_weighted(
                 epoch: 1,
                 edge_materialization_threshold: 0.0,
                 cost_policy: Default::default(),
+                compact_immature_equivalence_edges: false,
+                independent_observations_before_softening: 8,
             },
         )
         .unwrap()
@@ -124,6 +126,10 @@ fn weighted_candidate_edges_drive_hard_wave_dependencies_through_the_public_api(
         hard_threshold: probability,
         risk_budget: 0.0,
         max_wave_width: None,
+        exploration_rate: 0.0,
+        exploration_risk_budget: 0.90,
+        exploration_min_uncertainty: 0.35,
+        exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
     })
     .unwrap();
@@ -186,6 +192,10 @@ fn learned_negative_evidence_can_change_a_future_pair_from_hard_to_soft() {
         hard_threshold: threshold,
         risk_budget: 1.0,
         max_wave_width: None,
+        exploration_rate: 0.0,
+        exploration_risk_budget: 0.90,
+        exploration_min_uncertainty: 0.35,
+        exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
     })
     .unwrap();
@@ -227,6 +237,8 @@ fn learned_negative_evidence_can_change_a_future_pair_from_hard_to_soft() {
                 epoch: 1,
                 edge_materialization_threshold: threshold,
                 cost_policy: Default::default(),
+                compact_immature_equivalence_edges: false,
+                independent_observations_before_softening: 8,
             },
         )
         .unwrap();

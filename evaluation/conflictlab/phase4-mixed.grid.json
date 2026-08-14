@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "physical_core_limit": 6,
+  "record_schema_version": 3,
+  "policy_file": "../policies/release-tuning.json",
+  "base_run": {
+    "workload": "conflictlab",
+    "parameters": {
+      "execution_backend": "wasm",
+      "vm_instance_lifecycle": "reuse",
+      "complexity_mix": "homogeneous",
+      "prediction_buckets": "8",
+      "warmup_blocks": "4",
+      "sim.admission_tps": "25000",
+      "sim.block_interval_ms": "2000",
+      "sim.mempool_policy": "fifo",
+      "acg.soft_threshold": "0.20",
+      "acg.hard_threshold": "0.95",
+      "acg.feedback_retention_factor": "0.99",
+      "acg.feedback_confidence_scale": "20.0",
+      "acg.exploration_rate": "0.00",
+      "acg.exploration_risk_budget": "0.90",
+      "acg.exploration_min_uncertainty": "0.35",
+      "acg.exploration_max_transactions_per_block": "0",
+      "acg.serial_bypass_min_transactions": "32",
+      "acg.serial_bypass_min_projected_speedup": "1.05",
+      "acg.serial_bypass_service_cost_reference_nanos_per_transaction": "150000",
+      "acg.serial_bypass_enabled": "true",
+      "acg.risk_budget": "0.90",
+      "complexity": "mixed",
+      "work_iterations": "32768",
+      "storage_rounds": "2",
+      "payload_bytes": "256"
+    }
+  },
+  "order_seed": 2026081409,
+  "experiment_id": "conflictlab-phase4-mixed",
+  "matrix": {
+    "modes": [
+      "static",
+      "probability-only",
+      "cost-aware"
+    ],
+    "workers": [
+      6
+    ],
+    "seeds": [
+      11,
+      47
+    ],
+    "parameters": {
+      "prediction_quality": [
+        "exact",
+        "bucketed"
+      ]
+    },
+    "cases": [
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity_mix": "80-15-5"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity_mix": "80-15-5"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity_mix": "33-34-33"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity_mix": "33-34-33"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity_mix": "10-30-60"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity_mix": "10-30-60"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity_mix": "80-15-5"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity_mix": "80-15-5"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity_mix": "33-34-33"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity_mix": "33-34-33"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity_mix": "10-30-60"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity_mix": "10-30-60"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity_mix": "80-15-5"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity_mix": "80-15-5"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity_mix": "33-34-33"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity_mix": "33-34-33"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity_mix": "10-30-60"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity_mix": "10-30-60"
+        }
+      }
+    ]
+  }
+}

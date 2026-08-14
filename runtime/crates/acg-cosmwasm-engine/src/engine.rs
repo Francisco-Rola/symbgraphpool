@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use cosmwasm_std::{
     SubMsgResult, Timestamp, TransactionInfo, WasmMsg,
 };
 use cosmwasm_vm::{
-    call_execute, call_instantiate, call_query, call_reply, Backend, InstanceOptions,
+    call_execute, call_instantiate, call_query, call_reply, Backend, Instance, InstanceOptions,
 };
 use parking_lot::{Condvar, Mutex, RwLock};
 use sha2::{Digest, Sha256};
@@ -26,14 +27,14 @@ use crate::parallel::{
     SpeculativeDependency, SpeculativeDependencyClass, SpeculativeWave,
     SplitPhaseSpeculativeBlockOutcome,
 };
-use crate::querier::EngineQuerier;
+use crate::querier::{EngineQuerier, EngineQuerierBinding};
 use crate::speculative::{
     CanonicalTransaction, CanonicalTxDisposition, CanonicalTxResult, SpeculativeBlockOutcome,
     SpeculativeExecutionMetrics, SpeculativeExecutionOutcome, SpeculativeExecutionStatus,
     SpeculativeExecutionTiming, SpeculativeTxResult, StateSnapshot, StateWriteSet,
 };
 use crate::state::{code_id_of, SharedTx, SharedWorld, TransactionState, WorldState};
-use crate::storage::EngineStorage;
+use crate::storage::{EngineStorage, EngineStorageBinding};
 use crate::types::{
     AccessKind, Address, BlockContext, CodeChecksum, CodeId, CodeKind, CodeMetadata,
     ContractMetadata, ExecutionOutcome, ExecutionRequest, QueryOutcome, TransactionId,
@@ -46,6 +47,19 @@ const EXECUTE_RESPONSE_TYPE_URL: &str = "/cosmwasm.wasm.v1.MsgExecuteContractRes
 const INSTANTIATE_RESPONSE_TYPE_URL: &str = "/cosmwasm.wasm.v1.MsgInstantiateContractResponse";
 const BANK_SEND_RESPONSE_TYPE_URL: &str = "/cosmos.bank.v1beta1.MsgSendResponse";
 const BANK_BURN_RESPONSE_TYPE_URL: &str = "/cosmos.bank.v1beta1.MsgBurnResponse";
+static NEXT_REUSABLE_INSTANCE_POOL_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WasmInstanceLifecycle {
+    /// Research-prototype mode: retain one or more VM instances per worker thread and checksum,
+    /// rebind their external storage/query backend between transactions, and do not recycle the
+    /// instance after a successful VM call. This deliberately trades retained VM memory for lower
+    /// lifecycle overhead.
+    #[default]
+    Reuse,
+    /// Compatibility mode matching the original engine behavior: acquire and recycle every call.
+    Recycle,
+}
 
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -53,6 +67,7 @@ pub struct EngineConfig {
     pub max_call_depth: u32,
     pub contract_address_prefix: String,
     pub wasm_cache: WasmCacheConfig,
+    pub wasm_instance_lifecycle: WasmInstanceLifecycle,
 }
 
 impl Default for EngineConfig {
@@ -62,6 +77,7 @@ impl Default for EngineConfig {
             max_call_depth: 32,
             contract_address_prefix: "contract".to_owned(),
             wasm_cache: WasmCacheConfig::default(),
+            wasm_instance_lifecycle: WasmInstanceLifecycle::Reuse,
         }
     }
 }
@@ -82,6 +98,7 @@ pub(crate) struct EngineCore {
     pub config: EngineConfig,
     pub state: SharedWorld,
     engine_identity: Arc<()>,
+    reusable_instance_pool_id: u64,
     codes: RwLock<BTreeMap<CodeId, CodeRecord>>,
     wasm_cache: WasmModuleCache,
     next_code_id: AtomicU64,
@@ -100,6 +117,8 @@ impl CosmWasmEngine {
                 config,
                 state: Arc::new(RwLock::new(WorldState::default())),
                 engine_identity: Arc::new(()),
+                reusable_instance_pool_id: NEXT_REUSABLE_INSTANCE_POOL_ID
+                    .fetch_add(1, Ordering::Relaxed),
                 codes: RwLock::new(BTreeMap::new()),
                 wasm_cache,
                 next_code_id: AtomicU64::new(1),
@@ -1068,6 +1087,31 @@ impl CosmWasmEngine {
             .0
     }
 
+    /// Canonical serial execution with the same contract hot-path diagnostics used by the
+    /// speculative executor. This is validator-local instrumentation for research admission and
+    /// VM-lifecycle measurements; the execution semantics are identical to [`Self::execute_request`].
+    pub fn execute_request_with_diagnostics(
+        &self,
+        block: BlockContext,
+        request: ExecutionRequest,
+    ) -> (EngineResult<ExecutionOutcome>, ContractExecutionDiagnostics) {
+        let diagnostics = Arc::new(ExecutionHotPathDiagnostics::default());
+        let transaction_id = request.transaction_id();
+        let tx = Arc::new(parking_lot::Mutex::new(
+            TransactionState::new_with_diagnostics(
+                self.core.state.clone(),
+                transaction_id,
+                diagnostics.clone(),
+            ),
+        ));
+        let started = Instant::now();
+        let result = self
+            .execute_request_in_transaction(tx, block, request, true)
+            .0;
+        diagnostics.record_request_execution(started.elapsed());
+        (result, diagnostics.snapshot())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn instantiate(
         &self,
@@ -1605,6 +1649,76 @@ struct SubmessageOutcome {
     data_candidate: Option<Binary>,
 }
 
+type EngineVmInstance = Instance<EngineApi, EngineStorage, EngineQuerier>;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ReusableInstanceKey {
+    engine_pool_id: u64,
+    checksum: [u8; 32],
+}
+
+struct ReusableInstanceSlot {
+    instance: EngineVmInstance,
+    storage_binding: EngineStorageBinding,
+    querier_binding: EngineQuerierBinding,
+}
+
+thread_local! {
+    static REUSABLE_WASM_INSTANCES: RefCell<
+        BTreeMap<ReusableInstanceKey, Vec<ReusableInstanceSlot>>,
+    > = RefCell::new(BTreeMap::new());
+}
+
+enum ExecutionWasmInstance {
+    Recycle(Option<EngineVmInstance>),
+    Reuse {
+        key: ReusableInstanceKey,
+        slot: Option<ReusableInstanceSlot>,
+    },
+}
+
+impl ExecutionWasmInstance {
+    fn instance_mut(&mut self) -> &mut EngineVmInstance {
+        match self {
+            Self::Recycle(instance) => instance.as_mut().expect("VM instance is present"),
+            Self::Reuse { slot, .. } => {
+                &mut slot.as_mut().expect("VM instance is present").instance
+            }
+        }
+    }
+
+    fn finish(mut self, diagnostics: &Option<Arc<ExecutionHotPathDiagnostics>>) {
+        match &mut self {
+            Self::Recycle(instance) => {
+                let instance = instance.take().expect("VM instance is present");
+                let recycle_started = Instant::now();
+                drop(instance.recycle());
+                if let Some(diagnostics) = diagnostics {
+                    diagnostics.record_wasm_recycle(recycle_started.elapsed());
+                }
+            }
+            Self::Reuse { key, slot } => {
+                let slot = slot.take().expect("VM instance is present");
+                REUSABLE_WASM_INSTANCES.with(|pool| {
+                    pool.borrow_mut().entry(*key).or_default().push(slot);
+                });
+            }
+        }
+    }
+}
+
+fn reusable_instance_key(
+    core: &EngineCore,
+    checksum: &cosmwasm_std::Checksum,
+) -> ReusableInstanceKey {
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(checksum.as_slice());
+    ReusableInstanceKey {
+        engine_pool_id: core.reusable_instance_pool_id,
+        checksum: bytes,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn acquire_execution_wasm_instance(
     core: &Arc<EngineCore>,
@@ -1614,28 +1728,86 @@ fn acquire_execution_wasm_instance(
     block: BlockContext,
     depth: u32,
     diagnostics: &Option<Arc<ExecutionHotPathDiagnostics>>,
-) -> EngineResult<cosmwasm_vm::Instance<EngineApi, EngineStorage, EngineQuerier>> {
-    let backend_started = Instant::now();
-    let backend = Backend {
-        api: EngineApi,
-        storage: EngineStorage::new(contract.clone(), depth, tx.clone()),
-        querier: EngineQuerier::new(core.clone(), tx, contract, block, depth),
-    };
-    if let Some(diagnostics) = diagnostics {
-        diagnostics.record_backend_construction(backend_started.elapsed());
-    }
+) -> EngineResult<ExecutionWasmInstance> {
     let acquire_started = Instant::now();
-    let instance = core.wasm_cache.get_instance(
-        checksum,
-        backend,
-        InstanceOptions {
-            gas_limit: core.config.gas_limit,
-        },
-    );
+    let acquired = match core.config.wasm_instance_lifecycle {
+        WasmInstanceLifecycle::Recycle => {
+            let backend_started = Instant::now();
+            let backend = Backend {
+                api: EngineApi,
+                storage: EngineStorage::new(contract.clone(), depth, tx.clone()),
+                querier: EngineQuerier::new(core.clone(), tx, contract, block, depth),
+            };
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.record_backend_construction(backend_started.elapsed());
+            }
+            let instance = core.wasm_cache.get_instance(
+                checksum,
+                backend,
+                InstanceOptions {
+                    gas_limit: core.config.gas_limit,
+                },
+            )?;
+            ExecutionWasmInstance::Recycle(Some(instance))
+        }
+        WasmInstanceLifecycle::Reuse => {
+            let key = reusable_instance_key(core, checksum);
+            let existing = REUSABLE_WASM_INSTANCES.with(|pool| {
+                let mut pool = pool.borrow_mut();
+                pool.retain(|candidate, slots| {
+                    candidate.engine_pool_id == core.reusable_instance_pool_id && !slots.is_empty()
+                });
+                pool.get_mut(&key).and_then(Vec::pop)
+            });
+            let slot = if let Some(slot) = existing {
+                if let Some(diagnostics) = diagnostics {
+                    diagnostics.record_wasm_instance_reuse_hit();
+                }
+                slot.storage_binding
+                    .rebind(contract.clone(), depth, tx.clone());
+                slot.querier_binding
+                    .rebind(core.clone(), tx, contract, block, depth);
+                slot
+            } else {
+                if let Some(diagnostics) = diagnostics {
+                    diagnostics.record_wasm_instance_pool_miss();
+                }
+                let backend_started = Instant::now();
+                let (storage, storage_binding) =
+                    EngineStorage::rebindable(contract.clone(), depth, tx.clone());
+                let (querier, querier_binding) =
+                    EngineQuerier::rebindable(core.clone(), tx, contract, block, depth);
+                let backend = Backend {
+                    api: EngineApi,
+                    storage,
+                    querier,
+                };
+                if let Some(diagnostics) = diagnostics {
+                    diagnostics.record_backend_construction(backend_started.elapsed());
+                }
+                let instance = core.wasm_cache.get_instance(
+                    checksum,
+                    backend,
+                    InstanceOptions {
+                        gas_limit: core.config.gas_limit,
+                    },
+                )?;
+                ReusableInstanceSlot {
+                    instance,
+                    storage_binding,
+                    querier_binding,
+                }
+            };
+            ExecutionWasmInstance::Reuse {
+                key,
+                slot: Some(slot),
+            }
+        }
+    };
     if let Some(diagnostics) = diagnostics {
         diagnostics.record_wasm_instance_acquire(acquire_started.elapsed());
     }
-    instance
+    Ok(acquired)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1701,21 +1873,17 @@ fn invoke_contract(
             let entrypoint_started = Instant::now();
             let result: EngineResult<ContractResult<Response<Empty>>> = match entrypoint {
                 Entrypoint::Instantiate => {
-                    call_instantiate(&mut instance, &env, &info, &msg).map_err(EngineError::from)
+                    call_instantiate(instance.instance_mut(), &env, &info, &msg)
+                        .map_err(EngineError::from)
                 }
-                Entrypoint::Execute => {
-                    call_execute(&mut instance, &env, &info, &msg).map_err(EngineError::from)
-                }
+                Entrypoint::Execute => call_execute(instance.instance_mut(), &env, &info, &msg)
+                    .map_err(EngineError::from),
             };
             if let Some(diagnostics) = &diagnostics {
                 diagnostics.record_wasm_entrypoint(entrypoint_started.elapsed());
             }
             let result = result?;
-            let recycle_started = Instant::now();
-            drop(instance.recycle());
-            if let Some(diagnostics) = &diagnostics {
-                diagnostics.record_wasm_recycle(recycle_started.elapsed());
-            }
+            instance.finish(&diagnostics);
             result.into_result().map_err(EngineError::Contract)
         }
     }
@@ -1761,16 +1929,13 @@ fn invoke_reply(
                 &diagnostics,
             )?;
             let entrypoint_started = Instant::now();
-            let result = call_reply(&mut instance, &env, &reply).map_err(EngineError::from);
+            let result =
+                call_reply(instance.instance_mut(), &env, &reply).map_err(EngineError::from);
             if let Some(diagnostics) = &diagnostics {
                 diagnostics.record_wasm_entrypoint(entrypoint_started.elapsed());
             }
             let result: ContractResult<Response<Empty>> = result?;
-            let recycle_started = Instant::now();
-            drop(instance.recycle());
-            if let Some(diagnostics) = &diagnostics {
-                diagnostics.record_wasm_recycle(recycle_started.elapsed());
-            }
+            instance.finish(&diagnostics);
             result.into_result().map_err(EngineError::Contract)
         }
     }
@@ -1819,16 +1984,12 @@ pub(crate) fn query_contract_shared(
                 &diagnostics,
             )?;
             let entrypoint_started = Instant::now();
-            let result = call_query(&mut instance, &env, &msg).map_err(EngineError::from);
+            let result = call_query(instance.instance_mut(), &env, &msg).map_err(EngineError::from);
             if let Some(diagnostics) = &diagnostics {
                 diagnostics.record_wasm_entrypoint(entrypoint_started.elapsed());
             }
             let result: ContractResult<Binary> = result?;
-            let recycle_started = Instant::now();
-            drop(instance.recycle());
-            if let Some(diagnostics) = &diagnostics {
-                diagnostics.record_wasm_recycle(recycle_started.elapsed());
-            }
+            instance.finish(&diagnostics);
             result.into_result().map_err(EngineError::Contract)
         }
     };

@@ -36,6 +36,10 @@ fn complete_record() -> ExperimentRecord {
             ]),
         },
         planning: PlanningRecord {
+            serial_bypassed: false,
+            serial_bypass_projected_speedup_milli: None,
+            serial_bypass_mean_service_nanos: None,
+            serial_bypass_admission_score_milli: None,
             adapter_nanos: 10_000,
             candidate_graph_nanos: 50_000,
             scheduler_nanos: 5_000,
@@ -343,6 +347,38 @@ fn schema_v2_plus_acceptance_requires_consistent_reduction_and_worker_bound_metr
         .issues
         .iter()
         .any(|issue| issue.code == "missing_corrected_scheduler_realization"));
+}
+
+#[test]
+fn schema_v3_acceptance_understands_true_serial_bypass_execution() {
+    let mut record = complete_record();
+    record.planning.serial_bypassed = true;
+    record.execution.workers = 1;
+    record.execution.dependency_count = 0;
+    record.execution.hard_dependency_count = 0;
+    record.execution.max_in_flight = 1;
+    record.execution.speculative_results = 0;
+    record.execution.reused_results = 0;
+    record.execution.invalidated_results = 0;
+    record.execution.replayed_transactions = 0;
+    record.execution.canonical_transactions = record.execution.transactions;
+    let manifest = manifest_for(&record);
+
+    let report = manifest.evaluate(std::slice::from_ref(&record));
+    assert_eq!(report.status, ExperimentAcceptanceStatus::Accepted);
+    assert!(report.run_reports[0].issues.is_empty());
+
+    let mut invalid = record;
+    invalid.execution.dependency_count = 1;
+    let report = manifest.evaluate(&[invalid]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "serial_bypass_execution_dependencies"));
 }
 
 #[test]

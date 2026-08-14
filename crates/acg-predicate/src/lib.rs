@@ -107,6 +107,15 @@ pub enum BindingKey {
     Tuple(Vec<BindingAtom>),
 }
 
+/// Canonical key for predicates that are provably an equivalence relation over one concrete
+/// input key within one contract instance. Candidate-graph construction can group such
+/// transactions without evaluating every pair.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PredicateEquivalenceKey {
+    pub instance_id: InstanceId,
+    pub key: BindingKey,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluatedKeys {
     pub values: Vec<BindingKey>,
@@ -206,6 +215,41 @@ impl CompiledPredicate {
                 .all(|clause| clause.require_same_contract_instance)
     }
 
+    /// Return a grouping key only when this predicate is structurally equivalent to
+    /// "same contract instance AND the same single resolved input key". All alternative clauses
+    /// must use the same symmetric input expression and unconditional guards, making clique-to-
+    /// chain compaction semantics-preserving.
+    pub fn equivalence_key(
+        &self,
+        instance_id: InstanceId,
+        bindings: &InputBindings,
+    ) -> Option<PredicateEquivalenceKey> {
+        let first = self.clauses.first()?;
+        if !first.is_unconditional_symmetric_equality() {
+            return None;
+        }
+        let CompiledKeyMatch::InputEquality { left, .. } = &first.key_match else {
+            return None;
+        };
+        if self.clauses.iter().skip(1).any(|clause| {
+            !clause.is_unconditional_symmetric_equality()
+                || !matches!(
+                    &clause.key_match,
+                    CompiledKeyMatch::InputEquality { left: other_left, .. } if other_left == left
+                )
+        }) {
+            return None;
+        }
+        let evaluated = bindings.get(left);
+        if !evaluated.complete || evaluated.values.len() != 1 {
+            return None;
+        }
+        Some(PredicateEquivalenceKey {
+            instance_id,
+            key: evaluated.values[0].clone(),
+        })
+    }
+
     pub fn evaluate(
         &self,
         left_instance: InstanceId,
@@ -259,6 +303,21 @@ impl CompiledPredicate {
 }
 
 impl CompiledClause {
+    fn is_unconditional_symmetric_equality(&self) -> bool {
+        // Input-equality clauses are classified as `Conditional` by the profile compiler because
+        // their truth depends on comparing concrete transaction bindings. They are still safe
+        // equivalence relations when the key is fully resolved, symmetric, same-instance, and both
+        // guards are unconditional. Only statically unresolved clauses must be rejected here.
+        self.require_same_contract_instance
+            && self.resolution != ClauseResolution::Unknown
+            && self.left_guard.is_unconditional_true()
+            && self.right_guard.is_unconditional_true()
+            && matches!(
+                &self.key_match,
+                CompiledKeyMatch::InputEquality { left, right } if left == right
+            )
+    }
+
     fn compile(clause: &PredicateClause) -> Self {
         let key_match = match &clause.key_match {
             KeyMatch::WholeResource => CompiledKeyMatch::WholeResource,
@@ -396,6 +455,13 @@ enum CompareOperator {
 }
 
 impl CompiledGuard {
+    fn is_unconditional_true(&self) -> bool {
+        matches!(
+            self.dependency_kind,
+            DependencyKind::None | DependencyKind::Input
+        ) && matches!(self.node, GuardNode::Constant(true))
+    }
+
     fn compile(reference: &GuardRef) -> Self {
         Self {
             node: compile_guard_node(reference.expression.trim(), &reference.delegation_path),

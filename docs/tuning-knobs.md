@@ -19,9 +19,14 @@ of the exact Brick-5F run identity.
 | `acg.hard_threshold` | `0.80` | risk at which an evidence-mature edge is hard |
 | `acg.risk_budget` | `0.20` | maximum same-wave aggregate soft risk |
 | `acg.max_wave_width` | none | optional reported-wave width cap |
+| `acg.exploration_rate` | `0.0` | deterministic fraction of transactions permitted to use the exploration risk budget |
+| `acg.exploration_risk_budget` | `0.90` | same-wave risk budget for controlled-exploration transactions |
 | `acg.independent_observations_before_softening` | `8` | independence samples before initially-hard edges may soften |
 | `acg.serialization_cost_reference_nanos` | `250000` | cold-start serialization-cost fallback before 5E learns an edge cost |
-| `acg.invalidation_fanout_weight` | `0.50` | replay penalty added per expected invalidated descendant |
+| `acg.invalidation_fanout_weight` | `0.50` | replay penalty added per expected invalidated descendant; replay/fan-out evidence is marginally split across simultaneous causal edges |
+| `acg.serial_bypass_enabled` | `false` | skip candidate-graph/scheduler/feedback work when prior full-pipeline economics project a loss |
+| `acg.serial_bypass_min_transactions` | `32` | minimum block size eligible for the economics bypass |
+| `acg.serial_bypass_min_projected_speedup` | `1.05` | prior-block full-pipeline projected speedup below which bypass is admitted |
 | `acg.feedback_retention_factor` | `0.99` | epoch-to-epoch evidence retention; lower forgets faster |
 | `acg.feedback_confidence_scale` | `20.0` | evidence weight needed to approach full confidence |
 | `acg.fallback_prior_probability` | `0.50` | prior conflict probability for runtime-discovered topology |
@@ -70,7 +75,8 @@ These are the knobs needed to study how imperfect block prediction affects 5C.5 
 | parameter | default | meaning |
 |---|---:|---|
 | `execution_backend` | `native` | `native` for fast harness tests; **`wasm` for performance evaluation** |
-| `prediction_quality` | `exact` | `exact`, `coarse`, or `opaque`; controls how much of the actual key is visible to candidate construction |
+| `prediction_quality` | `exact` | `exact`, `bucketed`, `coarse`, or `opaque`; controls how much of the actual key is visible to candidate construction |
+| `prediction_buckets` | `8` | deterministic visible key buckets for `prediction_quality=bucketed` (2..=64) |
 | `transactions` | `200` | transactions offered during one workload window |
 | `warmup_blocks` | `0` | deterministic adaptive-history blocks before the measured block |
 | `accounts` | `16` | account-key cardinality |
@@ -90,6 +96,9 @@ They isolate transaction granularity while preserving the same account-level con
 Prediction-quality modes are controlled experiments, not claims about analyzer error rates:
 
 - `exact`: the public `account` field is the real storage key and can be refined precisely;
+- `bucketed`: the visible account is a deterministic bucket while the real account is routed through
+  the Wasm payload, preserving true same-account candidate coverage while creating bucket-local
+  false positives;
 - `coarse`: the profile keeps the account-key family but removes the concrete input dependency, so
   candidate predicates remain unresolved and can become soft;
 - `opaque`: the public account is a unique decoy while the real key is routed through an opaque

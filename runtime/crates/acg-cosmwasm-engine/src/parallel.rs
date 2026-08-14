@@ -83,6 +83,8 @@ pub struct ContractExecutionDiagnostics {
     pub aggregate_mvcc_lock_wait: Duration,
     pub aggregate_mvcc_publish: Duration,
     pub wasm_instance_acquires: u64,
+    pub wasm_instance_reuse_hits: u64,
+    pub wasm_instance_pool_misses: u64,
     pub wasm_entrypoint_calls: u64,
     pub wasm_instance_recycles: u64,
     pub host_storage_gets: u64,
@@ -131,6 +133,8 @@ impl ContractExecutionDiagnostics {
         self.aggregate_mvcc_lock_wait += other.aggregate_mvcc_lock_wait;
         self.aggregate_mvcc_publish += other.aggregate_mvcc_publish;
         self.wasm_instance_acquires += other.wasm_instance_acquires;
+        self.wasm_instance_reuse_hits += other.wasm_instance_reuse_hits;
+        self.wasm_instance_pool_misses += other.wasm_instance_pool_misses;
         self.wasm_entrypoint_calls += other.wasm_entrypoint_calls;
         self.wasm_instance_recycles += other.wasm_instance_recycles;
         self.host_storage_gets += other.host_storage_gets;
@@ -182,6 +186,8 @@ pub(crate) struct ExecutionHotPathDiagnostics {
     mvcc_lock_wait_ns: AtomicU64,
     mvcc_publish_ns: AtomicU64,
     wasm_instance_acquires: AtomicU64,
+    wasm_instance_reuse_hits: AtomicU64,
+    wasm_instance_pool_misses: AtomicU64,
     wasm_entrypoint_calls: AtomicU64,
     wasm_instance_recycles: AtomicU64,
     host_storage_gets: AtomicU64,
@@ -255,6 +261,16 @@ impl ExecutionHotPathDiagnostics {
     pub(crate) fn record_wasm_instance_acquire(&self, duration: Duration) {
         Self::add_duration(&self.wasm_instance_acquire_ns, duration);
         self.wasm_instance_acquires.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_wasm_instance_reuse_hit(&self) {
+        self.wasm_instance_reuse_hits
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_wasm_instance_pool_miss(&self) {
+        self.wasm_instance_pool_misses
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_wasm_entrypoint(&self, duration: Duration) {
@@ -374,6 +390,8 @@ impl ExecutionHotPathDiagnostics {
             aggregate_mvcc_lock_wait: duration(&self.mvcc_lock_wait_ns),
             aggregate_mvcc_publish: duration(&self.mvcc_publish_ns),
             wasm_instance_acquires: count(&self.wasm_instance_acquires),
+            wasm_instance_reuse_hits: count(&self.wasm_instance_reuse_hits),
+            wasm_instance_pool_misses: count(&self.wasm_instance_pool_misses),
             wasm_entrypoint_calls: count(&self.wasm_entrypoint_calls),
             wasm_instance_recycles: count(&self.wasm_instance_recycles),
             host_storage_gets: count(&self.host_storage_gets),

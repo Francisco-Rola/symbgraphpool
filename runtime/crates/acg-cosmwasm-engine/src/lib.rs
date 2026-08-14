@@ -19,7 +19,7 @@ mod types;
 mod validation;
 
 pub use crate::cache::{WasmCacheConfig, WasmCacheMetrics};
-pub use crate::engine::{CosmWasmEngine, EngineConfig};
+pub use crate::engine::{CosmWasmEngine, EngineConfig, WasmInstanceLifecycle};
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::native::{NativeCallContext, NativeContract};
 pub use crate::parallel::{

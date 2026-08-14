@@ -9,8 +9,8 @@ use std::{
 
 use acg_core::{ContractCodeHash, RuntimeId};
 use acg_cosmwasm_engine::{
-    Address, BlockContext, CosmWasmEngine, ExecutionRequest, NativeCallContext, NativeContract,
-    TransactionId,
+    Address, BlockContext, CosmWasmEngine, EngineConfig, ExecutionRequest, NativeCallContext,
+    NativeContract, TransactionId, WasmInstanceLifecycle,
 };
 use acg_evaluation::RunIdentity;
 use acg_profile_graph::{EdgeBuildConfig, GraphLoadConfig, ProfileGraph, ProfileGraphArtifact};
@@ -47,10 +47,23 @@ impl BenchmarkWorkload for ConflictLabWorkload {
 
     fn prepare(&self, run: &RunIdentity) -> Result<Box<dyn PreparedBenchmark>, HarnessError> {
         let config = ConflictLabConfig::from_run(run)?;
-        let (engine, code_id, mut environment) = setup_engine(config.execution_backend)?;
+        let (engine, code_id, mut environment) =
+            setup_engine(config.execution_backend, config.vm_instance_lifecycle)?;
         environment.insert(
             "conflictlab_prediction_quality".to_owned(),
             config.prediction_quality.as_str().to_owned(),
+        );
+        environment.insert(
+            "conflictlab_prediction_buckets".to_owned(),
+            config.prediction_buckets.to_string(),
+        );
+        environment.insert(
+            "conflictlab_vm_instance_lifecycle".to_owned(),
+            vm_instance_lifecycle_name(config.vm_instance_lifecycle).to_owned(),
+        );
+        environment.insert(
+            "conflictlab_complexity_mix".to_owned(),
+            config.complexity_mix.as_str().to_owned(),
         );
         let checksum = engine
             .code_metadata(code_id)
@@ -114,11 +127,13 @@ impl BenchmarkWorkload for ConflictLabWorkload {
                     height,
                     selection_seed: run.seed ^ height,
                     prediction_quality: config.prediction_quality,
+                    prediction_buckets: config.prediction_buckets,
                     work: WorkShape {
                         work_iterations: config.warmup_work_iterations,
                         storage_rounds: config.warmup_storage_rounds,
                         payload_bytes: config.warmup_payload_bytes,
                     },
+                    complexity_mix: config.complexity_mix,
                     simulation: config.simulation,
                 },
             )?;
@@ -141,11 +156,13 @@ impl BenchmarkWorkload for ConflictLabWorkload {
                 height: measured_height,
                 selection_seed: run.seed ^ measured_height,
                 prediction_quality: config.prediction_quality,
+                prediction_buckets: config.prediction_buckets,
                 work: WorkShape {
                     work_iterations: config.work_iterations,
                     storage_rounds: config.storage_rounds,
                     payload_bytes: config.payload_bytes,
                 },
+                complexity_mix: config.complexity_mix,
                 simulation: config.simulation,
             },
         )?);
@@ -168,6 +185,7 @@ impl BenchmarkWorkload for ConflictLabWorkload {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PredictionQuality {
     Exact,
+    Bucketed,
     Coarse,
     Opaque,
 }
@@ -176,6 +194,7 @@ impl PredictionQuality {
     fn as_str(self) -> &'static str {
         match self {
             Self::Exact => "exact",
+            Self::Bucketed => "bucketed",
             Self::Coarse => "coarse",
             Self::Opaque => "opaque",
         }
@@ -184,11 +203,60 @@ impl PredictionQuality {
     fn parse(value: &str) -> Result<Self, HarnessError> {
         match value {
             "exact" => Ok(Self::Exact),
+            "bucketed" => Ok(Self::Bucketed),
             "coarse" => Ok(Self::Coarse),
             "opaque" => Ok(Self::Opaque),
             other => Err(HarnessError::WorkloadParameter(format!(
-                "prediction_quality must be exact, coarse, or opaque; got {other:?}"
+                "prediction_quality must be exact, bucketed, coarse, or opaque; got {other:?}"
             ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ComplexityMix {
+    #[default]
+    Homogeneous,
+    Light80Medium15Heavy5,
+    Balanced,
+    Light10Medium30Heavy60,
+}
+
+impl ComplexityMix {
+    fn parse(value: &str) -> Result<Self, HarnessError> {
+        match value {
+            "homogeneous" => Ok(Self::Homogeneous),
+            "80-15-5" => Ok(Self::Light80Medium15Heavy5),
+            "33-34-33" => Ok(Self::Balanced),
+            "10-30-60" => Ok(Self::Light10Medium30Heavy60),
+            other => Err(HarnessError::WorkloadParameter(format!(
+                "complexity_mix must be homogeneous, 80-15-5, 33-34-33, or 10-30-60; got {other:?}"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Homogeneous => "homogeneous",
+            Self::Light80Medium15Heavy5 => "80-15-5",
+            Self::Balanced => "33-34-33",
+            Self::Light10Medium30Heavy60 => "10-30-60",
+        }
+    }
+
+    fn work_shape(self, homogeneous: WorkShape, selector: u64) -> WorkShape {
+        let sample = selector % 100;
+        match self {
+            Self::Homogeneous => homogeneous,
+            Self::Light80Medium15Heavy5 if sample < 80 => light_work_shape(),
+            Self::Light80Medium15Heavy5 if sample < 95 => medium_work_shape(),
+            Self::Light80Medium15Heavy5 => heavy_work_shape(),
+            Self::Balanced if sample < 33 => light_work_shape(),
+            Self::Balanced if sample < 67 => medium_work_shape(),
+            Self::Balanced => heavy_work_shape(),
+            Self::Light10Medium30Heavy60 if sample < 10 => light_work_shape(),
+            Self::Light10Medium30Heavy60 if sample < 40 => medium_work_shape(),
+            Self::Light10Medium30Heavy60 => heavy_work_shape(),
         }
     }
 }
@@ -253,7 +321,10 @@ struct ConflictLabConfig {
     warmup_storage_rounds: u32,
     warmup_payload_bytes: usize,
     execution_backend: ExecutionBackend,
+    vm_instance_lifecycle: WasmInstanceLifecycle,
     prediction_quality: PredictionQuality,
+    complexity_mix: ComplexityMix,
+    prediction_buckets: u16,
     simulation: SimulationConfig,
 }
 
@@ -274,7 +345,10 @@ impl ConflictLabConfig {
             "warmup_storage_rounds",
             "warmup_payload_bytes",
             "execution_backend",
+            "vm_instance_lifecycle",
             "prediction_quality",
+            "complexity_mix",
+            "prediction_buckets",
             "sim.admission_tps",
             "sim.block_interval_ms",
             "sim.block_size",
@@ -312,12 +386,25 @@ impl ConflictLabConfig {
                 .map(String::as_str)
                 .unwrap_or("native"),
         )?;
+        let vm_instance_lifecycle = parse_vm_instance_lifecycle(
+            run.parameters
+                .get("vm_instance_lifecycle")
+                .map(String::as_str)
+                .unwrap_or("reuse"),
+        )?;
+        let complexity_mix = ComplexityMix::parse(
+            run.parameters
+                .get("complexity_mix")
+                .map(String::as_str)
+                .unwrap_or("homogeneous"),
+        )?;
         let prediction_quality = PredictionQuality::parse(
             run.parameters
                 .get("prediction_quality")
                 .map(String::as_str)
                 .unwrap_or("exact"),
         )?;
+        let prediction_buckets = parameter(&run.parameters, "prediction_buckets", 8_u16)?;
         let block_size = parameter(&run.parameters, "sim.block_size", transactions)?;
         let admission_tps = parameter(
             &run.parameters,
@@ -340,6 +427,13 @@ impl ConflictLabConfig {
         if accounts == 0 {
             return Err(HarnessError::WorkloadParameter(
                 "accounts must be greater than zero".to_owned(),
+            ));
+        }
+        if prediction_quality == PredictionQuality::Bucketed
+            && !(2..=64).contains(&prediction_buckets)
+        {
+            return Err(HarnessError::WorkloadParameter(
+                "prediction_buckets must be within 2..=64 for bucketed prediction".to_owned(),
             ));
         }
         if block_size == 0 {
@@ -376,7 +470,10 @@ impl ConflictLabConfig {
             warmup_storage_rounds,
             warmup_payload_bytes,
             execution_backend,
+            vm_instance_lifecycle,
             prediction_quality,
+            complexity_mix,
+            prediction_buckets,
             simulation: SimulationConfig {
                 admission_tps,
                 block_interval_ms,
@@ -436,8 +533,26 @@ fn conflictlab_wasm_path() -> PathBuf {
         .unwrap_or_else(|| repository_root().join(DEFAULT_WASM_RELATIVE_PATH))
 }
 
+fn parse_vm_instance_lifecycle(value: &str) -> Result<WasmInstanceLifecycle, HarnessError> {
+    match value {
+        "reuse" => Ok(WasmInstanceLifecycle::Reuse),
+        "recycle" => Ok(WasmInstanceLifecycle::Recycle),
+        other => Err(HarnessError::WorkloadParameter(format!(
+            "vm_instance_lifecycle must be reuse or recycle, got {other:?}"
+        ))),
+    }
+}
+
+fn vm_instance_lifecycle_name(value: WasmInstanceLifecycle) -> &'static str {
+    match value {
+        WasmInstanceLifecycle::Reuse => "reuse",
+        WasmInstanceLifecycle::Recycle => "recycle",
+    }
+}
+
 fn setup_engine(
     backend: ExecutionBackend,
+    vm_instance_lifecycle: WasmInstanceLifecycle,
 ) -> Result<
     (
         CosmWasmEngine,
@@ -446,7 +561,10 @@ fn setup_engine(
     ),
     HarnessError,
 > {
-    let engine = CosmWasmEngine::default();
+    let engine = CosmWasmEngine::new(EngineConfig {
+        wasm_instance_lifecycle: vm_instance_lifecycle,
+        ..EngineConfig::default()
+    });
     let mut environment = BTreeMap::new();
     match backend {
         ExecutionBackend::Native => {
@@ -677,6 +795,30 @@ struct WorkShape {
     payload_bytes: usize,
 }
 
+fn light_work_shape() -> WorkShape {
+    WorkShape {
+        work_iterations: 4_096,
+        storage_rounds: 1,
+        payload_bytes: 64,
+    }
+}
+
+fn medium_work_shape() -> WorkShape {
+    WorkShape {
+        work_iterations: 32_768,
+        storage_rounds: 2,
+        payload_bytes: 256,
+    }
+}
+
+fn heavy_work_shape() -> WorkShape {
+    WorkShape {
+        work_iterations: 262_144,
+        storage_rounds: 4,
+        payload_bytes: 1_024,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct GenerateBlockConfig {
     offered_transactions: usize,
@@ -684,7 +826,9 @@ struct GenerateBlockConfig {
     height: u64,
     selection_seed: u64,
     prediction_quality: PredictionQuality,
+    prediction_buckets: u16,
     work: WorkShape,
+    complexity_mix: ComplexityMix,
     simulation: SimulationConfig,
 }
 
@@ -699,7 +843,9 @@ fn generate_block(
         height,
         selection_seed,
         prediction_quality,
+        prediction_buckets,
         work,
+        complexity_mix,
         simulation,
     } = config;
     let mempool = Mempool::default();
@@ -715,10 +861,21 @@ fn generate_block(
         let transaction_id = first_transaction_id
             .saturating_add(u64::try_from(offset).map_err(|_| HarnessError::NumericOverflow)?);
         let actual_account = generator.next_account();
-        let base_payload =
-            deterministic_payload(work.payload_bytes, transaction_id ^ selection_seed);
+        let mut selector_rng = SplitMix64::new(transaction_id ^ selection_seed);
+        let transaction_work = complexity_mix.work_shape(work, selector_rng.next_u64());
+        let base_payload = deterministic_payload(
+            transaction_work.payload_bytes,
+            transaction_id ^ selection_seed,
+        );
         let (account, payload) = match prediction_quality {
             PredictionQuality::Exact | PredictionQuality::Coarse => (actual_account, base_payload),
+            PredictionQuality::Bucketed => {
+                let bucket = prediction_bucket(&actual_account, prediction_buckets);
+                (
+                    format!("bucket-{bucket}"),
+                    bucketed_payload(&actual_account, base_payload),
+                )
+            }
             PredictionQuality::Opaque => (
                 format!("prediction-{transaction_id}"),
                 opaque_payload(&actual_account, base_payload),
@@ -732,8 +889,8 @@ fn generate_block(
             msg: to_json_binary(&ConflictLabExecuteMsg::Credit {
                 account,
                 amount: Uint128::new(1),
-                work_iterations: work.work_iterations,
-                storage_rounds: work.storage_rounds,
+                work_iterations: transaction_work.work_iterations,
+                storage_rounds: transaction_work.storage_rounds,
                 payload: Binary::from(payload),
             })
             .map_err(|error| HarnessError::Runtime(error.to_string()))?,
@@ -822,6 +979,29 @@ impl SplitMix64 {
         value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         value ^ (value >> 31)
     }
+}
+
+fn prediction_bucket(account: &str, buckets: u16) -> u16 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in account.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    (hash % u64::from(buckets.max(1))) as u16
+}
+
+fn bucketed_payload(account: &str, payload: Vec<u8>) -> Vec<u8> {
+    let header_len = OPAQUE_ACCOUNT_PREFIX.len() + account.len() + 1;
+    if payload.len() < header_len {
+        return opaque_payload(account, payload);
+    }
+    let payload_budget = payload.len() - header_len;
+    let mut encoded = Vec::with_capacity(payload.len());
+    encoded.extend_from_slice(OPAQUE_ACCOUNT_PREFIX);
+    encoded.extend_from_slice(account.as_bytes());
+    encoded.push(0);
+    encoded.extend_from_slice(&payload[..payload_budget]);
+    encoded
 }
 
 fn opaque_payload(account: &str, payload: Vec<u8>) -> Vec<u8> {

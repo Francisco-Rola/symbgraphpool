@@ -998,6 +998,8 @@ fn weighted_runtime_fallback_edge_collects_independence_for_the_fallback_target(
                 epoch: 1,
                 edge_materialization_threshold: 0.0,
                 cost_policy: Default::default(),
+                compact_immature_equivalence_edges: false,
+                independent_observations_before_softening: 8,
             },
         )
         .unwrap();
