@@ -246,9 +246,17 @@ impl RiskBoundedSchedule {
         canonical_order.sort_by(|left, right| expected.compare_canonical_order(*left, *right));
 
         let mut exploration_used = 0_usize;
+        let mut compact_group_wave_counts =
+            vec![BTreeMap::<usize, usize>::new(); expected.compact_soft_groups.len()];
         for tx_index in canonical_order {
-            let wave_index = assigned_wave[tx_index.0 as usize].expect("completeness checked");
-            let risk = expected.soft_risk(tx_index, wave_index, &placed_wave);
+            let offset = tx_index.0 as usize;
+            let wave_index = assigned_wave[offset].expect("completeness checked");
+            let risk = expected.soft_risk_with_group_counts(
+                tx_index,
+                wave_index,
+                &placed_wave,
+                &compact_group_wave_counts,
+            );
             let exploration_allowed = expected.should_explore(tx_index, config, exploration_used);
             let budget = if exploration_allowed {
                 config.risk_budget.max(config.exploration_risk_budget)
@@ -266,7 +274,12 @@ impl RiskBoundedSchedule {
             if exploration_allowed && risk > config.risk_budget {
                 exploration_used = exploration_used.saturating_add(1);
             }
-            placed_wave[tx_index.0 as usize] = Some(wave_index);
+            placed_wave[offset] = Some(wave_index);
+            for group_index in &expected.compact_soft_memberships[offset] {
+                *compact_group_wave_counts[*group_index]
+                    .entry(wave_index)
+                    .or_default() += 1;
+            }
         }
         Ok(())
     }
@@ -320,6 +333,9 @@ impl RiskBoundedScheduler {
         let mut waves = Vec::<ScheduledWave>::new();
         let mut assigned_wave = vec![None::<usize>; transaction_count];
         let mut exploration_used = 0_usize;
+        let mut compact_group_max_wave = vec![None::<usize>; analysis.compact_soft_groups.len()];
+        let mut compact_group_wave_counts =
+            vec![BTreeMap::<usize, usize>::new(); analysis.compact_soft_groups.len()];
 
         for tx_index in order {
             let offset = tx_index.0 as usize;
@@ -337,11 +353,17 @@ impl RiskBoundedScheduler {
             }
 
             // A soft neighbor that precedes this transaction canonically may either share its
-            // wave (accepted speculation) or appear earlier, never later. This prevents arbitrary
-            // reordering of known soft relationships while still allowing risk-bounded overlap.
+            // wave (accepted speculation) or appear earlier, never later. Compact soft groups
+            // maintain the same monotone-wave rule from one group-level maximum instead of one
+            // neighbor entry per logical pair.
             for &(neighbor, _, _) in &analysis.soft_neighbors[offset] {
                 if let Some(neighbor_wave) = assigned_wave[neighbor.0 as usize] {
                     minimum_wave = minimum_wave.max(neighbor_wave);
+                }
+            }
+            for group_index in &analysis.compact_soft_memberships[offset] {
+                if let Some(group_wave) = compact_group_max_wave[*group_index] {
+                    minimum_wave = minimum_wave.max(group_wave);
                 }
             }
 
@@ -360,7 +382,12 @@ impl RiskBoundedScheduler {
                 if !wave_has_capacity(wave, self.config.max_wave_width) {
                     continue;
                 }
-                let risk = analysis.soft_risk(tx_index, wave_index, &assigned_wave);
+                let risk = analysis.soft_risk_with_group_counts(
+                    tx_index,
+                    wave_index,
+                    &assigned_wave,
+                    &compact_group_wave_counts,
+                );
                 if risk <= effective_budget {
                     selected_wave = Some(wave_index);
                     selected_risk = risk;
@@ -380,6 +407,12 @@ impl RiskBoundedScheduler {
             };
             waves[wave_index].transaction_indices.push(tx_index);
             assigned_wave[offset] = Some(wave_index);
+            for group_index in &analysis.compact_soft_memberships[offset] {
+                compact_group_max_wave[*group_index] = Some(wave_index);
+                *compact_group_wave_counts[*group_index]
+                    .entry(wave_index)
+                    .or_default() += 1;
+            }
             if exploration_allowed && selected_risk > self.config.risk_budget {
                 exploration_used = exploration_used.saturating_add(1);
             }
@@ -402,11 +435,21 @@ impl RiskBoundedScheduler {
 }
 
 #[derive(Debug)]
+struct CompactSoftGroup {
+    members: Vec<TxIndex>,
+    scheduling_risk: f64,
+    confidence: f64,
+}
+
+#[derive(Debug)]
 struct SchedulingAnalysis<'graph> {
     graph: &'graph CandidateGraph,
     hard_predecessors: Vec<Vec<TxIndex>>,
     soft_neighbors: Vec<Vec<(TxIndex, f64, f64)>>,
+    compact_soft_groups: Vec<CompactSoftGroup>,
+    compact_soft_memberships: Vec<Vec<usize>>,
     edge_classes: BTreeMap<(TxIndex, TxIndex), EdgeClass>,
+    hard_dependency_candidates: Vec<ScheduledDependency>,
     reduced_hard_dependencies: Vec<ScheduledDependency>,
 }
 
@@ -417,11 +460,19 @@ impl<'graph> SchedulingAnalysis<'graph> {
             graph,
             hard_predecessors: vec![Vec::new(); transaction_count],
             soft_neighbors: vec![Vec::new(); transaction_count],
+            compact_soft_groups: Vec::new(),
+            compact_soft_memberships: vec![Vec::new(); transaction_count],
             edge_classes: BTreeMap::new(),
+            hard_dependency_candidates: Vec::new(),
             reduced_hard_dependencies: Vec::new(),
         };
 
+        // Explicit edges belonging to a compact provenance are representation edges only. The
+        // group below carries the complete logical clique semantics, including mature Soft risk.
         for edge in graph.edges() {
+            if graph.provenance_is_compact(edge.provenance) {
+                continue;
+            }
             let class = config.classify(edge);
             analysis
                 .edge_classes
@@ -444,7 +495,43 @@ impl<'graph> SchedulingAnalysis<'graph> {
                 EdgeClass::Hard => {
                     let (predecessor, successor) =
                         analysis.canonical_pair(edge.source, edge.target);
-                    analysis.hard_predecessors[successor.0 as usize].push(predecessor);
+                    analysis
+                        .hard_dependency_candidates
+                        .push(ScheduledDependency {
+                            predecessor,
+                            successor,
+                            class: EdgeClass::Hard,
+                        });
+                }
+            }
+        }
+
+        for group in graph.compact_groups() {
+            let mut members = group.members().to_vec();
+            members.sort_by(|left, right| analysis.compare_canonical_order(*left, *right));
+            match config.classify(group.edge_template()) {
+                EdgeClass::Low => {}
+                EdgeClass::Hard => {
+                    for pair in members.windows(2) {
+                        analysis
+                            .hard_dependency_candidates
+                            .push(ScheduledDependency {
+                                predecessor: pair[0],
+                                successor: pair[1],
+                                class: EdgeClass::Hard,
+                            });
+                    }
+                }
+                EdgeClass::Soft => {
+                    let group_index = analysis.compact_soft_groups.len();
+                    for member in &members {
+                        analysis.compact_soft_memberships[member.0 as usize].push(group_index);
+                    }
+                    analysis.compact_soft_groups.push(CompactSoftGroup {
+                        members,
+                        scheduling_risk: group.edge_template().scheduling_risk(),
+                        confidence: group.edge_template().confidence(),
+                    });
                 }
             }
         }
@@ -452,10 +539,14 @@ impl<'graph> SchedulingAnalysis<'graph> {
         for neighbors in &mut analysis.soft_neighbors {
             neighbors.sort_by_key(|(neighbor, _, _)| *neighbor);
         }
+        for memberships in &mut analysis.compact_soft_memberships {
+            memberships.sort_unstable();
+        }
+        analysis.hard_dependency_candidates.sort_unstable();
+        analysis.hard_dependency_candidates.dedup();
 
-        let (reduced_hard_dependencies, _) = analysis.transitively_reduce_hard_dependencies();
-        analysis.reduced_hard_dependencies = reduced_hard_dependencies;
-        analysis.hard_predecessors = vec![Vec::new(); transaction_count];
+        analysis.reduced_hard_dependencies =
+            analysis.transitively_reduce_dependencies(analysis.hard_dependency_candidates.clone());
         for dependency in &analysis.reduced_hard_dependencies {
             analysis.hard_predecessors[dependency.successor.0 as usize]
                 .push(dependency.predecessor);
@@ -484,11 +575,11 @@ impl<'graph> SchedulingAnalysis<'graph> {
             .then_with(|| left.cmp(&right))
     }
 
-    fn dependencies_for_assignment(
+    fn dependencies_before_reduction(
         &self,
         assigned_wave: &[Option<usize>],
     ) -> Result<Vec<ScheduledDependency>, SchedulingError> {
-        let mut dependencies = self.reduced_hard_dependencies.clone();
+        let mut dependencies = self.hard_dependency_candidates.clone();
         for dependency in &dependencies {
             let predecessor_wave = assigned_wave[dependency.predecessor.0 as usize]
                 .ok_or(SchedulingError::MissingTransactions)?;
@@ -505,6 +596,9 @@ impl<'graph> SchedulingAnalysis<'graph> {
         }
 
         for edge in self.graph.edges() {
+            if self.graph.provenance_is_compact(edge.provenance) {
+                continue;
+            }
             let class = self
                 .edge_classes
                 .get(&(edge.source, edge.target))
@@ -518,6 +612,14 @@ impl<'graph> SchedulingAnalysis<'graph> {
                 .ok_or(SchedulingError::MissingTransactions)?;
             let successor_wave =
                 assigned_wave[successor.0 as usize].ok_or(SchedulingError::MissingTransactions)?;
+            if predecessor_wave > successor_wave {
+                return Err(SchedulingError::SoftOrderingViolation {
+                    predecessor,
+                    successor,
+                    predecessor_wave,
+                    successor_wave,
+                });
+            }
             if predecessor_wave < successor_wave {
                 dependencies.push(ScheduledDependency {
                     predecessor,
@@ -526,17 +628,59 @@ impl<'graph> SchedulingAnalysis<'graph> {
                 });
             }
         }
+
+        for group in &self.compact_soft_groups {
+            let mut layers = Vec::<(usize, Vec<TxIndex>)>::new();
+            for member in &group.members {
+                let wave =
+                    assigned_wave[member.0 as usize].ok_or(SchedulingError::MissingTransactions)?;
+                if let Some((previous_wave, _)) = layers.last() {
+                    if wave < *previous_wave {
+                        return Err(SchedulingError::SoftOrderingViolation {
+                            predecessor: layers
+                                .last()
+                                .and_then(|(_, members)| members.last())
+                                .copied()
+                                .unwrap_or(*member),
+                            successor: *member,
+                            predecessor_wave: *previous_wave,
+                            successor_wave: wave,
+                        });
+                    }
+                }
+                match layers.last_mut() {
+                    Some((layer_wave, members)) if *layer_wave == wave => members.push(*member),
+                    _ => layers.push((wave, vec![*member])),
+                }
+            }
+            for adjacent_layers in layers.windows(2) {
+                for predecessor in &adjacent_layers[0].1 {
+                    for successor in &adjacent_layers[1].1 {
+                        dependencies.push(ScheduledDependency {
+                            predecessor: *predecessor,
+                            successor: *successor,
+                            class: EdgeClass::Soft,
+                        });
+                    }
+                }
+            }
+        }
+
         dependencies.sort_unstable();
         dependencies.dedup();
-        Ok(self.transitively_reduce_ordering_dependencies(dependencies))
+        Ok(dependencies)
     }
 
-    /// Exact transitive reduction of the final ordering DAG, including selected soft edges.
-    ///
-    /// A separated soft relationship is an execution dependency just like a hard relationship.
-    /// Once wave placement is fixed, any direct edge whose reachability is already preserved by
-    /// another retained path is redundant and can be omitted from the READY-DAG executor.
-    fn transitively_reduce_ordering_dependencies(
+    fn dependencies_for_assignment(
+        &self,
+        assigned_wave: &[Option<usize>],
+    ) -> Result<Vec<ScheduledDependency>, SchedulingError> {
+        let dependencies = self.dependencies_before_reduction(assigned_wave)?;
+        Ok(self.transitively_reduce_dependencies(dependencies))
+    }
+
+    /// Exact transitive reduction of an already canonically oriented ordering DAG.
+    fn transitively_reduce_dependencies(
         &self,
         dependencies: Vec<ScheduledDependency>,
     ) -> Vec<ScheduledDependency> {
@@ -587,91 +731,7 @@ impl<'graph> SchedulingAnalysis<'graph> {
         &self,
         assigned_wave: &[Option<usize>],
     ) -> Result<usize, SchedulingError> {
-        let mut count = 0_usize;
-        for edge in self.graph.edges() {
-            let class = self
-                .edge_classes
-                .get(&(edge.source, edge.target))
-                .copied()
-                .unwrap_or(EdgeClass::Low);
-            match class {
-                EdgeClass::Low => {}
-                EdgeClass::Hard => count = count.saturating_add(1),
-                EdgeClass::Soft => {
-                    let (predecessor, successor) = self.canonical_pair(edge.source, edge.target);
-                    let predecessor_wave = assigned_wave[predecessor.0 as usize]
-                        .ok_or(SchedulingError::MissingTransactions)?;
-                    let successor_wave = assigned_wave[successor.0 as usize]
-                        .ok_or(SchedulingError::MissingTransactions)?;
-                    if predecessor_wave < successor_wave {
-                        count = count.saturating_add(1);
-                    }
-                }
-            }
-        }
-        Ok(count)
-    }
-
-    /// Exact transitive reduction of the hard dependency DAG.
-    ///
-    /// Hard edges are canonically oriented, so the predicted transaction order is a topological
-    /// order. For each predecessor, successors are considered nearest-first; an edge is omitted
-    /// when a previously retained successor already reaches the same target.
-    fn transitively_reduce_hard_dependencies(&self) -> (Vec<ScheduledDependency>, usize) {
-        let transaction_count = self.graph.transactions().len();
-        if transaction_count <= 1 {
-            return (Vec::new(), 0);
-        }
-
-        let mut canonical_order = (0..transaction_count)
-            .map(|offset| TxIndex(offset as u32))
-            .collect::<Vec<_>>();
-        canonical_order.sort_by(|left, right| self.compare_canonical_order(*left, *right));
-        let mut rank = vec![0_usize; transaction_count];
-        for (position, tx) in canonical_order.iter().copied().enumerate() {
-            rank[tx.0 as usize] = position;
-        }
-
-        let mut outgoing = vec![Vec::<TxIndex>::new(); transaction_count];
-        let mut original_hard_edges = 0_usize;
-        for edge in self.graph.edges() {
-            if self.edge_classes.get(&(edge.source, edge.target)).copied() != Some(EdgeClass::Hard)
-            {
-                continue;
-            }
-            let (predecessor, successor) = self.canonical_pair(edge.source, edge.target);
-            outgoing[predecessor.0 as usize].push(successor);
-            original_hard_edges = original_hard_edges.saturating_add(1);
-        }
-        for successors in &mut outgoing {
-            successors.sort_by_key(|tx| rank[tx.0 as usize]);
-            successors.dedup();
-        }
-
-        let words = transaction_count.div_ceil(64);
-        let mut reachable = vec![vec![0_u64; words]; transaction_count];
-        let mut reduced = Vec::new();
-
-        for predecessor in canonical_order.iter().copied().rev() {
-            let predecessor_index = predecessor.0 as usize;
-            for successor in outgoing[predecessor_index].iter().copied() {
-                let successor_index = successor.0 as usize;
-                if bit_is_set(&reachable[predecessor_index], successor_index) {
-                    continue;
-                }
-                reduced.push(ScheduledDependency {
-                    predecessor,
-                    successor,
-                    class: EdgeClass::Hard,
-                });
-                set_bit(&mut reachable[predecessor_index], successor_index);
-                let successor_reachability = reachable[successor_index].clone();
-                union_bits(&mut reachable[predecessor_index], &successor_reachability);
-            }
-        }
-        reduced.sort_unstable();
-        let elided = original_hard_edges.saturating_sub(reduced.len());
-        (reduced, elided)
+        Ok(self.dependencies_before_reduction(assigned_wave)?.len())
     }
 
     fn should_explore(
@@ -686,11 +746,18 @@ impl<'graph> SchedulingAnalysis<'graph> {
         {
             return false;
         }
-        let uncertainty = self.soft_neighbors[tx_index.0 as usize]
+        let explicit_uncertainty = self.soft_neighbors[tx_index.0 as usize]
             .iter()
             .filter(|(_, risk, _)| *risk > config.risk_budget)
             .map(|(_, _, confidence)| (1.0 - *confidence).clamp(0.0, 1.0))
             .fold(0.0_f64, f64::max);
+        let group_uncertainty = self.compact_soft_memberships[tx_index.0 as usize]
+            .iter()
+            .filter_map(|group_index| self.compact_soft_groups.get(*group_index))
+            .filter(|group| group.scheduling_risk > config.risk_budget)
+            .map(|group| (1.0 - group.confidence).clamp(0.0, 1.0))
+            .fold(0.0_f64, f64::max);
+        let uncertainty = explicit_uncertainty.max(group_uncertainty);
         if uncertainty < config.exploration_min_uncertainty {
             return false;
         }
@@ -698,17 +765,27 @@ impl<'graph> SchedulingAnalysis<'graph> {
             < (config.exploration_rate * uncertainty).clamp(0.0, 1.0)
     }
 
-    fn soft_risk(
+    fn soft_risk_with_group_counts(
         &self,
         tx_index: TxIndex,
         wave_index: usize,
         assigned_wave: &[Option<usize>],
+        compact_group_wave_counts: &[BTreeMap<usize, usize>],
     ) -> f64 {
         let mut independence_probability = 1.0;
         for &(neighbor, probability, _) in &self.soft_neighbors[tx_index.0 as usize] {
             if assigned_wave[neighbor.0 as usize] == Some(wave_index) {
                 independence_probability *= 1.0 - probability;
             }
+        }
+        for group_index in &self.compact_soft_memberships[tx_index.0 as usize] {
+            let group = &self.compact_soft_groups[*group_index];
+            let same_wave_members = compact_group_wave_counts[*group_index]
+                .get(&wave_index)
+                .copied()
+                .unwrap_or(0);
+            independence_probability *=
+                (1.0 - group.scheduling_risk).powi(same_wave_members as i32);
         }
         1.0 - independence_probability
     }
@@ -787,6 +864,13 @@ pub enum SchedulingError {
     },
     #[error("hard dependency {predecessor:?} -> {successor:?} is violated by waves {predecessor_wave} and {successor_wave}")]
     HardDependencyViolation {
+        predecessor: TxIndex,
+        successor: TxIndex,
+        predecessor_wave: usize,
+        successor_wave: usize,
+    },
+    #[error("soft relationship {predecessor:?} -> {successor:?} is reversed by waves {predecessor_wave} and {successor_wave}")]
+    SoftOrderingViolation {
         predecessor: TxIndex,
         successor: TxIndex,
         predecessor_wave: usize,

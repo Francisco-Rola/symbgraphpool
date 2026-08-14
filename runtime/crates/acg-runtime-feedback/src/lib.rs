@@ -14,9 +14,9 @@ use acg_candidate_graph::{CandidateGraph, EdgeProvenance};
 use acg_core::{ConflictKinds, ProfileEdgeIndex, ProfileId, TxIndex};
 use acg_cosmwasm_engine::{AccessKind, AccessRecord, Address};
 use acg_feedback::{
-    AdaptiveFeedbackConfig, AdaptiveFeedbackStore, AggregatedObservationBuffer, ApplySummary,
-    ConflictObservation, FeedbackCheckpoint, FeedbackError, ObservationBuffer, ObservationSource,
-    ObservationTarget,
+    AdaptiveFeedbackConfig, AdaptiveFeedbackStore, AggregatedConflictBatch,
+    AggregatedObservationBuffer, ApplySummary, ConflictObservation, FeedbackCheckpoint,
+    FeedbackError, ObservationBuffer, ObservationSource, ObservationTarget,
 };
 use acg_profile_graph::ProfileGraph;
 use acg_validator_sim::BlockExecutionReport;
@@ -111,6 +111,78 @@ struct ScanAccess {
     end: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+struct FootprintAccessMode {
+    read: bool,
+    write: bool,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct FootprintScan {
+    contract: Address,
+    start: Vec<u8>,
+    end: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+struct TransactionConflictFootprint {
+    exact: BTreeMap<ExactLocation, FootprintAccessMode>,
+    scans: Vec<FootprintScan>,
+}
+
+impl TransactionConflictFootprint {
+    fn record(&mut self, access: &AccessRecord) {
+        match &access.kind {
+            AccessKind::StorageRead => {
+                self.exact
+                    .entry(ExactLocation {
+                        scope: ExactScope::ContractStorage(access.contract.clone()),
+                        key: access.key.clone(),
+                    })
+                    .or_default()
+                    .read = true;
+            }
+            AccessKind::StorageWrite | AccessKind::StorageRemove => {
+                self.exact
+                    .entry(ExactLocation {
+                        scope: ExactScope::ContractStorage(access.contract.clone()),
+                        key: access.key.clone(),
+                    })
+                    .or_default()
+                    .write = true;
+            }
+            AccessKind::StorageScan => self.scans.push(FootprintScan {
+                contract: access.contract.clone(),
+                start: access.key.clone(),
+                end: access.range_end.clone(),
+            }),
+            AccessKind::BankRead => {
+                self.exact
+                    .entry(ExactLocation {
+                        scope: ExactScope::GlobalBank,
+                        key: access.key.clone(),
+                    })
+                    .or_default()
+                    .read = true;
+            }
+            AccessKind::BankWrite => {
+                self.exact
+                    .entry(ExactLocation {
+                        scope: ExactScope::GlobalBank,
+                        key: access.key.clone(),
+                    })
+                    .or_default()
+                    .write = true;
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        self.scans.sort();
+        self.scans.dedup();
+    }
+}
+
 /// Generates concrete read/write and write/write overlaps from execution artifacts.
 ///
 /// Exact keys are indexed, so ordinary conflicts are generated from accesses rather than all
@@ -143,6 +215,22 @@ impl AccessConflictDetector {
     fn detect_map(
         &self,
         report: &BlockExecutionReport,
+    ) -> Result<BTreeMap<(TxIndex, TxIndex), ConflictKinds>, RuntimeFeedbackError> {
+        self.detect_map_with_compact_exclusion(report, None)
+    }
+
+    fn detect_map_excluding_compact(
+        &self,
+        report: &BlockExecutionReport,
+        candidate_graph: &CandidateGraph,
+    ) -> Result<BTreeMap<(TxIndex, TxIndex), ConflictKinds>, RuntimeFeedbackError> {
+        self.detect_map_with_compact_exclusion(report, Some(candidate_graph))
+    }
+
+    fn detect_map_with_compact_exclusion(
+        &self,
+        report: &BlockExecutionReport,
+        compact_graph: Option<&CandidateGraph>,
     ) -> Result<BTreeMap<(TxIndex, TxIndex), ConflictKinds>, RuntimeFeedbackError> {
         let mut exact = BTreeMap::<ExactLocation, Participants>::new();
         let mut scans = Vec::<ScanAccess>::new();
@@ -187,21 +275,52 @@ impl AccessConflictDetector {
             } else {
                 ConflictKinds::empty()
             };
-            for writer in &participants.writers {
-                for reader in &participants.readers {
-                    if writer != reader {
-                        add_read_write(&mut conflicts, *reader, *writer, scope_kind);
+
+            let compact_read_write = compact_graph.is_some_and(|graph| {
+                let mut members = participants
+                    .readers
+                    .iter()
+                    .chain(&participants.writers)
+                    .copied()
+                    .collect::<Vec<_>>();
+                members.sort_unstable();
+                members.dedup();
+                members.len() >= 2 && graph.compact_provenance_covering(&members).is_some()
+            });
+            if !compact_read_write {
+                for writer in &participants.writers {
+                    for reader in &participants.readers {
+                        if writer != reader {
+                            add_read_write(
+                                &mut conflicts,
+                                *reader,
+                                *writer,
+                                scope_kind,
+                                compact_graph,
+                            );
+                        }
                     }
                 }
             }
-            for (offset, left) in participants.writers.iter().enumerate() {
-                for right in participants.writers.iter().skip(offset + 1) {
-                    add_kind(
-                        &mut conflicts,
-                        *left,
-                        *right,
-                        ConflictKinds::WRITE_WRITE | scope_kind,
-                    );
+
+            let compact_write_write = compact_graph.is_some_and(|graph| {
+                if participants.writers.len() < 2 {
+                    return false;
+                }
+                let writers = participants.writers.iter().copied().collect::<Vec<_>>();
+                graph.compact_provenance_covering(&writers).is_some()
+            });
+            if !compact_write_write {
+                for (offset, left) in participants.writers.iter().enumerate() {
+                    for right in participants.writers.iter().skip(offset + 1) {
+                        add_kind(
+                            &mut conflicts,
+                            *left,
+                            *right,
+                            ConflictKinds::WRITE_WRITE | scope_kind,
+                            compact_graph,
+                        );
+                    }
                 }
             }
         }
@@ -217,6 +336,16 @@ impl AccessConflictDetector {
                 if !range_contains(key, &scan.start, scan.end.as_deref()) {
                     continue;
                 }
+                let compact_scan_write = compact_graph.is_some_and(|graph| {
+                    let mut members = writers.iter().copied().collect::<Vec<_>>();
+                    members.push(scan.transaction);
+                    members.sort_unstable();
+                    members.dedup();
+                    members.len() >= 2 && graph.compact_provenance_covering(&members).is_some()
+                });
+                if compact_scan_write {
+                    continue;
+                }
                 for writer in writers {
                     if *writer != scan.transaction {
                         add_read_write(
@@ -224,6 +353,7 @@ impl AccessConflictDetector {
                             scan.transaction,
                             *writer,
                             ConflictKinds::empty(),
+                            compact_graph,
                         );
                     }
                 }
@@ -231,6 +361,40 @@ impl AccessConflictDetector {
         }
 
         Ok(conflicts)
+    }
+
+    fn transaction_footprints(
+        &self,
+        report: &BlockExecutionReport,
+        transaction_count: usize,
+    ) -> Result<Vec<Option<TransactionConflictFootprint>>, RuntimeFeedbackError> {
+        let mut footprints = vec![None; transaction_count];
+        for execution in &report.transactions {
+            if execution.transaction_index >= transaction_count {
+                return Err(RuntimeFeedbackError::TransactionIndexOverflow(
+                    execution.transaction_index,
+                ));
+            }
+            let Some(outcome) = execution.result.as_ref().ok() else {
+                continue;
+            };
+            let mut footprint = TransactionConflictFootprint::default();
+            for access in &outcome.accesses {
+                if access.transaction_id != execution.transaction_id {
+                    return Err(RuntimeFeedbackError::AccessTransactionIdMismatch {
+                        execution: execution.transaction_id.0,
+                        access: access.transaction_id.0,
+                    });
+                }
+                if access.reverted && !self.config.include_reverted_accesses {
+                    continue;
+                }
+                footprint.record(access);
+            }
+            footprint.finish();
+            footprints[execution.transaction_index] = Some(footprint);
+        }
+        Ok(footprints)
     }
 }
 
@@ -294,11 +458,129 @@ fn range_contains(key: &[u8], start: &[u8], end: Option<&[u8]>) -> bool {
     key >= start && end.map_or(true, |end| key < end)
 }
 
+fn footprint_conflict_kinds_ordered(
+    left: &TransactionConflictFootprint,
+    right: &TransactionConflictFootprint,
+) -> ConflictKinds {
+    let mut kinds = ConflictKinds::empty();
+    for (location, left_mode) in &left.exact {
+        let Some(right_mode) = right.exact.get(location) else {
+            continue;
+        };
+        let mut location_kinds = ConflictKinds::empty();
+        if left_mode.write && right_mode.write {
+            location_kinds |= ConflictKinds::WRITE_WRITE;
+        }
+        if left_mode.read && right_mode.write {
+            location_kinds |= ConflictKinds::READ_WRITE;
+        }
+        if left_mode.write && right_mode.read {
+            location_kinds |= ConflictKinds::WRITE_READ;
+        }
+        if !location_kinds.is_empty() && matches!(&location.scope, ExactScope::GlobalBank) {
+            location_kinds |= ConflictKinds::BALANCE;
+        }
+        kinds |= location_kinds;
+    }
+
+    for scan in &left.scans {
+        if right.exact.iter().any(|(location, mode)| {
+            let ExactScope::ContractStorage(contract) = &location.scope else {
+                return false;
+            };
+            mode.write
+                && contract == &scan.contract
+                && range_contains(&location.key, &scan.start, scan.end.as_deref())
+        }) {
+            kinds |= ConflictKinds::READ_WRITE;
+        }
+    }
+    for scan in &right.scans {
+        if left.exact.iter().any(|(location, mode)| {
+            let ExactScope::ContractStorage(contract) = &location.scope else {
+                return false;
+            };
+            mode.write
+                && contract == &scan.contract
+                && range_contains(&location.key, &scan.start, scan.end.as_deref())
+        }) {
+            kinds |= ConflictKinds::WRITE_READ;
+        }
+    }
+    kinds
+}
+
+fn compact_group_conflict_summary(
+    members: &[TxIndex],
+    footprints: &[Option<TransactionConflictFootprint>],
+    evidence_participants: Option<&BTreeSet<TxIndex>>,
+) -> Result<(usize, ConflictKinds), RuntimeFeedbackError> {
+    let mut classes = BTreeMap::<(TransactionConflictFootprint, bool), Vec<TxIndex>>::new();
+    for member in members {
+        let footprint = footprints
+            .get(member.0 as usize)
+            .and_then(Option::as_ref)
+            .ok_or(RuntimeFeedbackError::MissingConflictFootprint(*member))?;
+        let participant = evidence_participants.is_some_and(|set| set.contains(member));
+        classes
+            .entry((footprint.clone(), participant))
+            .or_default()
+            .push(*member);
+    }
+
+    let classes = classes.into_iter().collect::<Vec<_>>();
+    let mut conflicts = 0_usize;
+    let mut conflict_kinds = ConflictKinds::empty();
+    for left_index in 0..classes.len() {
+        let ((left_footprint, left_participant), left_members) = &classes[left_index];
+        for (right_offset, ((right_footprint, right_participant), right_members)) in
+            classes.iter().enumerate().skip(left_index)
+        {
+            if evidence_participants.is_some() && !*left_participant && !*right_participant {
+                continue;
+            }
+
+            let kinds = if left_index == right_offset {
+                footprint_conflict_kinds_ordered(left_footprint, right_footprint)
+            } else {
+                let left_before_right = left_members
+                    .last()
+                    .zip(right_members.first())
+                    .is_some_and(|(left, right)| left < right);
+                let right_before_left = right_members
+                    .last()
+                    .zip(left_members.first())
+                    .is_some_and(|(right, left)| right < left);
+                if left_before_right {
+                    footprint_conflict_kinds_ordered(left_footprint, right_footprint)
+                } else if right_before_left {
+                    footprint_conflict_kinds_ordered(right_footprint, left_footprint)
+                } else {
+                    footprint_conflict_kinds_ordered(left_footprint, right_footprint)
+                        | footprint_conflict_kinds_ordered(right_footprint, left_footprint)
+                }
+            };
+            if kinds.is_empty() {
+                continue;
+            }
+            let count = if left_index == right_offset {
+                choose_two(left_members.len())
+            } else {
+                left_members.len().saturating_mul(right_members.len())
+            };
+            conflicts = conflicts.saturating_add(count);
+            conflict_kinds |= kinds;
+        }
+    }
+    Ok((conflicts, conflict_kinds))
+}
+
 fn add_read_write(
     conflicts: &mut BTreeMap<(TxIndex, TxIndex), ConflictKinds>,
     reader: TxIndex,
     writer: TxIndex,
     extra_kind: ConflictKinds,
+    compact_graph: Option<&CandidateGraph>,
 ) {
     let (left, right) = canonical_tx_pair(reader, writer);
     let kind = if left == reader {
@@ -306,7 +588,7 @@ fn add_read_write(
     } else {
         ConflictKinds::WRITE_READ
     };
-    add_kind(conflicts, left, right, kind | extra_kind);
+    add_kind(conflicts, left, right, kind | extra_kind, compact_graph);
 }
 
 fn add_kind(
@@ -314,8 +596,13 @@ fn add_kind(
     left: TxIndex,
     right: TxIndex,
     kind: ConflictKinds,
+    compact_graph: Option<&CandidateGraph>,
 ) {
     let pair = canonical_tx_pair(left, right);
+    if compact_graph.is_some_and(|graph| graph.compact_provenance_between(pair.0, pair.1).is_some())
+    {
+        return;
+    }
     conflicts
         .entry(pair)
         .and_modify(|current| *current |= kind)
@@ -635,11 +922,23 @@ impl BlockFeedbackCollector {
     ) -> Result<AggregatedObservationBuffer, RuntimeFeedbackError> {
         let successful = successful_transactions(report)?;
         validate_report_candidate_alignment(candidate_graph, report)?;
-        let observed = self.detector.detect_map(report)?;
+        let footprints = self
+            .detector
+            .transaction_footprints(report, candidate_graph.transactions().len())?;
+        // Compact-group conflicts are counted from execution-footprint classes below. Excluding
+        // those pairs from the residual detector avoids constructing one BTreeMap entry per
+        // logical pair while still retaining exact candidate-miss detection outside the groups.
+        let observed = self
+            .detector
+            .detect_map_excluding_compact(report, candidate_graph)?;
 
         let mut buffer = AggregatedObservationBuffer::default();
         let mut candidate_totals = BTreeMap::<CollectorRelationship, usize>::new();
         let mut candidate_totals_by_profile = BTreeMap::<(ProfileId, ProfileId), usize>::new();
+        let mut observed_candidate_conflicts = BTreeMap::<CollectorRelationship, usize>::new();
+        let mut observed_conflicts_by_profile = BTreeMap::<(ProfileId, ProfileId), usize>::new();
+        let mut observed_candidate_conflicts_by_profile =
+            BTreeMap::<(ProfileId, ProfileId), usize>::new();
 
         for edge in candidate_graph.edges() {
             if candidate_graph.provenance_is_compact(edge.provenance) {
@@ -682,12 +981,35 @@ impl BlockFeedbackCollector {
                 collector_relationship_for_provenance(group.provenance(), profile_pair);
             *candidate_totals.entry(relationship).or_default() += scoped_pairs;
             *candidate_totals_by_profile.entry(profile_pair).or_default() += scoped_pairs;
-        }
 
-        let mut observed_candidate_conflicts = BTreeMap::<CollectorRelationship, usize>::new();
-        let mut observed_conflicts_by_profile = BTreeMap::<(ProfileId, ProfileId), usize>::new();
-        let mut observed_candidate_conflicts_by_profile =
-            BTreeMap::<(ProfileId, ProfileId), usize>::new();
+            let (conflicts, conflict_kinds) = compact_group_conflict_summary(
+                &eligible_members,
+                &footprints,
+                evidence_participants,
+            )?;
+            debug_assert!(conflicts <= scoped_pairs);
+            if conflicts > 0 {
+                buffer.record_conflict_batch(AggregatedConflictBatch {
+                    source_profile: left.profile_id,
+                    target_profile: right.profile_id,
+                    conflict_kinds,
+                    target: relationship.observation_target(),
+                    weight: conflict_weight,
+                    epoch,
+                    candidate_edge_present: true,
+                    count: conflicts,
+                })?;
+                *observed_candidate_conflicts
+                    .entry(relationship)
+                    .or_default() += conflicts;
+                *observed_conflicts_by_profile
+                    .entry(profile_pair)
+                    .or_default() += conflicts;
+                *observed_candidate_conflicts_by_profile
+                    .entry(profile_pair)
+                    .or_default() += conflicts;
+            }
+        }
 
         for (pair, conflict_kinds) in &observed {
             if !pair_in_evidence_scope(*pair, evidence_participants) {
@@ -1538,6 +1860,8 @@ pub enum RuntimeFeedbackError {
     },
     #[error("candidate transaction {0:?} is missing")]
     CandidateTransactionMissing(TxIndex),
+    #[error("successful transaction {0:?} is missing a conflict footprint")]
+    MissingConflictFootprint(TxIndex),
     #[error(
         "serialization-cost evidence for {predecessor:?} -> {transaction:?} has no candidate edge"
     )]

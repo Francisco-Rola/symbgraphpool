@@ -193,6 +193,18 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
         "175000".to_owned(),
     );
     values.insert(
+        "acg.serial_bypass_economics_ema_alpha".to_owned(),
+        "0.25".to_owned(),
+    );
+    values.insert(
+        "acg.serial_bypass_min_economics_observations".to_owned(),
+        "3".to_owned(),
+    );
+    values.insert(
+        "acg.serial_bypass_projected_speedup_hysteresis".to_owned(),
+        "0.15".to_owned(),
+    );
+    values.insert(
         "acg.serialization_cost_reference_nanos".to_owned(),
         "500000".to_owned(),
     );
@@ -219,6 +231,24 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
             .serial_bypass
             .service_cost_reference_nanos_per_transaction,
         175_000
+    );
+    assert_eq!(
+        tuning.planning_config.serial_bypass.economics_ema_alpha,
+        0.25
+    );
+    assert_eq!(
+        tuning
+            .planning_config
+            .serial_bypass
+            .min_economics_observations,
+        3
+    );
+    assert_eq!(
+        tuning
+            .planning_config
+            .serial_bypass
+            .projected_speedup_hysteresis,
+        0.15
     );
     assert_eq!(
         tuning
@@ -340,7 +370,7 @@ fn serial_bypass_skips_candidate_graph_after_losing_warmup_economics() {
         .insert("accounts".to_owned(), "32".to_owned());
     bypass
         .parameters
-        .insert("warmup_blocks".to_owned(), "2".to_owned());
+        .insert("warmup_blocks".to_owned(), "4".to_owned());
     bypass
         .parameters
         .insert("acg.serial_bypass_enabled".to_owned(), "true".to_owned());
@@ -362,6 +392,8 @@ fn serial_bypass_skips_candidate_graph_after_losing_warmup_economics() {
         .planning
         .serial_bypass_admission_score_milli
         .is_some());
+    assert_eq!(record.planning.adapter_nanos, 0);
+    assert_eq!(record.planning.candidate_graph_nanos, 0);
     assert_eq!(record.scheduling.candidate_edges, 0);
     assert_eq!(record.execution.dependency_count, 0);
     assert_eq!(record.execution.workers, 1);
@@ -501,6 +533,46 @@ fn compact_equivalence_planning_keeps_logical_candidate_coverage() {
     assert_eq!(record.scheduling.scheduled_dependencies, 31);
     assert_eq!(record.feedback.candidate_misses, 0);
     assert_eq!(record.feedback.positive_observations, 32 * 31 / 2);
+    assert_eq!(record.correctness.serial_equivalent, Some(true));
+}
+
+#[test]
+fn mature_bucketed_soft_relationships_remain_compact_after_feedback() {
+    let mut identity = run("probability-only", 16);
+    identity
+        .parameters
+        .insert("transactions".to_owned(), "64".to_owned());
+    identity
+        .parameters
+        .insert("accounts".to_owned(), "64".to_owned());
+    identity
+        .parameters
+        .insert("hot_account_probability_bps".to_owned(), "0".to_owned());
+    identity
+        .parameters
+        .insert("prediction_quality".to_owned(), "bucketed".to_owned());
+    identity
+        .parameters
+        .insert("prediction_buckets".to_owned(), "4".to_owned());
+    identity
+        .parameters
+        .insert("warmup_blocks".to_owned(), "4".to_owned());
+    identity
+        .parameters
+        .insert("acg.hard_threshold".to_owned(), "0.99".to_owned());
+    identity
+        .parameters
+        .insert("acg.risk_budget".to_owned(), "0.50".to_owned());
+
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness
+        .run_manifest(&smoke_manifest(vec![identity]))
+        .unwrap();
+    let record = &outcome.records[0];
+    assert!(record.scheduling.soft_edges > 0);
+    assert!(record.scheduling.candidate_edges > record.scheduling.materialized_candidate_edges);
+    assert!(record.scheduling.materialized_candidate_edges <= 64);
+    assert_eq!(record.feedback.candidate_misses, 0);
     assert_eq!(record.correctness.serial_equivalent, Some(true));
 }
 

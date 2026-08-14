@@ -358,6 +358,9 @@ impl HarnessTuningConfig {
             "acg.serial_bypass_min_transactions",
             "acg.serial_bypass_min_projected_speedup",
             "acg.serial_bypass_service_cost_reference_nanos_per_transaction",
+            "acg.serial_bypass_economics_ema_alpha",
+            "acg.serial_bypass_min_economics_observations",
+            "acg.serial_bypass_projected_speedup_hysteresis",
             "acg.serialization_cost_reference_nanos",
             "acg.invalidation_fanout_weight",
             "acg.feedback_retention_factor",
@@ -470,6 +473,21 @@ impl HarnessTuningConfig {
                         .serial_bypass
                         .service_cost_reference_nanos_per_transaction,
                 )?,
+                economics_ema_alpha: parameter(
+                    parameters,
+                    "acg.serial_bypass_economics_ema_alpha",
+                    planning_default.serial_bypass.economics_ema_alpha,
+                )?,
+                min_economics_observations: parameter(
+                    parameters,
+                    "acg.serial_bypass_min_economics_observations",
+                    planning_default.serial_bypass.min_economics_observations,
+                )?,
+                projected_speedup_hysteresis: parameter(
+                    parameters,
+                    "acg.serial_bypass_projected_speedup_hysteresis",
+                    planning_default.serial_bypass.projected_speedup_hysteresis,
+                )?,
             },
         };
 
@@ -565,7 +583,7 @@ fn execute_adaptive_block(
             .map_err(display_error)?;
         let execution_wall = execution_started.elapsed();
         let total_adaptive_block_wall = total_started.elapsed();
-        pipeline.observe_block_economics(&report, total_adaptive_block_wall);
+        pipeline.observe_block_economics(&report, total_adaptive_block_wall, true);
         if !measured {
             return Ok(None);
         }
@@ -648,7 +666,7 @@ fn execute_adaptive_block(
         post_feedback_started.elapsed()
     };
     let total_adaptive_block_wall = total_started.elapsed();
-    pipeline.observe_block_economics(&preexecution_report, total_adaptive_block_wall);
+    pipeline.observe_block_economics(&preexecution_report, total_adaptive_block_wall, false);
 
     if !measured {
         return Ok(None);

@@ -714,3 +714,99 @@ fn immature_equivalence_clique_is_materialized_as_a_chain_with_logical_coverage(
         .validate_against(&candidate, scheduler.config())
         .unwrap();
 }
+
+#[test]
+fn mature_soft_equivalence_clique_stays_compact_with_pairwise_schedule_semantics() {
+    let graph = graph();
+    let credit = profile_id(&graph, "execute::Credit");
+    let edge_index = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let feedback_config = feedback_config();
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let mut observations = ObservationBuffer::default();
+    for offset in 0..8_u64 {
+        observations.push(
+            ConflictObservation::independent(
+                credit,
+                credit,
+                TxId(1_000 + offset * 2),
+                TxId(1_001 + offset * 2),
+                ObservationSource::CanonicalExecution,
+                ObservationTarget::Static { edge_index },
+                1.0,
+                1,
+                true,
+            )
+            .unwrap(),
+        );
+    }
+    store
+        .apply_batch(&graph, observations, &feedback_config)
+        .unwrap();
+
+    let transactions = || {
+        (0..8_u64)
+            .map(|offset| {
+                tx(
+                    &graph,
+                    offset + 1,
+                    "execute::Credit",
+                    1,
+                    json!({"account":"alice"}),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let build = |compact| {
+        CandidateGraphBuilder::new(&graph)
+            .build_weighted(
+                transactions(),
+                &store,
+                &feedback_config,
+                WeightedCandidateGraphConfig {
+                    epoch: 1,
+                    edge_materialization_threshold: 0.0,
+                    cost_policy: Default::default(),
+                    compact_immature_equivalence_edges: compact,
+                    independent_observations_before_softening: 8,
+                },
+            )
+            .unwrap()
+    };
+    let pairwise = build(false);
+    let compact = build(true);
+    assert_eq!(pairwise.logical_edge_count(), 28);
+    assert_eq!(pairwise.edges().len(), 28);
+    assert_eq!(compact.logical_edge_count(), 28);
+    assert_eq!(compact.edges().len(), 7);
+    assert_eq!(compact.compact_groups().len(), 1);
+
+    let scheduler_config = RiskBoundedSchedulerConfig {
+        soft_threshold: 0.20,
+        hard_threshold: 1.0,
+        risk_budget: 0.0,
+        max_wave_width: None,
+        exploration_rate: 0.0,
+        exploration_risk_budget: 0.90,
+        exploration_min_uncertainty: 0.35,
+        exploration_max_transactions_per_block: 0,
+        independent_observations_before_softening: 8,
+    };
+    let scheduler = acg_candidate_graph::RiskBoundedScheduler::new(scheduler_config).unwrap();
+    assert_eq!(
+        scheduler.classify_edge(pairwise.edges().first().unwrap()),
+        EdgeClass::Soft
+    );
+    let pairwise_schedule = scheduler.schedule(&pairwise).unwrap();
+    let compact_schedule = scheduler.schedule(&compact).unwrap();
+    assert_eq!(compact_schedule.waves, pairwise_schedule.waves);
+    compact_schedule
+        .validate_against(&compact, scheduler.config())
+        .unwrap();
+    pairwise_schedule
+        .validate_against(&pairwise, scheduler.config())
+        .unwrap();
+    assert!(
+        compact_schedule.pre_reduction_ordering_dependencies
+            < pairwise_schedule.pre_reduction_ordering_dependencies
+    );
+}

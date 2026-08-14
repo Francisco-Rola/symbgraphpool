@@ -234,6 +234,31 @@ impl CandidateGraph {
         finish_graph(transactions, Vec::new(), Vec::new())
     }
 
+    /// Builds the transaction-count shell used by the direct serial admission path.
+    ///
+    /// A serial-bypassed block never evaluates candidate relationships or runtime feedback, so
+    /// adapting every CosmWasm request into predicate bindings would be pure control-plane cost.
+    /// These placeholder transactions exist only to preserve block cardinality for diagnostics.
+    pub fn serial_bypass(transaction_count: usize) -> Result<Self, CandidateGraphError> {
+        u32::try_from(transaction_count)
+            .map_err(|_| CandidateGraphError::TooManyTransactions(transaction_count))?;
+        let transactions = (0..transaction_count)
+            .map(|index| {
+                let index = u32::try_from(index).expect("transaction count validated");
+                CandidateTransaction {
+                    tx_id: TxId(u64::from(index)),
+                    predicted_position: index,
+                    inclusion_probability: 1.0,
+                    profile_id: ProfileId(0),
+                    instance_id: InstanceId(0),
+                    input_bindings: InputBindings::empty(),
+                    estimated_execution_cost: 0,
+                }
+            })
+            .collect();
+        finish_graph(transactions, Vec::new(), Vec::new())
+    }
+
     pub fn transactions(&self) -> &[CandidateTransaction] {
         &self.transactions
     }
@@ -287,14 +312,11 @@ impl CandidateGraph {
         self.edges.get(neighbors[offset].edge_index as usize)
     }
 
-    pub fn candidate_provenance_between(
+    pub fn compact_provenance_between(
         &self,
         left: TxIndex,
         right: TxIndex,
     ) -> Option<EdgeProvenance> {
-        if let Some(edge) = self.edge_between(left, right) {
-            return Some(edge.provenance);
-        }
         let left_groups = self.compact_memberships.get(left.0 as usize)?;
         let right_groups = self.compact_memberships.get(right.0 as usize)?;
         let mut left_offset = 0;
@@ -310,6 +332,39 @@ impl CandidateGraph {
                         .map(|group| group.provenance);
                 }
             }
+        }
+        None
+    }
+
+    pub fn candidate_provenance_between(
+        &self,
+        left: TxIndex,
+        right: TxIndex,
+    ) -> Option<EdgeProvenance> {
+        self.edge_between(left, right)
+            .map(|edge| edge.provenance)
+            .or_else(|| self.compact_provenance_between(left, right))
+    }
+
+    /// Returns the compact relationship covering every supplied transaction, when one exists.
+    ///
+    /// This lets runtime feedback suppress an entire access-equivalence class before generating
+    /// transaction pairs. Membership intersection is proportional to the number of compact
+    /// relationships per transaction rather than the logical clique size.
+    pub fn compact_provenance_covering(&self, members: &[TxIndex]) -> Option<EdgeProvenance> {
+        let first = *members.first()?;
+        let candidate_groups = self.compact_memberships.get(first.0 as usize)?;
+        'groups: for group_index in candidate_groups {
+            for member in members.iter().skip(1) {
+                let memberships = self.compact_memberships.get(member.0 as usize)?;
+                if memberships.binary_search(group_index).is_err() {
+                    continue 'groups;
+                }
+            }
+            return self
+                .compact_groups
+                .get(*group_index as usize)
+                .map(|group| group.provenance);
         }
         None
     }
@@ -366,8 +421,11 @@ pub struct WeightedCandidateGraphConfig {
     /// Cost-aware Brick 5D policy. With no replay-cost evidence, scheduling risk exactly matches
     /// the Brick 4 posterior probability.
     pub cost_policy: CostAwareEdgePolicyConfig,
-    /// Compact provable equivalence cliques into canonical chains while the relationship is
-    /// guaranteed hard by the scheduler's independence-maturity gate.
+    /// Compact provable equivalence cliques into a group representation at every maturity level.
+    ///
+    /// The legacy field name is retained for source compatibility. Hard groups use a canonical
+    /// chain; mature Soft groups keep full logical clique semantics in the group-aware scheduler
+    /// without materializing every transaction pair.
     pub compact_immature_equivalence_edges: bool,
     pub independent_observations_before_softening: u32,
 }
@@ -517,8 +575,6 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                     edge_materialization_threshold: config.edge_materialization_threshold,
                     cost_policy: config.cost_policy,
                     compact_immature_equivalence_edges: config.compact_immature_equivalence_edges,
-                    independent_observations_before_softening: config
-                        .independent_observations_before_softening,
                 };
                 materialize_static_profile_edge(
                     &materialization_context,
@@ -611,7 +667,6 @@ struct AdaptiveMaterialization {
     edge_materialization_threshold: f64,
     cost_policy: CostAwareEdgePolicyConfig,
     compact_immature_equivalence_edges: bool,
-    independent_observations_before_softening: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -624,12 +679,7 @@ impl StaticMaterialization<'_> {
     fn may_compact_equivalence_clique(self) -> bool {
         match self {
             Self::Binary => false,
-            Self::Adaptive(adaptive) => {
-                adaptive.compact_immature_equivalence_edges
-                    && adaptive.independent_observations_before_softening != 0
-                    && adaptive.estimate.negative_observations
-                        < u64::from(adaptive.independent_observations_before_softening)
-            }
+            Self::Adaptive(adaptive) => adaptive.compact_immature_equivalence_edges,
         }
     }
 

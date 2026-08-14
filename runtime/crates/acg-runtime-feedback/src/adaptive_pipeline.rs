@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
     time::{Duration, Instant},
 };
 
@@ -26,8 +27,8 @@ use crate::{
     ValidationEvidence, ValidationEvidenceKind,
 };
 
-/// Cheap admission gate that can bypass adaptive graph construction when the previous block's
-/// measured planning + execution economics do not beat serial-equivalent service work.
+/// Cheap admission gate that can bypass adaptive graph construction when smoothed recent
+/// planning + execution economics do not beat serial-equivalent service work.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SerialBypassConfig {
     pub enabled: bool,
@@ -36,6 +37,12 @@ pub struct SerialBypassConfig {
     /// Service-cost scale used to discount optimistic prior-block speedups for very cheap
     /// transactions, where VM/control-plane fixed costs dominate.
     pub service_cost_reference_nanos_per_transaction: u64,
+    /// EMA weight applied to the newest whole-block economics observation.
+    pub economics_ema_alpha: f64,
+    /// Minimum number of observed blocks before the admission gate is allowed to bypass.
+    pub min_economics_observations: u32,
+    /// Entry/exit margin around `min_projected_speedup` used to prevent mode flapping.
+    pub projected_speedup_hysteresis: f64,
 }
 
 impl Default for SerialBypassConfig {
@@ -45,6 +52,9 @@ impl Default for SerialBypassConfig {
             min_transactions: 32,
             min_projected_speedup: 1.05,
             service_cost_reference_nanos_per_transaction: 150_000,
+            economics_ema_alpha: 0.35,
+            min_economics_observations: 4,
+            projected_speedup_hysteresis: 0.10,
         }
     }
 }
@@ -62,6 +72,23 @@ impl SerialBypassConfig {
         if self.service_cost_reference_nanos_per_transaction == 0 {
             return Err(AdaptivePipelineError::InvalidSerialBypassServiceCostReference);
         }
+        if !self.economics_ema_alpha.is_finite()
+            || self.economics_ema_alpha <= 0.0
+            || self.economics_ema_alpha > 1.0
+        {
+            return Err(AdaptivePipelineError::InvalidSerialBypassEmaAlpha(
+                self.economics_ema_alpha,
+            ));
+        }
+        if self.min_economics_observations == 0 {
+            return Err(AdaptivePipelineError::InvalidSerialBypassEconomicsObservations);
+        }
+        if !self.projected_speedup_hysteresis.is_finite() || self.projected_speedup_hysteresis < 0.0
+        {
+            return Err(AdaptivePipelineError::InvalidSerialBypassHysteresis(
+                self.projected_speedup_hysteresis,
+            ));
+        }
         Ok(())
     }
 }
@@ -76,8 +103,8 @@ pub struct AdaptivePlanningConfig {
     pub scheduler: RiskBoundedSchedulerConfig,
     /// Brick 5D expected replay-cost policy used to turn posterior probability into scheduling risk.
     pub cost_policy: CostAwareEdgePolicyConfig,
-    /// Optional economics gate evaluated after cheap transaction adaptation but before expensive
-    /// candidate-graph construction and scheduling.
+    /// Optional economics gate evaluated from prior whole-block observations before request
+    /// adaptation, candidate-graph construction or scheduling.
     pub serial_bypass: SerialBypassConfig,
 }
 
@@ -162,7 +189,8 @@ pub struct SerializationAttribution {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct RecentBlockEconomics {
     projected_speedup: f64,
-    mean_service_nanos_per_transaction: u64,
+    mean_service_nanos_per_transaction: f64,
+    observations: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -170,6 +198,15 @@ struct SerialBypassProjection {
     projected_speedup: f64,
     mean_service_nanos_per_transaction: u64,
     admission_score: f64,
+    observations: u32,
+}
+
+fn serial_bypass_threshold(config: SerialBypassConfig, active: bool) -> f64 {
+    if active {
+        config.min_projected_speedup + config.projected_speedup_hysteresis
+    } else {
+        (config.min_projected_speedup - config.projected_speedup_hysteresis).max(0.0)
+    }
 }
 
 /// One Brick 4D planning result before any speculative parallel executor exists.
@@ -230,6 +267,7 @@ pub struct AdaptiveSerialPipeline {
     feedback: RuntimeFeedbackEngine,
     planning_config: AdaptivePlanningConfig,
     recent_economics: Option<RecentBlockEconomics>,
+    serial_bypass_active: AtomicBool,
 }
 
 impl AdaptiveSerialPipeline {
@@ -244,6 +282,7 @@ impl AdaptiveSerialPipeline {
             feedback,
             planning_config,
             recent_economics: None,
+            serial_bypass_active: AtomicBool::new(false),
         })
     }
 
@@ -472,37 +511,38 @@ impl AdaptiveSerialPipeline {
     ) -> Result<(AdaptiveBlockPlan, AdaptivePlanningMetrics), AdaptivePipelineError> {
         let epoch = block.context.height;
 
+        // Admission depends only on prior whole-block economics and current block cardinality.
+        // Decide before adapting requests so the direct serial path pays no candidate-binding cost.
+        let admission_projection = self.serial_bypass_projection(block.transactions.len());
+        if let Some(projection) = admission_projection {
+            if self.serial_bypass_decision(projection) {
+                let candidate_graph = CandidateGraph::serial_bypass(block.transactions.len())?;
+                let schedule = serial_bypass_schedule(candidate_graph.transactions().len());
+                let speculative_execution_plan = execution_plan_from_schedule(&schedule)?;
+                return Ok((
+                    AdaptiveBlockPlan {
+                        candidate_graph,
+                        schedule,
+                        speculative_execution_plan,
+                        serial_bypassed: true,
+                        serial_bypass_projected_speedup_milli: Some(to_milli(
+                            projection.projected_speedup,
+                        )),
+                        serial_bypass_mean_service_nanos: Some(
+                            projection.mean_service_nanos_per_transaction,
+                        ),
+                        serial_bypass_admission_score_milli: Some(to_milli(
+                            projection.admission_score,
+                        )),
+                    },
+                    AdaptivePlanningMetrics::default(),
+                ));
+            }
+        }
+
         let started = Instant::now();
         let candidates = self.adapter.adapt_block(engine, profile_graph, block)?;
         let adapter = started.elapsed();
-
-        let admission_projection = self.serial_bypass_projection(candidates.len());
-        if let Some(projection) = admission_projection.filter(|projection| {
-            projection.admission_score < self.planning_config.serial_bypass.min_projected_speedup
-        }) {
-            let candidate_graph = CandidateGraph::from_transactions(candidates)?;
-            let schedule = serial_bypass_schedule(candidate_graph.transactions().len());
-            let speculative_execution_plan = execution_plan_from_schedule(&schedule)?;
-            return Ok((
-                AdaptiveBlockPlan {
-                    candidate_graph,
-                    schedule,
-                    speculative_execution_plan,
-                    serial_bypassed: true,
-                    serial_bypass_projected_speedup_milli: Some(to_milli(
-                        projection.projected_speedup,
-                    )),
-                    serial_bypass_mean_service_nanos: Some(
-                        projection.mean_service_nanos_per_transaction,
-                    ),
-                    serial_bypass_admission_score_milli: Some(to_milli(projection.admission_score)),
-                },
-                AdaptivePlanningMetrics {
-                    adapter,
-                    ..AdaptivePlanningMetrics::default()
-                },
-            ));
-        }
 
         let started = Instant::now();
         let candidate_graph = CandidateGraphBuilder::new(profile_graph).build_weighted(
@@ -560,13 +600,14 @@ impl AdaptiveSerialPipeline {
 
     /// Record whole adaptive-block economics for the next block's cheap bypass admission gate.
     ///
-    /// The numerator is serial-equivalent service work observed during pre-execution. The
-    /// denominator is the complete adaptive wall time, including planning, replay and feedback,
-    /// so a fast speculative phase cannot hide an economically losing control-plane decision.
+    /// The numerator is serial-equivalent service work observed during execution. The denominator
+    /// is complete adaptive wall time. Both speedup and service complexity are smoothed with an EMA
+    /// so one noisy block cannot flip admission by itself.
     pub fn observe_block_economics(
         &mut self,
         report: &BlockExecutionReport,
         adaptive_block_wall: Duration,
+        serial_bypassed: bool,
     ) {
         if report.transactions.is_empty() {
             return;
@@ -578,10 +619,35 @@ impl AdaptiveSerialPipeline {
         let transaction_count = u64::try_from(report.transactions.len())
             .unwrap_or(u64::MAX)
             .max(1);
-        self.recent_economics = Some(RecentBlockEconomics {
-            projected_speedup: serial_service_nanos as f64 / denominator as f64,
-            mean_service_nanos_per_transaction: serial_service_nanos / transaction_count,
-        });
+        let sample_speedup = serial_service_nanos as f64 / denominator as f64;
+        let sample_service = serial_service_nanos as f64 / transaction_count as f64;
+        let alpha = self.planning_config.serial_bypass.economics_ema_alpha;
+
+        self.recent_economics = match self.recent_economics {
+            Some(previous) => Some(RecentBlockEconomics {
+                // A serial bypass measures serial execution, not the counterfactual adaptive
+                // speedup. Keep the last adaptive speedup estimate so bypass cannot become
+                // self-confirming; service complexity still adapts and can release hysteresis.
+                projected_speedup: if serial_bypassed {
+                    previous.projected_speedup
+                } else {
+                    alpha * sample_speedup + (1.0 - alpha) * previous.projected_speedup
+                },
+                mean_service_nanos_per_transaction: alpha * sample_service
+                    + (1.0 - alpha) * previous.mean_service_nanos_per_transaction,
+                observations: if serial_bypassed {
+                    previous.observations
+                } else {
+                    previous.observations.saturating_add(1)
+                },
+            }),
+            None if serial_bypassed => None,
+            None => Some(RecentBlockEconomics {
+                projected_speedup: sample_speedup,
+                mean_service_nanos_per_transaction: sample_service,
+                observations: 1,
+            }),
+        };
     }
 
     pub fn recent_projected_speedup(&self) -> Option<f64> {
@@ -595,15 +661,34 @@ impl AdaptiveSerialPipeline {
             return None;
         }
         let recent = self.recent_economics?;
-        let complexity_factor = (recent.mean_service_nanos_per_transaction as f64
+        let complexity_factor = (recent.mean_service_nanos_per_transaction
             / config.service_cost_reference_nanos_per_transaction as f64)
             .clamp(0.0, 1.0);
         let admission_score = recent.projected_speedup * complexity_factor;
         Some(SerialBypassProjection {
             projected_speedup: recent.projected_speedup,
-            mean_service_nanos_per_transaction: recent.mean_service_nanos_per_transaction,
+            mean_service_nanos_per_transaction: recent
+                .mean_service_nanos_per_transaction
+                .round()
+                .clamp(0.0, u64::MAX as f64) as u64,
             admission_score,
+            observations: recent.observations,
         })
+    }
+
+    fn serial_bypass_decision(&self, projection: SerialBypassProjection) -> bool {
+        let config = self.planning_config.serial_bypass;
+        if projection.observations < config.min_economics_observations {
+            self.serial_bypass_active
+                .store(false, AtomicOrdering::Relaxed);
+            return false;
+        }
+        let active = self.serial_bypass_active.load(AtomicOrdering::Relaxed);
+        let threshold = serial_bypass_threshold(config, active);
+        let bypass = projection.admission_score < threshold;
+        self.serial_bypass_active
+            .store(bypass, AtomicOrdering::Relaxed);
+        bypass
     }
 
     /// Runs one complete Brick 4D iteration.
@@ -659,16 +744,16 @@ fn serialization_cost_aggregates(
 ) -> Result<AggregatedSerializationCostBuffer, AdaptivePipelineError> {
     let mut buffer = AggregatedSerializationCostBuffer::default();
     visit_serialization_attributions(plan, report, |attribution| {
-        let edge = plan
+        let provenance = plan
             .candidate_graph
-            .edge_between(attribution.predecessor, attribution.transaction)
+            .candidate_provenance_between(attribution.predecessor, attribution.transaction)
             .ok_or(
                 RuntimeFeedbackError::SerializationEvidenceMissingCandidateEdge {
                     predecessor: attribution.predecessor,
                     transaction: attribution.transaction,
                 },
             )?;
-        buffer.record(edge.provenance, attribution.marginal_ready_delay_nanos);
+        buffer.record(provenance, attribution.marginal_ready_delay_nanos);
         Ok(())
     })?;
     Ok(buffer)
@@ -1007,6 +1092,12 @@ pub enum AdaptivePipelineError {
     InvalidSerialBypassSpeedup(f64),
     #[error("serial bypass service-cost reference must be non-zero")]
     InvalidSerialBypassServiceCostReference,
+    #[error("serial bypass EMA alpha must be finite and within (0, 1], got {0}")]
+    InvalidSerialBypassEmaAlpha(f64),
+    #[error("serial bypass minimum economics observations must be at least one")]
+    InvalidSerialBypassEconomicsObservations,
+    #[error("serial bypass hysteresis must be finite and non-negative, got {0}")]
+    InvalidSerialBypassHysteresis(f64),
     #[error(
         "scheduled dependency {predecessor:?} -> {transaction:?} completed at {predecessor_completed_nanos}ns after successor started at {successor_started_nanos}ns"
     )]
@@ -1073,6 +1164,44 @@ mod tests {
             invalid_scheduler.validate().unwrap_err(),
             AdaptivePipelineError::GraphScheduling(GraphSchedulingError::ThresholdOrder { .. })
         ));
+    }
+
+    #[test]
+    fn serial_bypass_config_validates_ema_and_hysteresis() {
+        let invalid_alpha = AdaptivePlanningConfig {
+            serial_bypass: SerialBypassConfig {
+                economics_ema_alpha: 0.0,
+                ..SerialBypassConfig::default()
+            },
+            ..AdaptivePlanningConfig::default()
+        };
+        assert!(matches!(
+            invalid_alpha.validate().unwrap_err(),
+            AdaptivePipelineError::InvalidSerialBypassEmaAlpha(_)
+        ));
+
+        let invalid_observations = AdaptivePlanningConfig {
+            serial_bypass: SerialBypassConfig {
+                min_economics_observations: 0,
+                ..SerialBypassConfig::default()
+            },
+            ..AdaptivePlanningConfig::default()
+        };
+        assert!(matches!(
+            invalid_observations.validate().unwrap_err(),
+            AdaptivePipelineError::InvalidSerialBypassEconomicsObservations
+        ));
+    }
+
+    #[test]
+    fn serial_bypass_hysteresis_requires_a_stronger_signal_to_exit() {
+        let config = SerialBypassConfig {
+            min_projected_speedup: 1.05,
+            projected_speedup_hysteresis: 0.10,
+            ..SerialBypassConfig::default()
+        };
+        assert!((serial_bypass_threshold(config, false) - 0.95).abs() < 1.0e-12);
+        assert!((serial_bypass_threshold(config, true) - 1.15).abs() < 1.0e-12);
     }
 
     #[test]

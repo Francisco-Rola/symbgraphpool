@@ -446,15 +446,28 @@ fn collector_emits_positive_and_explicit_negative_evidence_for_candidate_edges()
 #[test]
 fn aggregated_collector_matches_pairwise_candidate_feedback() {
     let graph = profile_graph();
-    let candidate = candidate_graph(
-        &graph,
-        vec![
-            candidate_tx(&graph, 1, "execute::Credit", json!({"account":"alice"})),
-            candidate_tx(&graph, 2, "execute::Credit", json!({"account":"alice"})),
-            candidate_tx(&graph, 3, "execute::Credit", json!({"account":"alice"})),
-        ],
-    );
-    assert_eq!(candidate.edges().len(), 3);
+    let candidate_source_store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let candidate = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            vec![
+                candidate_tx(&graph, 1, "execute::Credit", json!({"account":"alice"})),
+                candidate_tx(&graph, 2, "execute::Credit", json!({"account":"alice"})),
+                candidate_tx(&graph, 3, "execute::Credit", json!({"account":"alice"})),
+            ],
+            &candidate_source_store,
+            &AdaptiveFeedbackConfig::default(),
+            acg_candidate_graph::WeightedCandidateGraphConfig {
+                epoch: 0,
+                edge_materialization_threshold: 0.0,
+                cost_policy: Default::default(),
+                compact_immature_equivalence_edges: true,
+                independent_observations_before_softening: 8,
+            },
+        )
+        .unwrap();
+    assert_eq!(candidate.logical_edge_count(), 3);
+    assert_eq!(candidate.edges().len(), 2);
+    assert_eq!(candidate.compact_groups().len(), 1);
     let report = report(vec![
         successful_execution(
             0,

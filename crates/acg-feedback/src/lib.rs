@@ -790,6 +790,18 @@ impl ObservationAggregate {
 /// Runtime collectors should prefer this type over constructing one [`ConflictObservation`] per
 /// transaction pair. It preserves raw observation counts and total statistical weight while
 /// keeping memory and state-application work proportional to the number of learned relationships.
+#[derive(Clone, Copy, Debug)]
+pub struct AggregatedConflictBatch {
+    pub source_profile: ProfileId,
+    pub target_profile: ProfileId,
+    pub conflict_kinds: ConflictKinds,
+    pub target: ObservationTarget,
+    pub weight: f64,
+    pub epoch: u64,
+    pub candidate_edge_present: bool,
+    pub count: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct AggregatedObservationBuffer {
     aggregates: BTreeMap<(u64, ObservationBatchTarget), ObservationAggregate>,
@@ -833,6 +845,34 @@ impl AggregatedObservationBuffer {
             weight,
             epoch,
             candidate_edge_present,
+            None,
+        )
+    }
+
+    pub fn record_conflict_batch(
+        &mut self,
+        batch: AggregatedConflictBatch,
+    ) -> Result<(), FeedbackError> {
+        if batch.count == 0 {
+            return Ok(());
+        }
+        let batch_target =
+            observation_batch_target(batch.source_profile, batch.target_profile, batch.target);
+        let aggregate = self
+            .aggregates
+            .entry((batch.epoch, batch_target))
+            .or_insert_with(|| {
+                ObservationAggregate::new(batch.source_profile, batch.target_profile)
+            });
+        aggregate.add_conflicts(
+            batch.conflict_kinds,
+            batch.weight,
+            batch.count,
+            if batch.candidate_edge_present {
+                0
+            } else {
+                batch.count
+            },
             None,
         )
     }

@@ -166,7 +166,12 @@ impl SchedulingRecord {
         }
         for group in plan.candidate_graph.compact_groups() {
             let count = u64::try_from(group.logical_edges()).unwrap_or(u64::MAX);
-            accumulate_candidate_edge(&mut record, group.edge_template(), EdgeClass::Hard, count);
+            accumulate_candidate_edge(
+                &mut record,
+                group.edge_template(),
+                config.scheduler.classify(group.edge_template()),
+                count,
+            );
         }
 
         for dependency in &plan.schedule.ordering_dependencies {
