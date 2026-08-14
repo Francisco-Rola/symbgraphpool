@@ -69,7 +69,6 @@ fn complete_record() -> ExperimentRecord {
             service_inflation_milli: Some(1_100),
             scheduler_realization_milli: Some(1_045),
             scheduler_realization_corrected_milli: Some(1_045),
-            ..ParallelismRecord::default()
         },
         execution: ExecutionRecord {
             transactions: 200,

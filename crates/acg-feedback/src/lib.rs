@@ -320,24 +320,20 @@ impl BetaStatistics {
         &mut self,
         epoch: u64,
         retention_factor: f64,
-        positive_weight: f64,
-        negative_weight: f64,
-        positive_observations: usize,
-        negative_observations: usize,
-        candidate_misses: usize,
+        aggregate: &ObservationAggregate,
     ) -> Result<(), FeedbackError> {
         self.decay_to(epoch, retention_factor)?;
-        self.alpha += positive_weight;
-        self.beta += negative_weight;
+        self.alpha += aggregate.positive_weight;
+        self.beta += aggregate.negative_weight;
         self.positive_observations = self
             .positive_observations
-            .saturating_add(u64::try_from(positive_observations).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(aggregate.positive_observations).unwrap_or(u64::MAX));
         self.negative_observations = self
             .negative_observations
-            .saturating_add(u64::try_from(negative_observations).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(aggregate.negative_observations).unwrap_or(u64::MAX));
         self.candidate_miss_observations = self
             .candidate_miss_observations
-            .saturating_add(u64::try_from(candidate_misses).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(aggregate.candidate_misses).unwrap_or(u64::MAX));
         Ok(())
     }
 }
@@ -1122,15 +1118,7 @@ impl AdaptiveFeedbackStore {
                         .static_statistics
                         .get_mut(edge_index.0 as usize)
                         .ok_or(FeedbackError::UnknownStaticEdge(edge_index))?;
-                    statistics.apply_aggregate(
-                        epoch,
-                        config.retention_factor,
-                        aggregate.positive_weight,
-                        aggregate.negative_weight,
-                        aggregate.positive_observations,
-                        aggregate.negative_observations,
-                        aggregate.candidate_misses,
-                    )?;
+                    statistics.apply_aggregate(epoch, config.retention_factor, &aggregate)?;
                     if aggregate.replay_impact.replay_observations != 0 {
                         let replay_cost = self
                             .static_replay_costs
@@ -1174,15 +1162,8 @@ impl AdaptiveFeedbackStore {
                     };
                     let edge = &mut self.fallback_edges[edge_index];
                     edge.conflict_kinds |= aggregate.conflict_kinds;
-                    edge.statistics.apply_aggregate(
-                        epoch,
-                        config.retention_factor,
-                        aggregate.positive_weight,
-                        aggregate.negative_weight,
-                        aggregate.positive_observations,
-                        aggregate.negative_observations,
-                        aggregate.candidate_misses,
-                    )?;
+                    edge.statistics
+                        .apply_aggregate(epoch, config.retention_factor, &aggregate)?;
                     if aggregate.replay_impact.replay_observations != 0 {
                         edge.replay_cost_statistics.apply_aggregate(
                             aggregate.replay_impact,

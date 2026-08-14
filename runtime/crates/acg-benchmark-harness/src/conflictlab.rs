@@ -268,6 +268,7 @@ impl ConflictLabConfig {
             "storage_rounds",
             "payload_bytes",
             "complexity",
+            "contention",
             "warmup_hot_account_probability_bps",
             "warmup_work_iterations",
             "warmup_storage_rounds",
