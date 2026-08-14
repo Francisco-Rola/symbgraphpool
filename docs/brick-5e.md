@@ -63,25 +63,22 @@ Stable profile keys remain the persistence identity.
 
 ## 5E.3 — stable experiment schema
 
-The runtime workspace now contains `acg-evaluation`. `ExperimentRecord` schema version 1 provides a
+The runtime workspace now contains `acg-evaluation`. `ExperimentRecord` schema version 2 provides a
 single machine-readable record for future ConflictLab, MiniWarehouse, and external benchmark
 adapters. It includes:
 
 - experiment identity, timestamp, mode, seed, worker/physical-core budget, build/revision metadata,
   deterministic host/environment metadata, and deterministic key/value workload parameters;
 - adaptive planning-stage timings;
-- candidate-edge classes, raw probability/risk aggregates, scheduled hard/soft dependencies, and
-  learned replay/serialization-cost evidence counts;
-- serial-equivalent work, serial-cost DAG bound, observed-service DAG bound, service inflation, and
-  scheduler realization when a serial reference is supplied;
+- candidate-edge classes, raw probability/risk aggregates, pre/post transitive-reduction dependency counts, scheduled hard/soft dependencies, and learned replay/serialization-cost evidence counts;
+- serial-equivalent work, serial-cost DAG bound, observed-service critical-path bound, aggregate observed service, worker-capacity bound, corrected feasible parallel lower bound, service inflation, and both legacy/corrected scheduler realization when a serial reference is supplied;
 - READY-DAG execution timings/concurrency;
 - VM acquisition/entrypoint/recycle, host callback, MVCC, receipt, and cache diagnostics;
 - speculative reuse/invalidation/replay and post-consensus reconciliation timings;
-- conflict/replay/serialization feedback counts and update overhead;
+- raw conflict/replay/serialization feedback counts, batched mutation counts, and update overhead;
 - optional canonical/serial state digests and an explicit serial-equivalence result.
 
-Records serialize deterministically to JSON and newline-delimited JSON (`JSONL`). Unknown schema
-versions are rejected rather than silently interpreted.
+Records serialize deterministically to JSON and newline-delimited JSON (`JSONL`). Schema v1 remains readable; schema v2 is emitted for new runs. Unknown schema versions are rejected rather than silently interpreted.
 
 ## 5E.4 — instrumentation boundary
 
@@ -105,7 +102,7 @@ The runner checks:
 3. deterministic experiment-record JSON/JSONL schema round trips and schema-version rejection;
 4. a two-worker runtime integration where a deliberately slow hard dependency produces a measured
    marginal READY delay, persists it, consumes it in the next block's candidate edge, and emits a
-   schema-v1 experiment record.
+   the current experiment record schema.
 
 The runner writes logs, a human-readable summary, and `records.jsonl` under
 `benchmark-results/brick5e-measurement/<timestamp>/`.

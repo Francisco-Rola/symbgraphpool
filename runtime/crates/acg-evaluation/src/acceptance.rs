@@ -577,6 +577,60 @@ pub fn evaluate_record(
             ),
         ));
     }
+    if record.schema_version >= 2 {
+        if record.scheduling.scheduled_dependencies != record.scheduling.ordering_dependencies {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "scheduled_dependency_count_mismatch",
+                format!(
+                    "scheduled_dependencies {} differs from ordering_dependencies {}",
+                    record.scheduling.scheduled_dependencies,
+                    record.scheduling.ordering_dependencies
+                ),
+            ));
+        }
+        if record.scheduling.pre_reduction_dependencies < record.scheduling.scheduled_dependencies {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "dependency_reduction_count_inverted",
+                "pre_reduction_dependencies cannot be smaller than scheduled_dependencies",
+            ));
+        }
+        let expected_elided = record
+            .scheduling
+            .pre_reduction_dependencies
+            .saturating_sub(record.scheduling.scheduled_dependencies);
+        if expected_elided != record.scheduling.edges_elided_by_reduction {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "dependency_reduction_count_mismatch",
+                format!(
+                    "pre-scheduled difference is {expected_elided}, edges_elided_by_reduction is {}",
+                    record.scheduling.edges_elided_by_reduction
+                ),
+            ));
+        }
+        if record.execution.dependency_count != record.scheduling.scheduled_dependencies {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "execution_dependency_count_mismatch",
+                format!(
+                    "execution dependency_count {} differs from scheduled_dependencies {}",
+                    record.execution.dependency_count, record.scheduling.scheduled_dependencies
+                ),
+            ));
+        }
+        if record.execution.hard_dependency_count != record.scheduling.hard_dependencies {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "execution_hard_dependency_count_mismatch",
+                format!(
+                    "execution hard_dependency_count {} differs from hard_dependencies {}",
+                    record.execution.hard_dependency_count, record.scheduling.hard_dependencies
+                ),
+            ));
+        }
+    }
     let feedback_total = record
         .feedback_timing
         .pre_execution_update_nanos
@@ -640,6 +694,32 @@ pub fn evaluate_record(
             "missing_scheduler_realization",
             "scheduler_realization_milli is required when serial references are required",
         );
+        if record.schema_version >= 2 {
+            require_metric(
+                &mut issues,
+                record.parallelism.observed_service_work_nanos,
+                "missing_observed_service_work",
+                "observed_service_work_nanos is required for schema v2 evaluation records",
+            );
+            require_metric(
+                &mut issues,
+                record.parallelism.worker_capacity_bound_nanos,
+                "missing_worker_capacity_bound",
+                "worker_capacity_bound_nanos is required for schema v2 evaluation records",
+            );
+            require_metric(
+                &mut issues,
+                record.parallelism.parallel_lower_bound_nanos,
+                "missing_parallel_lower_bound",
+                "parallel_lower_bound_nanos is required for schema v2 evaluation records",
+            );
+            require_metric(
+                &mut issues,
+                record.parallelism.scheduler_realization_corrected_milli,
+                "missing_corrected_scheduler_realization",
+                "scheduler_realization_corrected_milli is required for schema v2 evaluation records",
+            );
+        }
     }
 
     let canonical_digest = nonempty(record.correctness.canonical_state_digest.as_deref());

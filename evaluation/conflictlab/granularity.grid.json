@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "physical_core_limit": 6,
-  "record_schema_version": 1,
+  "record_schema_version": 2,
   "policy_file": "../policies/release-tuning.json",
   "base_run": {
     "workload": "conflictlab",
@@ -20,7 +20,8 @@
       "sim.block_size": "200",
       "sim.mempool_policy": "fifo",
       "acg.feedback_retention_factor": "0.99",
-      "acg.feedback_confidence_scale": "20.0"
+      "acg.feedback_confidence_scale": "20.0",
+      "prediction_quality": "exact"
     }
   },
   "order_seed": 20260813,

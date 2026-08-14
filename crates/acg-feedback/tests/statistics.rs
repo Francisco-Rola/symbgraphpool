@@ -93,6 +93,62 @@ fn positive_and_negative_evidence_update_beta_posterior() {
 }
 
 #[test]
+fn same_relationship_observations_are_mutated_once_but_raw_counts_and_weight_are_preserved() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let before = *store.static_statistics(edge).unwrap();
+    let mut buffer = ObservationBuffer::default();
+
+    for index in 0..100_u64 {
+        let observation = if index < 75 {
+            ConflictObservation::conflict(
+                credit,
+                credit,
+                TxId(index),
+                TxId(index + 1_000),
+                ConflictKinds::WRITE_WRITE,
+                ObservationSource::PreExecution,
+                ObservationTarget::Static { edge_index: edge },
+                2.0,
+                1,
+                true,
+            )
+            .unwrap()
+        } else {
+            ConflictObservation::independent(
+                credit,
+                credit,
+                TxId(index),
+                TxId(index + 1_000),
+                ObservationSource::PreExecution,
+                ObservationTarget::Static { edge_index: edge },
+                3.0,
+                1,
+                true,
+            )
+            .unwrap()
+        };
+        buffer.push(observation);
+    }
+
+    let summary = store
+        .apply_batch(&graph, buffer, &AdaptiveFeedbackConfig::default())
+        .unwrap();
+    let after = store.static_statistics(edge).unwrap();
+
+    assert_eq!(summary.positive_observations, 75);
+    assert_eq!(summary.negative_observations, 25);
+    assert_eq!(summary.observation_batches_applied, 1);
+    assert_eq!(after.positive_observations, 75);
+    assert_eq!(after.negative_observations, 25);
+    let decay = AdaptiveFeedbackConfig::default().retention_factor;
+    assert!((after.alpha - (before.alpha * decay + 150.0)).abs() < 1e-9);
+    assert!((after.beta - (before.beta * decay + 75.0)).abs() < 1e-9);
+}
+
+#[test]
 fn decay_reduces_confidence_without_changing_mean_before_new_evidence() {
     let graph = graph();
     let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
@@ -743,4 +799,26 @@ fn replay_impact_cannot_be_attached_to_independence() {
     assert!(error
         .to_string()
         .contains("can only be attached to a conflict observation"));
+}
+
+#[test]
+fn serialization_cost_batch_mutates_once_and_preserves_raw_count_and_mean() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let config = AdaptiveFeedbackConfig::default();
+
+    let summary = store
+        .record_static_serialization_cost_batch(edge, 1_000_000, 4, 1, &config)
+        .unwrap();
+    assert_eq!(summary.serialization_cost_observations, 4);
+    assert_eq!(summary.serialization_cost_batches_applied, 1);
+    assert_eq!(summary.attributed_serialization_cost_nanos, 1_000_000);
+
+    let estimate = store
+        .estimate_static_serialization_cost(edge, 1, &config)
+        .unwrap();
+    assert_eq!(estimate.observations, 4);
+    assert_eq!(estimate.total_serialization_cost_nanos, 1_000_000);
+    assert!((estimate.expected_serialization_cost_nanos - 250_000.0).abs() < 1e-9);
 }

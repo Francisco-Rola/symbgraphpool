@@ -85,6 +85,24 @@ fn harness_runs_static_probability_and_cost_aware_with_same_correctness_boundary
             .parallelism
             .observed_service_dag_bound_nanos
             .is_some());
+        assert!(record.parallelism.observed_service_work_nanos.is_some());
+        assert!(record.parallelism.worker_capacity_bound_nanos.is_some());
+        let observed_dag = record.parallelism.observed_service_dag_bound_nanos.unwrap();
+        let worker_bound = record.parallelism.worker_capacity_bound_nanos.unwrap();
+        let parallel_bound = record.parallelism.parallel_lower_bound_nanos.unwrap();
+        assert_eq!(parallel_bound, observed_dag.max(worker_bound));
+        assert!(record
+            .parallelism
+            .scheduler_realization_corrected_milli
+            .is_some());
+        assert!(
+            record.scheduling.pre_reduction_dependencies
+                >= record.scheduling.scheduled_dependencies
+        );
+        assert_eq!(
+            record.scheduling.pre_reduction_dependencies - record.scheduling.scheduled_dependencies,
+            record.scheduling.edges_elided_by_reduction
+        );
         assert_eq!(record.metadata.parameters, parameters());
         assert_eq!(record.metadata.workers, 2);
         assert_eq!(record.metadata.physical_cores, 6);
@@ -113,6 +131,11 @@ fn harness_runs_static_probability_and_cost_aware_with_same_correctness_boundary
     let cost_aware = &outcome.records[2];
     assert!(cost_aware.feedback.positive_observations > 0);
     assert!(cost_aware.feedback.serialization_cost_observations > 0);
+    assert!(cost_aware.feedback.serialization_cost_batches_applied > 0);
+    assert!(
+        cost_aware.feedback.serialization_cost_batches_applied
+            <= cost_aware.feedback.serialization_cost_observations
+    );
     assert!(cost_aware.feedback.attributed_serialization_cost_nanos > 0);
 }
 
@@ -272,4 +295,62 @@ fn conflictlab_simulation_and_complexity_knobs_change_block_without_changing_cor
             .map(String::as_str),
         Some("native")
     );
+}
+
+#[test]
+fn conflictlab_prediction_quality_modes_expose_soft_edges_and_runtime_misses() {
+    let mut coarse = run("static", 10);
+    coarse
+        .parameters
+        .insert("transactions".to_owned(), "12".to_owned());
+    coarse
+        .parameters
+        .insert("accounts".to_owned(), "4".to_owned());
+    coarse
+        .parameters
+        .insert("hot_account_probability_bps".to_owned(), "7500".to_owned());
+    coarse
+        .parameters
+        .insert("prediction_quality".to_owned(), "coarse".to_owned());
+    coarse
+        .parameters
+        .insert("acg.hard_threshold".to_owned(), "0.95".to_owned());
+    coarse
+        .parameters
+        .insert("acg.risk_budget".to_owned(), "1.0".to_owned());
+
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let coarse_outcome = harness.run_manifest(&smoke_manifest(vec![coarse])).unwrap();
+    let coarse_record = &coarse_outcome.records[0];
+    assert!(coarse_record.scheduling.soft_edges > 0);
+    assert_eq!(
+        coarse_record
+            .metadata
+            .environment
+            .get("conflictlab_prediction_quality")
+            .map(String::as_str),
+        Some("coarse")
+    );
+
+    let mut opaque = run("cost-aware", 11);
+    opaque
+        .parameters
+        .insert("transactions".to_owned(), "12".to_owned());
+    opaque
+        .parameters
+        .insert("accounts".to_owned(), "2".to_owned());
+    opaque
+        .parameters
+        .insert("hot_account_probability_bps".to_owned(), "10000".to_owned());
+    opaque
+        .parameters
+        .insert("prediction_quality".to_owned(), "opaque".to_owned());
+    opaque
+        .parameters
+        .insert("warmup_blocks".to_owned(), "0".to_owned());
+    let opaque_outcome = harness.run_manifest(&smoke_manifest(vec![opaque])).unwrap();
+    let opaque_record = &opaque_outcome.records[0];
+    assert!(opaque_record.feedback.candidate_misses > 0);
+    assert!(opaque_record.feedback.positive_observations > 0);
+    assert_eq!(opaque_record.correctness.serial_equivalent, Some(true));
 }

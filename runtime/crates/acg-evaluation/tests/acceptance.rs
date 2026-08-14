@@ -48,6 +48,9 @@ fn complete_record() -> ExperimentRecord {
             low_edges: 1,
             soft_edges: 2,
             hard_edges: 2,
+            pre_reduction_dependencies: 3,
+            scheduled_dependencies: 3,
+            edges_elided_by_reduction: 0,
             ordering_dependencies: 3,
             soft_dependencies: 1,
             hard_dependencies: 2,
@@ -59,9 +62,14 @@ fn complete_record() -> ExperimentRecord {
             serial_equivalent_work_nanos: Some(10_000_000),
             serial_cost_dag_bound_nanos: Some(2_000_000),
             observed_service_dag_bound_nanos: Some(2_200_000),
+            observed_service_work_nanos: Some(12_000_000),
+            worker_capacity_bound_nanos: Some(2_000_000),
+            parallel_lower_bound_nanos: Some(2_200_000),
             actual_execution_wall_nanos: 2_300_000,
             service_inflation_milli: Some(1_100),
             scheduler_realization_milli: Some(1_045),
+            scheduler_realization_corrected_milli: Some(1_045),
+            ..ParallelismRecord::default()
         },
         execution: ExecutionRecord {
             transactions: 200,
@@ -295,4 +303,35 @@ fn smoke_policy_accepts_mechanism_records_without_publication_provenance() {
     let mut manifest = manifest_for(&record);
     manifest.policy = AcceptancePolicy::smoke();
     assert!(manifest.evaluate(&[record]).accepted());
+}
+
+#[test]
+fn schema_v2_acceptance_requires_consistent_reduction_and_worker_bound_metrics() {
+    let base = complete_record();
+    let manifest = manifest_for(&base);
+
+    let mut bad_reduction = base.clone();
+    bad_reduction.scheduling.pre_reduction_dependencies = 10;
+    bad_reduction.scheduling.scheduled_dependencies = 3;
+    bad_reduction.scheduling.edges_elided_by_reduction = 6;
+    let report = manifest.evaluate(&[bad_reduction]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "dependency_reduction_count_mismatch"));
+
+    let mut missing_bound = base;
+    missing_bound
+        .parallelism
+        .scheduler_realization_corrected_milli = None;
+    let report = manifest.evaluate(&[missing_bound]);
+    assert_eq!(report.status, ExperimentAcceptanceStatus::Incomplete);
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "missing_corrected_scheduler_realization"));
 }

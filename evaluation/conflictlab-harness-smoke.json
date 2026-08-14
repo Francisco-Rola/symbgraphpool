@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "experiment_id": "common-harness-conflictlab-smoke",
-  "record_schema_version": 1,
+  "record_schema_version": 2,
   "physical_core_limit": 6,
   "policy": {
     "require_started_at_utc": false,
@@ -46,7 +46,8 @@
         "sim.admission_tps": "25000",
         "sim.block_interval_ms": "2000",
         "sim.block_size": "24",
-        "sim.mempool_policy": "fifo"
+        "sim.mempool_policy": "fifo",
+        "prediction_quality": "exact"
       }
     },
     {
@@ -71,7 +72,8 @@
         "sim.admission_tps": "25000",
         "sim.block_interval_ms": "2000",
         "sim.block_size": "24",
-        "sim.mempool_policy": "fifo"
+        "sim.mempool_policy": "fifo",
+        "prediction_quality": "exact"
       }
     },
     {
@@ -96,7 +98,8 @@
         "sim.admission_tps": "25000",
         "sim.block_interval_ms": "2000",
         "sim.block_size": "24",
-        "sim.mempool_policy": "fifo"
+        "sim.mempool_policy": "fifo",
+        "prediction_quality": "exact"
       }
     }
   ]

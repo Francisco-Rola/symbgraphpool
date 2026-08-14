@@ -12,6 +12,7 @@ necessary, and fed back into a cost-aware scheduling model.
 - Bricks 5D–5E: replay/serialization-cost learning and stable experiment records.
 - Brick 5F: manifest-driven correctness/provenance/acceptance gates.
 - Common benchmark harness: deterministic serial reference + static/probability-only/cost-aware runs.
+- Evaluation control plane: batched feedback, reachability-preserving hard-DAG reduction, worker-capacity-aware scheduler bounds, and ConflictLab prediction-quality calibration.
 
 VM pooling/reset/cache-shard experiments are research-only under `research/vm-lifecycle/`.
 
@@ -38,7 +39,14 @@ Run the harness smoke test:
 ./scripts/run-common-benchmark-harness-diagnostics.sh
 ```
 
-Run the release-mode ConflictLab evaluation suite:
+Run the focused control-plane/adaptation evaluation first:
+
+```bash
+./scripts/run-control-plane-corrections-diagnostics.sh
+./scripts/run-conflictlab-control-plane-evaluation.sh
+```
+
+Then run the larger release-mode ConflictLab suite:
 
 ```bash
 ./scripts/run-conflictlab-release-suite.sh quick

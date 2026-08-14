@@ -27,6 +27,7 @@ use crate::{parameter, BenchmarkWorkload, HarnessError, PreparedBenchmark};
 const CONFLICTLAB_SYMBOLIC: &[u8] =
     include_bytes!("../../../../benchmarks/symbolic/conflictlab.symbolic.json");
 const BASIS_POINTS: u16 = 10_000;
+const OPAQUE_ACCOUNT_PREFIX: &[u8] = b"ACGOPAQUE\0";
 const DEFAULT_WASM_RELATIVE_PATH: &str =
     "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_conflictlab.wasm";
 
@@ -46,7 +47,11 @@ impl BenchmarkWorkload for ConflictLabWorkload {
 
     fn prepare(&self, run: &RunIdentity) -> Result<Box<dyn PreparedBenchmark>, HarnessError> {
         let config = ConflictLabConfig::from_run(run)?;
-        let (engine, code_id, environment) = setup_engine(config.execution_backend)?;
+        let (engine, code_id, mut environment) = setup_engine(config.execution_backend)?;
+        environment.insert(
+            "conflictlab_prediction_quality".to_owned(),
+            config.prediction_quality.as_str().to_owned(),
+        );
         let checksum = engine
             .code_metadata(code_id)
             .ok_or_else(|| {
@@ -81,9 +86,9 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             ContractCodeHash(*checksum.as_bytes()),
             1,
         );
+        let symbolic = conflictlab_symbolic(config.prediction_quality)?;
         let profiles = normalize_document(
-            parse_slice(CONFLICTLAB_SYMBOLIC)
-                .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+            parse_slice(&symbolic).map_err(|error| HarnessError::Runtime(error.to_string()))?,
             &context,
         )
         .map_err(|error| HarnessError::Runtime(error.to_string()))?;
@@ -108,6 +113,7 @@ impl BenchmarkWorkload for ConflictLabWorkload {
                     first_transaction_id: next_transaction_id,
                     height,
                     selection_seed: run.seed ^ height,
+                    prediction_quality: config.prediction_quality,
                     work: WorkShape {
                         work_iterations: config.warmup_work_iterations,
                         storage_rounds: config.warmup_storage_rounds,
@@ -134,6 +140,7 @@ impl BenchmarkWorkload for ConflictLabWorkload {
                 first_transaction_id: next_transaction_id,
                 height: measured_height,
                 selection_seed: run.seed ^ measured_height,
+                prediction_quality: config.prediction_quality,
                 work: WorkShape {
                     work_iterations: config.work_iterations,
                     storage_rounds: config.storage_rounds,
@@ -155,6 +162,34 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             warmup_blocks: blocks,
             measured_block,
         }))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PredictionQuality {
+    Exact,
+    Coarse,
+    Opaque,
+}
+
+impl PredictionQuality {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Coarse => "coarse",
+            Self::Opaque => "opaque",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, HarnessError> {
+        match value {
+            "exact" => Ok(Self::Exact),
+            "coarse" => Ok(Self::Coarse),
+            "opaque" => Ok(Self::Opaque),
+            other => Err(HarnessError::WorkloadParameter(format!(
+                "prediction_quality must be exact, coarse, or opaque; got {other:?}"
+            ))),
+        }
     }
 }
 
@@ -218,6 +253,7 @@ struct ConflictLabConfig {
     warmup_storage_rounds: u32,
     warmup_payload_bytes: usize,
     execution_backend: ExecutionBackend,
+    prediction_quality: PredictionQuality,
     simulation: SimulationConfig,
 }
 
@@ -237,6 +273,7 @@ impl ConflictLabConfig {
             "warmup_storage_rounds",
             "warmup_payload_bytes",
             "execution_backend",
+            "prediction_quality",
             "sim.admission_tps",
             "sim.block_interval_ms",
             "sim.block_size",
@@ -273,6 +310,12 @@ impl ConflictLabConfig {
                 .get("execution_backend")
                 .map(String::as_str)
                 .unwrap_or("native"),
+        )?;
+        let prediction_quality = PredictionQuality::parse(
+            run.parameters
+                .get("prediction_quality")
+                .map(String::as_str)
+                .unwrap_or("exact"),
         )?;
         let block_size = parameter(&run.parameters, "sim.block_size", transactions)?;
         let admission_tps = parameter(
@@ -332,6 +375,7 @@ impl ConflictLabConfig {
             warmup_storage_rounds,
             warmup_payload_bytes,
             execution_backend,
+            prediction_quality,
             simulation: SimulationConfig {
                 admission_tps,
                 block_interval_ms,
@@ -340,6 +384,42 @@ impl ConflictLabConfig {
             },
         })
     }
+}
+
+fn conflictlab_symbolic(prediction_quality: PredictionQuality) -> Result<Vec<u8>, HarnessError> {
+    if prediction_quality != PredictionQuality::Coarse {
+        return Ok(CONFLICTLAB_SYMBOLIC.to_vec());
+    }
+
+    let mut document: serde_json::Value = serde_json::from_slice(CONFLICTLAB_SYMBOLIC)
+        .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+    let profiles = document
+        .get_mut("profiles")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| HarnessError::Runtime("ConflictLab symbolic profiles missing".to_owned()))?;
+    let credit = profiles
+        .iter_mut()
+        .find(|profile| {
+            profile
+                .get("entrypoint")
+                .and_then(serde_json::Value::as_str)
+                == Some("execute::Credit")
+        })
+        .ok_or_else(|| {
+            HarnessError::Runtime("ConflictLab Credit symbolic profile missing".to_owned())
+        })?;
+    let accesses = credit
+        .get_mut("accesses")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| HarnessError::Runtime("ConflictLab Credit accesses missing".to_owned()))?;
+    for access in accesses {
+        let key = access
+            .get_mut("key")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| HarnessError::Runtime("ConflictLab Credit key missing".to_owned()))?;
+        key.insert("depends_on".to_owned(), serde_json::Value::Null);
+    }
+    serde_json::to_vec(&document).map_err(|error| HarnessError::Runtime(error.to_string()))
 }
 
 fn repository_root() -> PathBuf {
@@ -527,7 +607,9 @@ impl NativeContract for ConflictLabRuntime {
             storage_rounds,
             payload,
         } = serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
-        let key = format!("balance/{account}");
+        let effective_account =
+            opaque_account_from_payload(payload.as_slice()).unwrap_or(account.as_str());
+        let key = format!("balance/{effective_account}");
         let mut current = context
             .storage_get(key.as_bytes())
             .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
@@ -600,6 +682,7 @@ struct GenerateBlockConfig {
     first_transaction_id: u64,
     height: u64,
     selection_seed: u64,
+    prediction_quality: PredictionQuality,
     work: WorkShape,
     simulation: SimulationConfig,
 }
@@ -614,6 +697,7 @@ fn generate_block(
         first_transaction_id,
         height,
         selection_seed,
+        prediction_quality,
         work,
         simulation,
     } = config;
@@ -629,8 +713,16 @@ fn generate_block(
     for offset in 0..offered_transactions {
         let transaction_id = first_transaction_id
             .saturating_add(u64::try_from(offset).map_err(|_| HarnessError::NumericOverflow)?);
-        let account = generator.next_account();
-        let payload = deterministic_payload(work.payload_bytes, transaction_id ^ selection_seed);
+        let actual_account = generator.next_account();
+        let base_payload =
+            deterministic_payload(work.payload_bytes, transaction_id ^ selection_seed);
+        let (account, payload) = match prediction_quality {
+            PredictionQuality::Exact | PredictionQuality::Coarse => (actual_account, base_payload),
+            PredictionQuality::Opaque => (
+                format!("prediction-{transaction_id}"),
+                opaque_payload(&actual_account, base_payload),
+            ),
+        };
         let request = ExecutionRequest::Execute {
             transaction_id: TransactionId(transaction_id),
             sender: Address::new("client"),
@@ -729,6 +821,22 @@ impl SplitMix64 {
         value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         value ^ (value >> 31)
     }
+}
+
+fn opaque_payload(account: &str, payload: Vec<u8>) -> Vec<u8> {
+    let mut encoded =
+        Vec::with_capacity(OPAQUE_ACCOUNT_PREFIX.len() + account.len() + 1 + payload.len());
+    encoded.extend_from_slice(OPAQUE_ACCOUNT_PREFIX);
+    encoded.extend_from_slice(account.as_bytes());
+    encoded.push(0);
+    encoded.extend_from_slice(&payload);
+    encoded
+}
+
+fn opaque_account_from_payload(payload: &[u8]) -> Option<&str> {
+    let encoded = payload.strip_prefix(OPAQUE_ACCOUNT_PREFIX)?;
+    let terminator = encoded.iter().position(|byte| *byte == 0)?;
+    std::str::from_utf8(&encoded[..terminator]).ok()
 }
 
 fn deterministic_payload(bytes: usize, seed: u64) -> Vec<u8> {

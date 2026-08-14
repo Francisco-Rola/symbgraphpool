@@ -24,7 +24,8 @@ use acg_validator_sim::{BlockExecutionReport, SplitPhaseSpeculativeExecutionRepo
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const EXPERIMENT_RECORD_SCHEMA_VERSION: u16 = 1;
+pub const EXPERIMENT_RECORD_SCHEMA_VERSION: u16 = 2;
+const LEGACY_EXPERIMENT_RECORD_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentMetadata {
@@ -76,6 +77,16 @@ pub struct SchedulingRecord {
     pub low_edges: u64,
     pub soft_edges: u64,
     pub hard_edges: u64,
+    /// Dependencies implied by classification/wave placement before hard-edge transitive reduction.
+    #[serde(default)]
+    pub pre_reduction_dependencies: u64,
+    /// Final execution dependency count after exact hard-edge transitive reduction.
+    #[serde(default)]
+    pub scheduled_dependencies: u64,
+    /// Hard edges removed because another hard path already preserved the same reachability.
+    #[serde(default)]
+    pub edges_elided_by_reduction: u64,
+    /// Legacy schema-v1 name for the final scheduled dependency count.
     pub ordering_dependencies: u64,
     pub soft_dependencies: u64,
     pub hard_dependencies: u64,
@@ -93,10 +104,20 @@ pub struct SchedulingRecord {
 
 impl SchedulingRecord {
     fn from_plan(plan: &AdaptiveBlockPlan, config: &AdaptivePlanningConfig) -> Self {
+        let scheduled_dependencies =
+            u64::try_from(plan.schedule.ordering_dependencies.len()).unwrap_or(u64::MAX);
         let mut record = Self {
             candidate_edges: u64::try_from(plan.candidate_graph.edges().len()).unwrap_or(u64::MAX),
-            ordering_dependencies: u64::try_from(plan.schedule.ordering_dependencies.len())
-                .unwrap_or(u64::MAX),
+            pre_reduction_dependencies: u64::try_from(
+                plan.schedule.pre_reduction_ordering_dependencies,
+            )
+            .unwrap_or(u64::MAX),
+            scheduled_dependencies,
+            edges_elided_by_reduction: u64::try_from(
+                plan.schedule.hard_dependencies_elided_by_reduction,
+            )
+            .unwrap_or(u64::MAX),
+            ordering_dependencies: scheduled_dependencies,
             wave_count: u64::try_from(plan.schedule.waves.len()).unwrap_or(u64::MAX),
             max_wave_width: u64::try_from(plan.max_wave_width()).unwrap_or(u64::MAX),
             ..Self::default()
@@ -359,11 +380,23 @@ pub struct ParallelismRecord {
     pub serial_equivalent_work_nanos: Option<u64>,
     pub serial_cost_dag_bound_nanos: Option<u64>,
     pub observed_service_dag_bound_nanos: Option<u64>,
+    /// Sum of observed speculative transaction service times.
+    #[serde(default)]
+    pub observed_service_work_nanos: Option<u64>,
+    /// Work-conservation lower bound: observed service work divided by available workers.
+    #[serde(default)]
+    pub worker_capacity_bound_nanos: Option<u64>,
+    /// Feasible lower bound = max(observed service DAG critical path, worker-capacity bound).
+    #[serde(default)]
+    pub parallel_lower_bound_nanos: Option<u64>,
     pub actual_execution_wall_nanos: u64,
     /// `observed_service_dag / serial_cost_dag * 1000`.
     pub service_inflation_milli: Option<u64>,
-    /// `actual_execution_wall / observed_service_dag * 1000`.
+    /// Legacy schema-v1 ratio: `actual_execution_wall / observed_service_dag * 1000`.
     pub scheduler_realization_milli: Option<u64>,
+    /// Corrected ratio: `actual_execution_wall / parallel_lower_bound * 1000`.
+    #[serde(default)]
+    pub scheduler_realization_corrected_milli: Option<u64>,
 }
 
 impl ParallelismRecord {
@@ -373,10 +406,26 @@ impl ParallelismRecord {
         preexecution_metrics: &ParallelSpeculativeExecutionMetrics,
         reference: ParallelismReference,
     ) -> Self {
-        let observed_service_dag_bound_nanos =
-            service_nanos_by_transaction(plan, preexecution_report)
-                .as_ref()
-                .map(|values| dag_bound_from_services(plan, values));
+        let observed_services = service_nanos_by_transaction(plan, preexecution_report);
+        let observed_service_dag_bound_nanos = observed_services
+            .as_ref()
+            .map(|values| dag_bound_from_services(plan, values));
+        let observed_service_work_nanos = observed_services
+            .as_ref()
+            .map(|values| values.iter().copied().fold(0_u64, u64::saturating_add));
+        let worker_capacity_bound_nanos = observed_service_work_nanos.and_then(|work| {
+            let workers = u64::try_from(preexecution_metrics.workers).ok()?;
+            ceil_div(work, workers)
+        });
+        let parallel_lower_bound_nanos = match (
+            observed_service_dag_bound_nanos,
+            worker_capacity_bound_nanos,
+        ) {
+            (Some(dag), Some(capacity)) => Some(dag.max(capacity)),
+            (Some(dag), None) => Some(dag),
+            (None, Some(capacity)) => Some(capacity),
+            (None, None) => None,
+        };
         let actual_execution_wall_nanos = nanos(
             preexecution_metrics
                 .dependency_diagnostics
@@ -386,6 +435,9 @@ impl ParallelismRecord {
             serial_equivalent_work_nanos: reference.serial_equivalent_work_nanos,
             serial_cost_dag_bound_nanos: reference.serial_cost_dag_bound_nanos,
             observed_service_dag_bound_nanos,
+            observed_service_work_nanos,
+            worker_capacity_bound_nanos,
+            parallel_lower_bound_nanos,
             actual_execution_wall_nanos,
             service_inflation_milli: match (
                 observed_service_dag_bound_nanos,
@@ -396,6 +448,8 @@ impl ParallelismRecord {
             },
             scheduler_realization_milli: observed_service_dag_bound_nanos
                 .and_then(|observed| ratio_milli(actual_execution_wall_nanos, observed)),
+            scheduler_realization_corrected_milli: parallel_lower_bound_nanos
+                .and_then(|bound| ratio_milli(actual_execution_wall_nanos, bound)),
         }
     }
 }
@@ -428,8 +482,12 @@ pub struct FeedbackRecord {
     pub replay_impact_observations: u64,
     pub attributed_replay_cost_nanos: u64,
     pub attributed_invalidated_descendants: u64,
+    #[serde(default)]
+    pub observation_batches_applied: u64,
     pub serialization_cost_observations: u64,
     pub attributed_serialization_cost_nanos: u64,
+    #[serde(default)]
+    pub serialization_cost_batches_applied: u64,
 }
 
 impl From<ApplySummary> for FeedbackRecord {
@@ -444,9 +502,15 @@ impl From<ApplySummary> for FeedbackRecord {
                 .unwrap_or(u64::MAX),
             attributed_replay_cost_nanos: summary.attributed_replay_cost_nanos,
             attributed_invalidated_descendants: summary.attributed_invalidated_descendants,
+            observation_batches_applied: u64::try_from(summary.observation_batches_applied)
+                .unwrap_or(u64::MAX),
             serialization_cost_observations: u64::try_from(summary.serialization_cost_observations)
                 .unwrap_or(u64::MAX),
             attributed_serialization_cost_nanos: summary.attributed_serialization_cost_nanos,
+            serialization_cost_batches_applied: u64::try_from(
+                summary.serialization_cost_batches_applied,
+            )
+            .unwrap_or(u64::MAX),
         }
     }
 }
@@ -521,7 +585,9 @@ impl ExperimentRecord {
     }
 
     pub fn validate(&self) -> Result<(), ExperimentRecordError> {
-        if self.schema_version != EXPERIMENT_RECORD_SCHEMA_VERSION {
+        if self.schema_version != EXPERIMENT_RECORD_SCHEMA_VERSION
+            && self.schema_version != LEGACY_EXPERIMENT_RECORD_SCHEMA_VERSION
+        {
             return Err(ExperimentRecordError::UnsupportedSchemaVersion {
                 actual: self.schema_version,
                 supported: EXPERIMENT_RECORD_SCHEMA_VERSION,
@@ -560,18 +626,29 @@ fn service_nanos_by_transaction(
 
 fn dag_bound_from_services(plan: &AdaptiveBlockPlan, services: &[u64]) -> u64 {
     let mut completion = vec![0_u64; services.len()];
-    for transaction in 0..services.len() {
-        let predecessor_completion = plan
-            .schedule
-            .ordering_dependencies
-            .iter()
-            .filter(|dependency| dependency.successor.0 as usize == transaction)
-            .map(|dependency| completion[dependency.predecessor.0 as usize])
-            .max()
-            .unwrap_or(0);
-        completion[transaction] = predecessor_completion.saturating_add(services[transaction]);
+    for wave in &plan.schedule.waves {
+        for transaction in &wave.transaction_indices {
+            let transaction = transaction.0 as usize;
+            let predecessor_completion = plan
+                .schedule
+                .ordering_dependencies
+                .iter()
+                .filter(|dependency| dependency.successor.0 as usize == transaction)
+                .map(|dependency| completion[dependency.predecessor.0 as usize])
+                .max()
+                .unwrap_or(0);
+            completion[transaction] = predecessor_completion.saturating_add(services[transaction]);
+        }
     }
     completion.into_iter().max().unwrap_or(0)
+}
+
+fn ceil_div(numerator: u64, denominator: u64) -> Option<u64> {
+    if denominator == 0 {
+        None
+    } else {
+        Some(numerator / denominator + u64::from(numerator % denominator != 0))
+    }
 }
 
 fn ratio_milli(numerator: u64, denominator: u64) -> Option<u64> {

@@ -193,12 +193,18 @@ fn merge(left: ApplySummary, right: ApplySummary) -> ApplySummary {
         attributed_invalidated_descendants: left
             .attributed_invalidated_descendants
             .saturating_add(right.attributed_invalidated_descendants),
+        observation_batches_applied: left
+            .observation_batches_applied
+            .saturating_add(right.observation_batches_applied),
         serialization_cost_observations: left
             .serialization_cost_observations
             .saturating_add(right.serialization_cost_observations),
         attributed_serialization_cost_nanos: left
             .attributed_serialization_cost_nanos
             .saturating_add(right.attributed_serialization_cost_nanos),
+        serialization_cost_batches_applied: left
+            .serialization_cost_batches_applied
+            .saturating_add(right.serialization_cost_batches_applied),
     }
 }
 
@@ -258,7 +264,8 @@ fn brick5e_learns_marginal_serialization_cost_and_emits_stable_record() {
     assert!(learned.expected_serialization_cost_nanos >= 1_000_000.0);
     assert!(learned.confidence > 0.0);
 
-    // Second block must consume the learned cost in its candidate edge and produce a schema-v1
+    // Second block must consume the learned cost in its candidate edge and produce the current
+    // experiment schema.
     // record whose JSON representation is stable and round-trippable.
     let second = block(&contract, 10, 2);
     let (second_plan, planning_metrics) = pipeline

@@ -15,9 +15,13 @@ METRICS = {
     "serial_work_ms": ("parallelism.serial_equivalent_work_nanos", 1e-6),
     "serial_dag_ms": ("parallelism.serial_cost_dag_bound_nanos", 1e-6),
     "observed_dag_ms": ("parallelism.observed_service_dag_bound_nanos", 1e-6),
+    "observed_service_work_ms": ("parallelism.observed_service_work_nanos", 1e-6),
+    "worker_capacity_bound_ms": ("parallelism.worker_capacity_bound_nanos", 1e-6),
+    "parallel_lower_bound_ms": ("parallelism.parallel_lower_bound_nanos", 1e-6),
     "speedup": ("derived.parallel_speedup", 1.0),
     "service_inflation": ("parallelism.service_inflation_milli", 1e-3),
-    "scheduler_realization": ("parallelism.scheduler_realization_milli", 1e-3),
+    "scheduler_realization_legacy": ("parallelism.scheduler_realization_milli", 1e-3),
+    "scheduler_realization": ("parallelism.scheduler_realization_corrected_milli", 1e-3),
     "planning_ms": ("planning.total_nanos", 1e-6),
     "feedback_ms": ("feedback_timing.total_nanos", 1e-6),
     "replay_ms": ("execution.replay_or_missing_execution_nanos", 1e-6),
@@ -25,6 +29,12 @@ METRICS = {
     "invalidated_results": ("execution.invalidated_results", 1.0),
     "reused_results": ("execution.reused_results", 1.0),
     "candidate_edges": ("scheduling.candidate_edges", 1.0),
+    "pre_reduction_dependencies": ("scheduling.pre_reduction_dependencies", 1.0),
+    "scheduled_dependencies": ("scheduling.scheduled_dependencies", 1.0),
+    "edges_elided_by_reduction": ("scheduling.edges_elided_by_reduction", 1.0),
+    "dependency_compression": ("derived.dependency_compression", 1.0),
+    "soft_edges": ("scheduling.soft_edges", 1.0),
+    "hard_edges": ("scheduling.hard_edges", 1.0),
     "hard_dependencies": ("execution.hard_dependency_count", 1.0),
     "max_in_flight": ("execution.max_in_flight", 1.0),
     "wasm_acquire_ms": ("execution.contract.aggregate_wasm_instance_acquire_nanos", 1e-6),
@@ -33,7 +43,14 @@ METRICS = {
     "host_storage_ms": ("execution.contract.aggregate_host_storage_nanos", 1e-6),
     "mvcc_point_ms": ("execution.contract.aggregate_mvcc_storage_point_nanos", 1e-6),
     "mvcc_range_ms": ("execution.contract.aggregate_mvcc_storage_range_nanos", 1e-6),
+    "positive_observations": ("feedback.positive_observations", 1.0),
+    "negative_observations": ("feedback.negative_observations", 1.0),
+    "candidate_misses": ("feedback.candidate_misses", 1.0),
+    "feedback_batches": ("feedback.observation_batches_applied", 1.0),
+    "feedback_batching_factor": ("derived.feedback_batching_factor", 1.0),
     "serialization_observations": ("feedback.serialization_cost_observations", 1.0),
+    "serialization_batches": ("feedback.serialization_cost_batches_applied", 1.0),
+    "serialization_batching_factor": ("derived.serialization_batching_factor", 1.0),
     "replay_impact_observations": ("feedback.replay_impact_observations", 1.0),
 }
 
@@ -73,6 +90,29 @@ def derived_flat(record):
     serial = flat.get("parallelism.serial_equivalent_work_nanos")
     flat["derived.parallel_speedup"] = (
         float(serial) / float(wall) if wall not in (None, 0) and serial is not None else None
+    )
+    pre_dependencies = flat.get("scheduling.pre_reduction_dependencies")
+    scheduled_dependencies = flat.get("scheduling.scheduled_dependencies")
+    flat["derived.dependency_compression"] = (
+        float(pre_dependencies) / float(scheduled_dependencies)
+        if scheduled_dependencies not in (None, 0) and pre_dependencies is not None
+        else None
+    )
+    raw_feedback = (flat.get("feedback.positive_observations") or 0) + (
+        flat.get("feedback.negative_observations") or 0
+    )
+    feedback_batches = flat.get("feedback.observation_batches_applied")
+    flat["derived.feedback_batching_factor"] = (
+        float(raw_feedback) / float(feedback_batches)
+        if feedback_batches not in (None, 0)
+        else None
+    )
+    serialization_observations = flat.get("feedback.serialization_cost_observations")
+    serialization_batches = flat.get("feedback.serialization_cost_batches_applied")
+    flat["derived.serialization_batching_factor"] = (
+        float(serialization_observations) / float(serialization_batches)
+        if serialization_batches not in (None, 0) and serialization_observations is not None
+        else None
     )
     params = record.get("metadata", {}).get("parameters", {})
     for key, value in params.items():

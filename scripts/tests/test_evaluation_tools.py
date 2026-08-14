@@ -84,8 +84,12 @@ class EvaluationToolTests(unittest.TestCase):
                             "serial_equivalent_work_nanos": 2000,
                             "serial_cost_dag_bound_nanos": 1000,
                             "observed_service_dag_bound_nanos": wall,
+                            "observed_service_work_nanos": 2000,
+                            "worker_capacity_bound_nanos": 1000,
+                            "parallel_lower_bound_nanos": max(wall, 1000),
                             "service_inflation_milli": 1000,
                             "scheduler_realization_milli": 1000,
+                            "scheduler_realization_corrected_milli": 1000,
                         },
                         "planning": {"total_nanos": 100},
                         "feedback_timing": {"total_nanos": 10},
@@ -105,8 +109,18 @@ class EvaluationToolTests(unittest.TestCase):
                                 "aggregate_mvcc_storage_range_nanos": 0,
                             },
                         },
-                        "scheduling": {"candidate_edges": 0},
-                        "feedback": {"serialization_cost_observations": 0, "replay_impact_observations": 0},
+                        "scheduling": {
+                            "candidate_edges": 0,
+                            "pre_reduction_dependencies": 0,
+                            "scheduled_dependencies": 0,
+                            "edges_elided_by_reduction": 0,
+                        },
+                        "feedback": {
+                            "serialization_cost_observations": 0,
+                            "serialization_cost_batches_applied": 0,
+                            "replay_impact_observations": 0,
+                            "observation_batches_applied": 0,
+                        },
                     }
                 )
             records.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
@@ -119,6 +133,9 @@ class EvaluationToolTests(unittest.TestCase):
             speedup = next(row for row in plot if row["metric"] == "speedup")
             self.assertEqual(speedup["n"], "2")
             self.assertAlmostEqual(float(speedup["mean"]), (2.0 + 2000 / 1200) / 2)
+            corrected = next(row for row in plot if row["metric"] == "scheduler_realization")
+            self.assertEqual(corrected["n"], "2")
+            self.assertAlmostEqual(float(corrected["mean"]), 1.0)
 
 
 if __name__ == "__main__":

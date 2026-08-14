@@ -106,7 +106,7 @@ This stage introduced successor-driven launch and versioned predecessor visibili
 
 These findings are research evidence, not additional production features:
 
-- the READY-DAG scheduler is generally within a few percent of the observed-service DAG lower bound;
+- after accounting for both critical-path and finite-worker capacity, the READY-DAG scheduler is generally within a few percent of the feasible observed-service lower bound;
 - controlled six/four/two/one-lane compute workloads follow their dependency ceilings closely;
 - compute-heavy fully independent Wasm reaches about 5.2x wall-clock speedup on six physical cores;
 - small transactions suffer large fixed/concurrent service-cost inflation;
@@ -134,7 +134,7 @@ Measured wall time remains validator-local optimization evidence and never becom
 - each scheduled edge learns decayed marginal dependency-ready delay as its serialization cost;
 - 5D's configured 250 us serialization reference is now only a low-confidence fallback and is blended toward learned per-relationship cost;
 - feedback checkpoints are v3 with v1/v2 backward-compatible restore;
-- the `acg-evaluation` runtime crate defines schema-v1 deterministic JSON/JSONL experiment records spanning planning, scheduling, DAG bounds, VM/host/MVCC execution, replay, feedback overhead, and correctness digests.
+- the `acg-evaluation` runtime crate emits schema-v2 deterministic JSON/JSONL records (with v1 read compatibility) spanning planning, dependency reduction, finite-worker/DAG bounds, VM/host/MVCC execution, replay, batched feedback overhead, and correctness digests.
 
 See [`brick-5e.md`](brick-5e.md).
 
@@ -156,7 +156,10 @@ See [`brick-5f.md`](brick-5f.md) and [`../evaluation/README.md`](../evaluation/R
 - the workload adapter boundary is isolated from READY-DAG/MVCC and evaluation schemas;
 - static, probability-only, and cost-aware policy ablations use the same executor/canonical replay path;
 - common `acg.*` tuning parameters are manifest-driven and preserved in exact run identity;
-- ConflictLab is the first built-in adapter and an end-to-end smoke manifest validates the runner.
+- ConflictLab is the first built-in adapter and an end-to-end smoke manifest validates the runner;
+- dense hard dependency sets are reduced exactly before READY-DAG execution while preserving reachability;
+- feedback observations are aggregated by learned relationship/epoch before adaptive-state mutation while raw observation counts remain visible;
+- ConflictLab exposes exact/coarse/opaque prediction-quality modes so adaptive false-positive/false-negative behavior can be measured.
 
 See [`common-benchmark-harness.md`](common-benchmark-harness.md).
 

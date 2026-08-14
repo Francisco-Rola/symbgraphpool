@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MAX_FEE_BPS: u16 = 10_000;
+const OPAQUE_ACCOUNT_PREFIX: &[u8] = b"ACGOPAQUE\0";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct InstantiateMsg {
@@ -227,7 +228,9 @@ fn execute_credit(
     storage_rounds: u32,
     payload: Binary,
 ) -> Result<Response, ContractError> {
-    let account = deps.api.addr_validate(&account)?;
+    let effective_account =
+        opaque_account_from_payload(payload.as_slice()).unwrap_or(account.as_str());
+    let account = deps.api.addr_validate(effective_account)?;
     let mut balance = BALANCES
         .may_load(deps.storage, account.as_str())?
         .unwrap_or_default();
@@ -255,6 +258,12 @@ fn execute_credit(
         .add_attribute("action", "credit")
         .add_attribute("account", account)
         .add_attribute("work_checksum", checksum.to_string()))
+}
+
+fn opaque_account_from_payload(payload: &[u8]) -> Option<&str> {
+    let encoded = payload.strip_prefix(OPAQUE_ACCOUNT_PREFIX)?;
+    let terminator = encoded.iter().position(|byte| *byte == 0)?;
+    std::str::from_utf8(&encoded[..terminator]).ok()
 }
 
 fn deterministic_work(iterations: u64, seed: u64, payload: &[u8]) -> u64 {
@@ -647,7 +656,53 @@ mod tests {
             BALANCES.load(deps.as_ref().storage, "alice").unwrap(),
             Uint128::new(7)
         );
-        assert!(response.attributes.iter().any(|attribute| attribute.key == "work_checksum"));
+        assert!(response
+            .attributes
+            .iter()
+            .any(|attribute| attribute.key == "work_checksum"));
+    }
+
+    #[test]
+    fn opaque_payload_can_route_credit_to_a_hidden_account_key() {
+        let mut deps = mock_dependencies();
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("admin", &[]),
+            InstantiateMsg {
+                admin: None,
+                fee_bps: 0,
+                epoch: 1,
+            },
+        )
+        .unwrap();
+
+        let mut payload = OPAQUE_ACCOUNT_PREFIX.to_vec();
+        payload.extend_from_slice(b"alice");
+        payload.push(0);
+        payload.extend_from_slice(&[1, 2, 3]);
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("client", &[]),
+            ExecuteMsg::Credit {
+                account: "prediction-only-key".to_owned(),
+                amount: Uint128::new(9),
+                work_iterations: 8,
+                storage_rounds: 1,
+                payload: Binary::from(payload),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            BALANCES.load(deps.as_ref().storage, "alice").unwrap(),
+            Uint128::new(9)
+        );
+        assert!(BALANCES
+            .may_load(deps.as_ref().storage, "prediction-only-key")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -132,6 +132,10 @@ pub struct ScheduledWave {
 pub struct RiskBoundedSchedule {
     pub transaction_count: usize,
     pub waves: Vec<ScheduledWave>,
+    /// Dependencies before exact transitive reduction of the hard-dependency DAG.
+    pub pre_reduction_ordering_dependencies: usize,
+    /// Hard dependencies removed because an alternate hard path already preserves reachability.
+    pub hard_dependencies_elided_by_reduction: usize,
     pub ordering_dependencies: Vec<ScheduledDependency>,
 }
 
@@ -199,6 +203,18 @@ impl RiskBoundedSchedule {
         if expected_dependencies != self.ordering_dependencies {
             return Err(SchedulingError::DependencySetMismatch);
         }
+        let expected_pre_reduction = expected.pre_reduction_dependency_count(&assigned_wave)?;
+        if expected_pre_reduction != self.pre_reduction_ordering_dependencies
+            || expected.hard_dependencies_elided_by_reduction
+                != self.hard_dependencies_elided_by_reduction
+        {
+            return Err(SchedulingError::DependencyReductionMetadataMismatch {
+                expected_pre_reduction,
+                actual_pre_reduction: self.pre_reduction_ordering_dependencies,
+                expected_elided: expected.hard_dependencies_elided_by_reduction,
+                actual_elided: self.hard_dependencies_elided_by_reduction,
+            });
+        }
 
         let mut placed_wave = vec![None; graph.transactions().len()];
         let mut canonical_order = (0..graph.transactions().len())
@@ -256,6 +272,8 @@ impl RiskBoundedScheduler {
             return Ok(RiskBoundedSchedule {
                 transaction_count: 0,
                 waves: Vec::new(),
+                pre_reduction_ordering_dependencies: 0,
+                hard_dependencies_elided_by_reduction: 0,
                 ordering_dependencies: Vec::new(),
             });
         }
@@ -323,6 +341,9 @@ impl RiskBoundedScheduler {
         let schedule = RiskBoundedSchedule {
             transaction_count,
             waves,
+            pre_reduction_ordering_dependencies: analysis
+                .pre_reduction_dependency_count(&assigned_wave)?,
+            hard_dependencies_elided_by_reduction: analysis.hard_dependencies_elided_by_reduction,
             ordering_dependencies,
         };
         debug_assert!(schedule.validate_against(graph, &self.config).is_ok());
@@ -336,6 +357,8 @@ struct SchedulingAnalysis<'graph> {
     hard_predecessors: Vec<Vec<TxIndex>>,
     soft_neighbors: Vec<Vec<(TxIndex, f64)>>,
     edge_classes: BTreeMap<(TxIndex, TxIndex), EdgeClass>,
+    reduced_hard_dependencies: Vec<ScheduledDependency>,
+    hard_dependencies_elided_by_reduction: usize,
 }
 
 impl<'graph> SchedulingAnalysis<'graph> {
@@ -346,6 +369,8 @@ impl<'graph> SchedulingAnalysis<'graph> {
             hard_predecessors: vec![Vec::new(); transaction_count],
             soft_neighbors: vec![Vec::new(); transaction_count],
             edge_classes: BTreeMap::new(),
+            reduced_hard_dependencies: Vec::new(),
+            hard_dependencies_elided_by_reduction: 0,
         };
 
         for edge in graph.edges() {
@@ -370,12 +395,21 @@ impl<'graph> SchedulingAnalysis<'graph> {
             }
         }
 
+        for neighbors in &mut analysis.soft_neighbors {
+            neighbors.sort_by_key(|(neighbor, _)| *neighbor);
+        }
+
+        let (reduced_hard_dependencies, elided) = analysis.transitively_reduce_hard_dependencies();
+        analysis.hard_dependencies_elided_by_reduction = elided;
+        analysis.reduced_hard_dependencies = reduced_hard_dependencies;
+        analysis.hard_predecessors = vec![Vec::new(); transaction_count];
+        for dependency in &analysis.reduced_hard_dependencies {
+            analysis.hard_predecessors[dependency.successor.0 as usize]
+                .push(dependency.predecessor);
+        }
         for predecessors in &mut analysis.hard_predecessors {
             predecessors.sort_unstable();
             predecessors.dedup();
-        }
-        for neighbors in &mut analysis.soft_neighbors {
-            neighbors.sort_by_key(|(neighbor, _)| *neighbor);
         }
         analysis
     }
@@ -401,14 +435,29 @@ impl<'graph> SchedulingAnalysis<'graph> {
         &self,
         assigned_wave: &[Option<usize>],
     ) -> Result<Vec<ScheduledDependency>, SchedulingError> {
-        let mut dependencies = Vec::new();
+        let mut dependencies = self.reduced_hard_dependencies.clone();
+        for dependency in &dependencies {
+            let predecessor_wave = assigned_wave[dependency.predecessor.0 as usize]
+                .ok_or(SchedulingError::MissingTransactions)?;
+            let successor_wave = assigned_wave[dependency.successor.0 as usize]
+                .ok_or(SchedulingError::MissingTransactions)?;
+            if predecessor_wave >= successor_wave {
+                return Err(SchedulingError::HardDependencyViolation {
+                    predecessor: dependency.predecessor,
+                    successor: dependency.successor,
+                    predecessor_wave,
+                    successor_wave,
+                });
+            }
+        }
+
         for edge in self.graph.edges() {
             let class = self
                 .edge_classes
                 .get(&(edge.source, edge.target))
                 .copied()
                 .unwrap_or(EdgeClass::Low);
-            if class == EdgeClass::Low {
+            if class != EdgeClass::Soft {
                 continue;
             }
             let (predecessor, successor) = self.canonical_pair(edge.source, edge.target);
@@ -416,36 +465,108 @@ impl<'graph> SchedulingAnalysis<'graph> {
                 .ok_or(SchedulingError::MissingTransactions)?;
             let successor_wave =
                 assigned_wave[successor.0 as usize].ok_or(SchedulingError::MissingTransactions)?;
-            match class {
-                EdgeClass::Hard => {
-                    if predecessor_wave >= successor_wave {
-                        return Err(SchedulingError::HardDependencyViolation {
-                            predecessor,
-                            successor,
-                            predecessor_wave,
-                            successor_wave,
-                        });
-                    }
-                    dependencies.push(ScheduledDependency {
-                        predecessor,
-                        successor,
-                        class,
-                    });
-                }
-                EdgeClass::Soft if predecessor_wave < successor_wave => {
-                    dependencies.push(ScheduledDependency {
-                        predecessor,
-                        successor,
-                        class,
-                    });
-                }
-                EdgeClass::Soft => {}
-                EdgeClass::Low => unreachable!(),
+            if predecessor_wave < successor_wave {
+                dependencies.push(ScheduledDependency {
+                    predecessor,
+                    successor,
+                    class,
+                });
             }
         }
         dependencies.sort_unstable();
         dependencies.dedup();
         Ok(dependencies)
+    }
+
+    fn pre_reduction_dependency_count(
+        &self,
+        assigned_wave: &[Option<usize>],
+    ) -> Result<usize, SchedulingError> {
+        let mut count = 0_usize;
+        for edge in self.graph.edges() {
+            let class = self
+                .edge_classes
+                .get(&(edge.source, edge.target))
+                .copied()
+                .unwrap_or(EdgeClass::Low);
+            match class {
+                EdgeClass::Low => {}
+                EdgeClass::Hard => count = count.saturating_add(1),
+                EdgeClass::Soft => {
+                    let (predecessor, successor) = self.canonical_pair(edge.source, edge.target);
+                    let predecessor_wave = assigned_wave[predecessor.0 as usize]
+                        .ok_or(SchedulingError::MissingTransactions)?;
+                    let successor_wave = assigned_wave[successor.0 as usize]
+                        .ok_or(SchedulingError::MissingTransactions)?;
+                    if predecessor_wave < successor_wave {
+                        count = count.saturating_add(1);
+                    }
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// Exact transitive reduction of the hard dependency DAG.
+    ///
+    /// Hard edges are canonically oriented, so the predicted transaction order is a topological
+    /// order. For each predecessor, successors are considered nearest-first; an edge is omitted
+    /// when a previously retained successor already reaches the same target.
+    fn transitively_reduce_hard_dependencies(&self) -> (Vec<ScheduledDependency>, usize) {
+        let transaction_count = self.graph.transactions().len();
+        if transaction_count <= 1 {
+            return (Vec::new(), 0);
+        }
+
+        let mut canonical_order = (0..transaction_count)
+            .map(|offset| TxIndex(offset as u32))
+            .collect::<Vec<_>>();
+        canonical_order.sort_by(|left, right| self.compare_canonical_order(*left, *right));
+        let mut rank = vec![0_usize; transaction_count];
+        for (position, tx) in canonical_order.iter().copied().enumerate() {
+            rank[tx.0 as usize] = position;
+        }
+
+        let mut outgoing = vec![Vec::<TxIndex>::new(); transaction_count];
+        let mut original_hard_edges = 0_usize;
+        for edge in self.graph.edges() {
+            if self.edge_classes.get(&(edge.source, edge.target)).copied() != Some(EdgeClass::Hard)
+            {
+                continue;
+            }
+            let (predecessor, successor) = self.canonical_pair(edge.source, edge.target);
+            outgoing[predecessor.0 as usize].push(successor);
+            original_hard_edges = original_hard_edges.saturating_add(1);
+        }
+        for successors in &mut outgoing {
+            successors.sort_by_key(|tx| rank[tx.0 as usize]);
+            successors.dedup();
+        }
+
+        let words = transaction_count.div_ceil(64);
+        let mut reachable = vec![vec![0_u64; words]; transaction_count];
+        let mut reduced = Vec::new();
+
+        for predecessor in canonical_order.iter().copied().rev() {
+            let predecessor_index = predecessor.0 as usize;
+            for successor in outgoing[predecessor_index].iter().copied() {
+                let successor_index = successor.0 as usize;
+                if bit_is_set(&reachable[predecessor_index], successor_index) {
+                    continue;
+                }
+                reduced.push(ScheduledDependency {
+                    predecessor,
+                    successor,
+                    class: EdgeClass::Hard,
+                });
+                set_bit(&mut reachable[predecessor_index], successor_index);
+                let successor_reachability = reachable[successor_index].clone();
+                union_bits(&mut reachable[predecessor_index], &successor_reachability);
+            }
+        }
+        reduced.sort_unstable();
+        let elided = original_hard_edges.saturating_sub(reduced.len());
+        (reduced, elided)
     }
 
     fn soft_risk(
@@ -461,6 +582,20 @@ impl<'graph> SchedulingAnalysis<'graph> {
             }
         }
         1.0 - independence_probability
+    }
+}
+
+fn bit_is_set(bits: &[u64], index: usize) -> bool {
+    bits[index / 64] & (1_u64 << (index % 64)) != 0
+}
+
+fn set_bit(bits: &mut [u64], index: usize) {
+    bits[index / 64] |= 1_u64 << (index % 64);
+}
+
+fn union_bits(target: &mut [u64], source: &[u64]) {
+    for (target, source) in target.iter_mut().zip(source) {
+        *target |= *source;
     }
 }
 
@@ -522,6 +657,16 @@ pub enum SchedulingError {
     },
     #[error("schedule dependency set does not match candidate-graph classes and wave placement")]
     DependencySetMismatch,
+    #[error(
+        "dependency-reduction metadata mismatch: pre-reduction expected {expected_pre_reduction}, \
+         actual {actual_pre_reduction}; elided expected {expected_elided}, actual {actual_elided}"
+    )]
+    DependencyReductionMetadataMismatch {
+        expected_pre_reduction: usize,
+        actual_pre_reduction: usize,
+        expected_elided: usize,
+        actual_elided: usize,
+    },
     #[error("transaction {tx_index:?} has soft risk {risk} in wave {wave_index}, exceeding budget {budget}")]
     RiskBudgetExceeded {
         tx_index: TxIndex,
@@ -717,6 +862,57 @@ mod tests {
                 class: EdgeClass::Hard,
             }]
         );
+    }
+
+    #[test]
+    fn dense_hard_dag_is_transitively_reduced_without_changing_reachability() {
+        let graph = graph(
+            vec![tx(1, 0), tx(2, 1), tx(3, 2), tx(4, 3)],
+            vec![
+                true_edge(0, 1, 0.9),
+                true_edge(0, 2, 0.9),
+                true_edge(0, 3, 0.9),
+                true_edge(1, 2, 0.9),
+                true_edge(1, 3, 0.9),
+                true_edge(2, 3, 0.9),
+            ],
+        );
+        let scheduler = RiskBoundedScheduler::new(config(0.2, 0.8, 0.2)).unwrap();
+        let schedule = scheduler.schedule(&graph).unwrap();
+
+        assert_eq!(schedule.pre_reduction_ordering_dependencies, 6);
+        assert_eq!(schedule.hard_dependencies_elided_by_reduction, 3);
+        assert_eq!(
+            schedule.ordering_dependencies,
+            vec![
+                ScheduledDependency {
+                    predecessor: TxIndex(0),
+                    successor: TxIndex(1),
+                    class: EdgeClass::Hard,
+                },
+                ScheduledDependency {
+                    predecessor: TxIndex(1),
+                    successor: TxIndex(2),
+                    class: EdgeClass::Hard,
+                },
+                ScheduledDependency {
+                    predecessor: TxIndex(2),
+                    successor: TxIndex(3),
+                    class: EdgeClass::Hard,
+                },
+            ]
+        );
+        assert_eq!(schedule.waves.len(), 4);
+        schedule
+            .validate_against(&graph, scheduler.config())
+            .unwrap();
+
+        let mut malformed = schedule.clone();
+        malformed.hard_dependencies_elided_by_reduction -= 1;
+        assert!(matches!(
+            malformed.validate_against(&graph, scheduler.config()),
+            Err(SchedulingError::DependencyReductionMetadataMismatch { .. })
+        ));
     }
 
     #[test]

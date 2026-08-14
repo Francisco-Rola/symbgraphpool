@@ -918,7 +918,7 @@ impl RuntimeFeedbackEngine {
         evidence: &[SerializationCostEvidence],
         epoch: u64,
     ) -> Result<ApplySummary, RuntimeFeedbackError> {
-        let mut summary = ApplySummary::default();
+        let mut batches = BTreeMap::<EdgeProvenance, (u64, usize)>::new();
         for item in evidence {
             let edge = candidate_graph
                 .edge_between(item.predecessor, item.transaction)
@@ -928,21 +928,28 @@ impl RuntimeFeedbackEngine {
                         transaction: item.transaction,
                     },
                 )?;
-            let applied = match edge.provenance {
+            let entry = batches.entry(edge.provenance).or_default();
+            entry.0 = entry.0.saturating_add(item.marginal_ready_delay_nanos);
+            entry.1 = entry.1.saturating_add(1);
+        }
+
+        let mut summary = ApplySummary::default();
+        for (provenance, (total_cost_nanos, observations)) in batches {
+            let applied = match provenance {
                 EdgeProvenance::Static { profile_edge_index } => {
-                    self.store.record_static_serialization_cost(
+                    self.store.record_static_serialization_cost_batch(
                         profile_edge_index,
-                        item.marginal_ready_delay_nanos,
-                        1.0,
+                        total_cost_nanos,
+                        observations,
                         epoch,
                         &self.adaptive_config,
                     )?
                 }
                 EdgeProvenance::RuntimeDiscovered { runtime_edge_id } => {
-                    self.store.record_fallback_serialization_cost(
+                    self.store.record_fallback_serialization_cost_batch(
                         runtime_edge_id,
-                        item.marginal_ready_delay_nanos,
-                        1.0,
+                        total_cost_nanos,
+                        observations,
                         epoch,
                         &self.adaptive_config,
                     )?
@@ -954,6 +961,9 @@ impl RuntimeFeedbackEngine {
             summary.attributed_serialization_cost_nanos = summary
                 .attributed_serialization_cost_nanos
                 .saturating_add(applied.attributed_serialization_cost_nanos);
+            summary.serialization_cost_batches_applied = summary
+                .serialization_cost_batches_applied
+                .saturating_add(applied.serialization_cost_batches_applied);
         }
         Ok(summary)
     }

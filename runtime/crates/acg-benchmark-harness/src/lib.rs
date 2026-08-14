@@ -602,16 +602,19 @@ fn serial_services(report: &BlockExecutionReport) -> Result<Vec<u64>, HarnessErr
 
 fn dag_bound_from_services(plan: &AdaptiveBlockPlan, services: &[u64]) -> u64 {
     let mut completion = vec![0_u64; services.len()];
-    for transaction in 0..services.len() {
-        let predecessor_completion = plan
-            .schedule
-            .ordering_dependencies
-            .iter()
-            .filter(|dependency| dependency.successor.0 as usize == transaction)
-            .map(|dependency| completion[dependency.predecessor.0 as usize])
-            .max()
-            .unwrap_or(0);
-        completion[transaction] = predecessor_completion.saturating_add(services[transaction]);
+    for wave in &plan.schedule.waves {
+        for transaction in &wave.transaction_indices {
+            let transaction = transaction.0 as usize;
+            let predecessor_completion = plan
+                .schedule
+                .ordering_dependencies
+                .iter()
+                .filter(|dependency| dependency.successor.0 as usize == transaction)
+                .map(|dependency| completion[dependency.predecessor.0 as usize])
+                .max()
+                .unwrap_or(0);
+            completion[transaction] = predecessor_completion.saturating_add(services[transaction]);
+        }
     }
     completion.into_iter().max().unwrap_or(0)
 }
@@ -637,12 +640,18 @@ fn merge_apply_summaries(left: ApplySummary, right: ApplySummary) -> ApplySummar
         attributed_invalidated_descendants: left
             .attributed_invalidated_descendants
             .saturating_add(right.attributed_invalidated_descendants),
+        observation_batches_applied: left
+            .observation_batches_applied
+            .saturating_add(right.observation_batches_applied),
         serialization_cost_observations: left
             .serialization_cost_observations
             .saturating_add(right.serialization_cost_observations),
         attributed_serialization_cost_nanos: left
             .attributed_serialization_cost_nanos
             .saturating_add(right.attributed_serialization_cost_nanos),
+        serialization_cost_batches_applied: left
+            .serialization_cost_batches_applied
+            .saturating_add(right.serialization_cost_batches_applied),
     }
 }
 

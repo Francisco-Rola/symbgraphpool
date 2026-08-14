@@ -48,6 +48,7 @@ fn record() -> ExperimentRecord {
             actual_execution_wall_nanos: 5_500,
             service_inflation_milli: Some(1_250),
             scheduler_realization_milli: Some(1_100),
+            ..ParallelismRecord::default()
         },
         execution: ExecutionRecord {
             transactions: 200,
@@ -94,4 +95,40 @@ fn experiment_record_rejects_unknown_schema_version() {
     value["schema_version"] = serde_json::json!(99);
     let bytes = serde_json::to_vec(&value).unwrap();
     assert!(ExperimentRecord::from_json(&bytes).is_err());
+}
+
+#[test]
+fn experiment_record_schema_v1_remains_readable() {
+    let mut value = serde_json::to_value(record()).unwrap();
+    value["schema_version"] = serde_json::json!(1);
+    if let Some(scheduling) = value
+        .get_mut("scheduling")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        scheduling.remove("pre_reduction_dependencies");
+        scheduling.remove("scheduled_dependencies");
+        scheduling.remove("edges_elided_by_reduction");
+    }
+    if let Some(parallelism) = value
+        .get_mut("parallelism")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        parallelism.remove("observed_service_work_nanos");
+        parallelism.remove("worker_capacity_bound_nanos");
+        parallelism.remove("parallel_lower_bound_nanos");
+        parallelism.remove("scheduler_realization_corrected_milli");
+    }
+    if let Some(feedback) = value
+        .get_mut("feedback")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        feedback.remove("observation_batches_applied");
+        feedback.remove("serialization_cost_batches_applied");
+    }
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let restored = ExperimentRecord::from_json(&bytes).unwrap();
+    assert_eq!(restored.schema_version, 1);
+    assert_eq!(restored.scheduling.pre_reduction_dependencies, 0);
+    assert_eq!(restored.parallelism.parallel_lower_bound_nanos, None);
+    assert_eq!(restored.feedback.observation_batches_applied, 0);
 }

@@ -7,28 +7,29 @@
     "workload": "conflictlab",
     "parameters": {
       "execution_backend": "wasm",
-      "transactions": "1000",
+      "prediction_quality": "exact",
+      "transactions": "200",
       "warmup_blocks": "4",
       "accounts": "16",
       "hot_account_probability_bps": "0",
-      "work_iterations": "32768",
-      "storage_rounds": "2",
-      "payload_bytes": "256",
-      "complexity": "medium",
+      "complexity": "heavy",
+      "work_iterations": "262144",
+      "storage_rounds": "4",
+      "payload_bytes": "1024",
       "sim.admission_tps": "25000",
       "sim.block_interval_ms": "2000",
       "sim.block_size": "200",
       "sim.mempool_policy": "fifo",
       "acg.feedback_retention_factor": "0.99",
-      "acg.feedback_confidence_scale": "20.0",
-      "prediction_quality": "exact"
+      "acg.feedback_confidence_scale": "20.0"
     }
   },
-  "order_seed": 20260813,
-  "experiment_id": "conflictlab-release-ingress-block",
+  "order_seed": 2026081401,
+  "experiment_id": "conflictlab-control-plane-regression",
   "matrix": {
     "modes": [
       "static",
+      "probability-only",
       "cost-aware"
     ],
     "workers": [
@@ -37,34 +38,20 @@
     "seeds": [
       11,
       23,
-      37,
-      53,
-      71
+      47
     ],
-    "parameters": {
-      "sim.admission_tps": [
-        "50",
-        "100",
-        "500",
-        "1000",
-        "5000",
-        "25000"
-      ],
-      "sim.block_interval_ms": [
-        "250",
-        "500",
-        "1000",
-        "2000"
-      ],
-      "sim.block_size": [
-        "50",
-        "200",
-        "500"
-      ]
-    },
     "cases": [
       {
-        "parameters": {}
+        "parameters": {
+          "contention": "low",
+          "hot_account_probability_bps": "0"
+        }
+      },
+      {
+        "parameters": {
+          "contention": "hot",
+          "hot_account_probability_bps": "9000"
+        }
       }
     ]
   }

@@ -734,12 +734,18 @@ fn merge_apply_summaries(left: ApplySummary, right: ApplySummary) -> ApplySummar
         attributed_invalidated_descendants: left
             .attributed_invalidated_descendants
             .saturating_add(right.attributed_invalidated_descendants),
+        observation_batches_applied: left
+            .observation_batches_applied
+            .saturating_add(right.observation_batches_applied),
         serialization_cost_observations: left
             .serialization_cost_observations
             .saturating_add(right.serialization_cost_observations),
         attributed_serialization_cost_nanos: left
             .attributed_serialization_cost_nanos
             .saturating_add(right.attributed_serialization_cost_nanos),
+        serialization_cost_batches_applied: left
+            .serialization_cost_batches_applied
+            .saturating_add(right.serialization_cost_batches_applied),
     }
 }
 
@@ -836,6 +842,8 @@ mod tests {
                     transaction_indices: vec![TxIndex(1)],
                 },
             ],
+            pre_reduction_ordering_dependencies: 0,
+            hard_dependencies_elided_by_reduction: 0,
             ordering_dependencies: Vec::new(),
         };
         let speculative = execution_plan_from_schedule(&schedule).unwrap();

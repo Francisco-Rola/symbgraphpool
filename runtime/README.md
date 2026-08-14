@@ -26,6 +26,7 @@ Focused gates:
 ./scripts/run-brick5e-measurement-diagnostics.sh
 ./scripts/run-brick5f-acceptance-diagnostics.sh
 ./scripts/run-common-benchmark-harness-diagnostics.sh
+./scripts/run-control-plane-corrections-diagnostics.sh
 ```
 
 Runtime execution semantics are stable while evaluation/tuning proceeds. VM lifecycle experiments

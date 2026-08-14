@@ -29,7 +29,7 @@ Outputs:
 
 - `records-flat.csv`: one flattened row per raw sample;
 - `summary-wide.csv`: one grouped row with metric statistics;
-- `plot-long.csv`: tidy/plot-ready metric rows;
+- `plot-long.csv`: tidy/plot-ready metric rows, including corrected scheduler realization, dependency compression and feedback/serialization batching factors;
 - `summary.json`: record/group counts and exported metric list.
 
 Raw JSONL is always the source of truth. Confidence intervals use the normal 1.96×SEM approximation;
@@ -47,3 +47,16 @@ deterministically shuffle run order and reduce systematic thermal/order bias.
 `quick` validates the release pipeline; `core` covers the primary research axes; `full` additionally
 covers admission/block packing and scheduler-policy tuning. See `conflictlab/README.md` and
 `../docs/tuning-knobs.md`.
+
+## Control-plane/adaptation calibration
+
+Before the large ConflictLab matrices, validate the dense-graph corrections and exercise real
+adaptive decisions:
+
+```bash
+./scripts/run-control-plane-corrections-diagnostics.sh
+./scripts/run-conflictlab-control-plane-evaluation.sh
+```
+
+ExperimentRecord schema v2 adds dependency-reduction/batching counters and a worker-capacity-aware
+scheduler lower bound while retaining schema-v1 read compatibility.
