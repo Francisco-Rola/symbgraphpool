@@ -41,15 +41,45 @@ if [[ -n "${PHASE4_RECORDS:-}" ]]; then
 fi
 "${VALIDATE[@]}" | tee "$OUT/validation.txt"
 
+# Full-preexecution/intrinsic-stage view. A finite consensus window is required for
+# realistic spill accounting, so also emit a configurable sensitivity sweep below.
 python3 "$ROOT/scripts/aggregate-experiment.py" "$OUT/records.jsonl" --out-dir "$OUT/aggregate"
 python3 "$ROOT/scripts/summarize-conflictlab-phase5.py" \
   "$OUT/records.jsonl" \
   --output "$OUT/results-summary.txt"
 
+CONSENSUS_WINDOWS_MS="${CONSENSUS_WINDOWS_MS:-2 5 10 25 50}"
+python3 "$ROOT/scripts/summarize-consensus-window-sweep.py" \
+  "$OUT/records.jsonl" \
+  --windows-ms $CONSENSUS_WINDOWS_MS \
+  --output "$OUT/consensus-window-sweep.txt"
+for WINDOW_MS in $CONSENSUS_WINDOWS_MS; do
+  WINDOW_VALIDATE=(python3 "$ROOT/scripts/validate-conflictlab-phase5.py" "$OUT/records.jsonl" --preconsensus-window-ms "$WINDOW_MS")
+  if [[ -n "${PHASE4_RECORDS:-}" ]]; then
+    WINDOW_VALIDATE+=(--baseline "$PHASE4_RECORDS")
+  fi
+  "${WINDOW_VALIDATE[@]}" > "$OUT/validation-window-${WINDOW_MS}ms.txt"
+  python3 "$ROOT/scripts/aggregate-experiment.py" \
+    "$OUT/records.jsonl" \
+    --out-dir "$OUT/aggregate-window-${WINDOW_MS}ms" \
+    --preconsensus-window-ms "$WINDOW_MS"
+  python3 "$ROOT/scripts/summarize-conflictlab-phase5.py" \
+    "$OUT/records.jsonl" \
+    --preconsensus-window-ms "$WINDOW_MS" \
+    --output "$OUT/results-summary-window-${WINDOW_MS}ms.txt"
+done
+
 echo "PASS: Phase 5 ConflictLab evaluation completed (432 control-plane + 48 mixed-admission = 480 runs)"
+echo "primary reporting: consensus-window-aware validation latency + execution-limited pipelined throughput"
+echo "serial fallback is pre-execution eligible; unfinished work spills after consensus"
+echo "consensus-window sensitivity (ms): $CONSENSUS_WINDOWS_MS"
+echo "secondary reporting: non-overlapped total-work speedup"
+echo "metric definitions: evaluation/conflictlab/phase5-consensus-metrics.md"
 echo "upload:"
 echo "  $OUT/results-summary.txt"
+echo "  $OUT/consensus-window-sweep.txt"
 echo "  $OUT/validation.txt"
 echo "  $OUT/records.jsonl"
 echo "  $OUT/aggregate/summary-wide.csv"
 echo "  $OUT/aggregate/plot-long.csv"
+echo "  $OUT/results-summary-window-<N>ms.txt (for each configured consensus window)"

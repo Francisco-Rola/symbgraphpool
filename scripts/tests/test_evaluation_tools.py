@@ -167,7 +167,7 @@ class EvaluationToolTests(unittest.TestCase):
                             "scheduler_realization_milli": 1000,
                             "scheduler_realization_corrected_milli": 1000,
                         },
-                        "planning": {"total_nanos": 100},
+                        "planning": {"total_nanos": 100, "serial_bypassed": False},
                         "feedback_timing": {"total_nanos": 10},
                         "pipeline_timing": {
                             "planning_nanos": 100,
@@ -180,6 +180,7 @@ class EvaluationToolTests(unittest.TestCase):
                             "end_to_end_speedup_milli": round(2000 * 1000 / (wall + 210)),
                         },
                         "execution": {
+                            "transactions": 2,
                             "replay_or_missing_execution_nanos": 0,
                             "replayed_transactions": 0,
                             "invalidated_results": 0,
@@ -229,6 +230,18 @@ class EvaluationToolTests(unittest.TestCase):
             self.assertAlmostEqual(float(corrected["mean"]), 1.0)
             pipeline = next(row for row in plot if row["metric"] == "pipeline_speedup")
             self.assertEqual(pipeline["n"], "2")
+            validation = next(row for row in plot if row["metric"] == "validation_latency_speedup")
+            self.assertAlmostEqual(float(validation["mean"]), 20.0)
+            throughput = next(row for row in plot if row["metric"] == "throughput_speedup")
+            self.assertAlmostEqual(
+                float(throughput["mean"]),
+                (2000 / 1110 + 2000 / 1310) / 2,
+            )
+            acg_tps = next(row for row in plot if row["metric"] == "acg_throughput_tps")
+            self.assertAlmostEqual(
+                float(acg_tps["mean"]),
+                (2e9 / 1110 + 2e9 / 1310) / 2,
+            )
             materialization = next(
                 row for row in plot if row["metric"] == "candidate_materialization_compression"
             )
@@ -239,6 +252,104 @@ class EvaluationToolTests(unittest.TestCase):
                 row for row in plot if row["metric"] == "feedback_us_per_observation"
             )
             self.assertAlmostEqual(float(feedback_unit["mean"]), 0.005)
+
+    def test_consensus_window_counts_serial_fallback_preexecution_before_consensus(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            records = temp / "records.jsonl"
+            record = {
+                "metadata": {
+                    "experiment_id": "fallback-window-test",
+                    "workload": "conflictlab",
+                    "mode": "static",
+                    "workers": 1,
+                    "run_index": 1,
+                    "seed": 1,
+                    "parameters": {},
+                },
+                "parallelism": {
+                    "actual_execution_wall_nanos": 1_000,
+                    "serial_equivalent_work_nanos": 1_200,
+                    "serial_cost_dag_bound_nanos": 1_200,
+                    "observed_service_dag_bound_nanos": 1_000,
+                    "observed_service_work_nanos": 1_000,
+                    "worker_capacity_bound_nanos": 1_000,
+                    "parallel_lower_bound_nanos": 1_000,
+                    "service_inflation_milli": 1_000,
+                    "scheduler_realization_milli": 1_000,
+                    "scheduler_realization_corrected_milli": 1_000,
+                },
+                "planning": {"total_nanos": 100, "serial_bypassed": True},
+                "feedback_timing": {"total_nanos": 0},
+                "pipeline_timing": {
+                    "planning_nanos": 100,
+                    "preexecution_nanos": 1_000,
+                    "pre_execution_feedback_nanos": 0,
+                    "reconciliation_nanos": 0,
+                    "reconciliation_feedback_nanos": 0,
+                    "total_adaptive_block_nanos": 1_100,
+                    "serial_reference_execution_nanos": 1_200,
+                    "end_to_end_speedup_milli": 1_091,
+                },
+                "execution": {
+                    "transactions": 2,
+                    "replay_or_missing_execution_nanos": 0,
+                    "replayed_transactions": 0,
+                    "invalidated_results": 0,
+                    "reused_results": 0,
+                    "hard_dependency_count": 0,
+                    "max_in_flight": 1,
+                    "contract": {
+                        "aggregate_wasm_instance_acquire_nanos": 0,
+                        "wasm_instance_reuse_hits": 2,
+                        "wasm_instance_pool_misses": 0,
+                        "aggregate_wasm_entrypoint_nanos": 900,
+                        "aggregate_wasm_recycle_nanos": 0,
+                        "aggregate_host_storage_nanos": 0,
+                        "aggregate_mvcc_storage_point_nanos": 0,
+                        "aggregate_mvcc_storage_range_nanos": 0,
+                        "aggregate_request_execution_nanos": 1_000,
+                    },
+                },
+                "scheduling": {
+                    "candidate_edges": 0,
+                    "materialized_candidate_edges": 0,
+                    "pre_reduction_dependencies": 0,
+                    "scheduled_dependencies": 0,
+                    "edges_elided_by_reduction": 0,
+                },
+                "feedback": {
+                    "positive_observations": 0,
+                    "negative_observations": 0,
+                    "serialization_cost_observations": 0,
+                    "serialization_cost_batches_applied": 0,
+                    "replay_impact_observations": 0,
+                    "observation_batches_applied": 0,
+                },
+            }
+            records.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            output = temp / "out"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(AGGREGATOR),
+                    str(records),
+                    "--out-dir",
+                    str(output),
+                    "--preconsensus-window-ms",
+                    "0.0005",
+                ],
+                check=True,
+            )
+            with (output / "records-flat.csv").open(newline="", encoding="utf-8") as handle:
+                flat = next(csv.DictReader(handle))
+            self.assertAlmostEqual(float(flat["derived.preconsensus_eligible_nanos"]), 1_100.0)
+            self.assertAlmostEqual(float(flat["derived.pre_consensus_nanos"]), 500.0)
+            self.assertAlmostEqual(float(flat["derived.preconsensus_spill_nanos"]), 600.0)
+            self.assertAlmostEqual(float(flat["derived.post_consensus_nanos"]), 600.0)
+            self.assertAlmostEqual(float(flat["derived.validation_latency_speedup"]), 2.0)
+            self.assertAlmostEqual(float(flat["derived.throughput_speedup"]), 2.0)
+
 
 
 if __name__ == "__main__":

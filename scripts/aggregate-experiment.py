@@ -10,6 +10,8 @@ import math
 import statistics
 from pathlib import Path
 
+from consensus_pipeline_metrics import consensus_pipeline_metrics
+
 METRICS = {
     "parallel_wall_ms": ("parallelism.actual_execution_wall_nanos", 1e-6),
     "serial_work_ms": ("parallelism.serial_equivalent_work_nanos", 1e-6),
@@ -33,6 +35,22 @@ METRICS = {
     "pipeline_preexecution_ms": ("pipeline_timing.preexecution_nanos", 1e-6),
     "pipeline_reconciliation_ms": ("pipeline_timing.reconciliation_nanos", 1e-6),
     "pipeline_speedup": ("pipeline_timing.end_to_end_speedup_milli", 1e-3),
+    "total_work_speedup": ("derived.total_work_speedup", 1.0),
+    "preconsensus_eligible_ms": ("derived.preconsensus_eligible_nanos", 1e-6),
+    "pre_consensus_ms": ("derived.pre_consensus_nanos", 1e-6),
+    "preconsensus_spill_ms": ("derived.preconsensus_spill_nanos", 1e-6),
+    "intrinsic_postconsensus_ms": ("derived.intrinsic_postconsensus_nanos", 1e-6),
+    "post_consensus_ms": ("derived.post_consensus_nanos", 1e-6),
+    "consensus_bottleneck_ms": ("derived.consensus_bottleneck_nanos", 1e-6),
+    "preexecution_complete_before_consensus": ("derived.preexecution_complete_before_consensus", 1.0),
+    "serial_validation_latency_ms": ("derived.serial_validation_latency_nanos", 1e-6),
+    "acg_validation_latency_ms": ("derived.acg_validation_latency_nanos", 1e-6),
+    "validation_latency_speedup": ("derived.validation_latency_speedup", 1.0),
+    "serial_throughput_blocks_per_s": ("derived.serial_throughput_blocks_per_s", 1.0),
+    "acg_throughput_blocks_per_s": ("derived.acg_throughput_blocks_per_s", 1.0),
+    "serial_throughput_tps": ("derived.serial_throughput_tps", 1.0),
+    "acg_throughput_tps": ("derived.acg_throughput_tps", 1.0),
+    "throughput_speedup": ("derived.throughput_speedup", 1.0),
     "feedback_us_per_observation": ("derived.feedback_nanos_per_observation", 1e-3),
     "replay_ms": ("execution.replay_or_missing_execution_nanos", 1e-6),
     "replayed_transactions": ("execution.replayed_transactions", 1.0),
@@ -103,7 +121,7 @@ def load_records(paths):
     return records
 
 
-def derived_flat(record):
+def derived_flat(record, preconsensus_window_ms=None):
     flat = flatten(record)
     wall = flat.get("parallelism.actual_execution_wall_nanos")
     serial = flat.get("parallelism.serial_equivalent_work_nanos")
@@ -152,6 +170,35 @@ def derived_flat(record):
     flat["derived.wasm_lifecycle_share"] = (
         float(wasm_lifecycle_nanos) / float(request_execution_nanos)
         if request_execution_nanos not in (None, 0)
+        else None
+    )
+    consensus = consensus_pipeline_metrics(record, preconsensus_window_ms)
+    flat["derived.preconsensus_window_nanos"] = consensus["preconsensus_window_nanos"]
+    flat["derived.preconsensus_eligible_nanos"] = consensus["preconsensus_eligible_nanos"]
+    flat["derived.pre_consensus_nanos"] = consensus["preconsensus_completed_nanos"]
+    flat["derived.preconsensus_spill_nanos"] = consensus["preconsensus_spill_nanos"]
+    flat["derived.intrinsic_postconsensus_nanos"] = consensus["intrinsic_postconsensus_nanos"]
+    flat["derived.post_consensus_nanos"] = consensus["postconsensus_validation_nanos"]
+    flat["derived.consensus_bottleneck_nanos"] = consensus["pipeline_bottleneck_nanos"]
+    flat["derived.preexecution_complete_before_consensus"] = consensus[
+        "preexecution_complete_before_consensus"
+    ]
+    flat["derived.serial_validation_latency_nanos"] = consensus["serial_validation_latency_nanos"]
+    flat["derived.acg_validation_latency_nanos"] = consensus["postconsensus_validation_nanos"]
+    validation_speedup = consensus["validation_latency_speedup"]
+    flat["derived.validation_latency_speedup"] = (
+        validation_speedup if math.isfinite(validation_speedup) else None
+    )
+    flat["derived.throughput_speedup"] = consensus["throughput_speedup"]
+    flat["derived.serial_throughput_blocks_per_s"] = consensus["serial_throughput_blocks_per_s"]
+    flat["derived.acg_throughput_blocks_per_s"] = consensus["acg_throughput_blocks_per_s"]
+    flat["derived.serial_throughput_tps"] = consensus["serial_throughput_tps"]
+    flat["derived.acg_throughput_tps"] = consensus["acg_throughput_tps"]
+    serial_reference_nanos = flat.get("pipeline_timing.serial_reference_execution_nanos")
+    total_adaptive_nanos = flat.get("pipeline_timing.total_adaptive_block_nanos")
+    flat["derived.total_work_speedup"] = (
+        float(serial_reference_nanos) / float(total_adaptive_nanos)
+        if serial_reference_nanos is not None and total_adaptive_nanos not in (None, 0)
         else None
     )
     serialization_observations = flat.get("feedback.serialization_cost_observations")
@@ -226,12 +273,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("records", type=Path, nargs="+")
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument(
+        "--preconsensus-window-ms",
+        type=float,
+        help="optional pre-consensus execution budget; omitted means all eligible pre-execution completes",
+    )
     args = parser.parse_args()
 
     records = load_records(args.records)
     if not records:
         raise SystemExit("no records found")
-    flat_records = [derived_flat(record) for record in records]
+    flat_records = [derived_flat(record, args.preconsensus_window_ms) for record in records]
     all_fields = sorted({key for record in flat_records for key in record})
     write_csv(args.out_dir / "records-flat.csv", flat_records, all_fields)
 

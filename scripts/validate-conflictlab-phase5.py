@@ -8,6 +8,8 @@ import json
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
+
+from consensus_pipeline_metrics import consensus_pipeline_metrics
 from typing import Any, Iterable
 
 CONTROL = "conflictlab-phase5-control-plane"
@@ -45,6 +47,22 @@ def pct(value: float) -> str:
     return f"{100.0 * value:.1f}%"
 
 
+def consensus_metrics(record: dict[str, Any], preconsensus_window_ms: float | None = None) -> dict[str, float]:
+    metrics = consensus_pipeline_metrics(record, preconsensus_window_ms)
+    return {
+        "eligible_pre_nanos": float(metrics["preconsensus_eligible_nanos"]),
+        "pre_nanos": float(metrics["preconsensus_completed_nanos"]),
+        "spill_nanos": float(metrics["preconsensus_spill_nanos"]),
+        "intrinsic_post_nanos": float(metrics["intrinsic_postconsensus_nanos"]),
+        "post_nanos": float(metrics["postconsensus_validation_nanos"]),
+        "bottleneck_nanos": float(metrics["pipeline_bottleneck_nanos"]),
+        "preexecution_complete": bool(metrics["preexecution_complete_before_consensus"]),
+        "validation_speedup": float(metrics["validation_latency_speedup"]),
+        "throughput_speedup": float(metrics["throughput_speedup"]),
+        "serial_tps": float(metrics["serial_throughput_tps"]),
+        "acg_tps": float(metrics["acg_throughput_tps"]),
+    }
+
 def comparison_key(record: dict[str, Any]) -> tuple[str, ...]:
     p = params(record)
     return (
@@ -59,8 +77,13 @@ def comparison_key(record: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
-def validate(records: list[dict[str, Any]], baseline: list[dict[str, Any]] | None) -> None:
+def validate(
+    records: list[dict[str, Any]],
+    baseline: list[dict[str, Any]] | None,
+    preconsensus_window_ms: float | None,
+) -> None:
     failures: list[str] = []
+    cm = lambda record: consensus_metrics(record, preconsensus_window_ms)
     counts = Counter(experiment(record) for record in records)
     expected = {CONTROL: 432, MIXED: 48}
     if counts != expected:
@@ -84,6 +107,25 @@ def validate(records: list[dict[str, Any]], baseline: list[dict[str, Any]] | Non
         failures.append("Phase 5 uses reusable Wasm instances throughout")
     if any(record["execution"]["contract"].get("wasm_instance_recycles", 0) != 0 for record in records):
         failures.append("reuse-mode Phase 5 records must not recycle Wasm instances")
+
+    for record in records:
+        timing = record["pipeline_timing"]
+        metrics = cm(record)
+        if metrics["post_nanos"] < 0 or metrics["bottleneck_nanos"] <= 0:
+            failures.append(
+                f"run {record['metadata']['run_index']}: consensus stage timings must be non-negative with a positive bottleneck"
+            )
+            break
+        if not record["planning"].get("serial_bypassed"):
+            reconstructed = metrics["pre_nanos"] + metrics["post_nanos"]
+            total = timing["total_adaptive_block_nanos"]
+            # The phase timers should partition the measured pipeline apart from tiny
+            # outer orchestration gaps. Flag only a material accounting mismatch.
+            if abs(reconstructed - total) > max(50_000.0, total * 0.02):
+                failures.append(
+                    f"run {record['metadata']['run_index']}: pre/post consensus timing does not reconcile with total pipeline"
+                )
+                break
 
     bypassed = [record for record in records if record["planning"].get("serial_bypassed")]
     if not bypassed:
@@ -173,6 +215,20 @@ def validate(records: list[dict[str, Any]], baseline: list[dict[str, Any]] | Non
         f"B512 bucketed adaptive: {len(compressed)}/{len(b512_bucketed_adaptive)} compact, "
         f"soft_compact={len(soft_compact)}, median materialization compression={median_compression:.1f}x"
     )
+    if preconsensus_window_ms is None:
+        print("consensus window: unbounded eligible pre-execution")
+    else:
+        print(f"consensus window: {preconsensus_window_ms:g}ms")
+
+    speculative = [record for record in records if not record["planning"].get("serial_bypassed")]
+    print(
+        "consensus-pipelined speculative medians: "
+        f"validation={median(cm(r)['validation_speedup'] for r in speculative):.2f}x, "
+        f"throughput={median(cm(r)['throughput_speedup'] for r in speculative):.2f}x, "
+        f"pre={median(cm(r)['pre_nanos'] for r in speculative)/1e6:.2f}ms, "
+        f"post={median(cm(r)['post_nanos'] for r in speculative)/1e6:.2f}ms, "
+        f"complete={pct(sum(cm(r)['preexecution_complete'] for r in speculative) / len(speculative))}"
+    )
 
     mixed = [record for record in records if experiment(record) == MIXED]
     for mix in ("80-15-5", "33-34-33", "10-30-60"):
@@ -181,7 +237,9 @@ def validate(records: list[dict[str, Any]], baseline: list[dict[str, Any]] | Non
         print(
             f"admission mix={mix}: bypass={pct(sum(r['planning']['serial_bypassed'] for r in rows) / len(rows))} "
             f"low-contention bypass={pct(sum(r['planning']['serial_bypassed'] for r in low) / len(low))} "
-            f"median pipeline={median(r['pipeline_timing']['end_to_end_speedup_milli'] / 1000.0 for r in rows):.2f}x"
+            f"validation={median(cm(r)['validation_speedup'] for r in rows):.2f}x "
+            f"throughput={median(cm(r)['throughput_speedup'] for r in rows):.2f}x "
+            f"total-work={median(r['pipeline_timing']['end_to_end_speedup_milli'] / 1000.0 for r in rows):.2f}x"
         )
 
     if baseline is not None:
@@ -210,6 +268,11 @@ def validate(records: list[dict[str, Any]], baseline: list[dict[str, Any]] | Non
                 f"feedback {old_feedback / 1e6:.2f}ms -> {new_feedback / 1e6:.2f}ms "
                 f"({old_feedback / max(1.0, new_feedback):.1f}x faster)"
             )
+            print(
+                "Phase 5 matched B512 consensus-pipeline medians: "
+                f"validation={median(cm(new[key])['validation_speedup'] for key in shared):.2f}x, "
+                f"throughput={median(cm(new[key])['throughput_speedup'] for key in shared):.2f}x"
+            )
             if new_planning > old_planning * 0.50:
                 failures.append(
                     "matched Phase 5 B512 bucketed planning did not achieve at least a 2x median reduction"
@@ -230,8 +293,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("records", type=Path)
     parser.add_argument("--baseline", type=Path, help="optional Phase 4 records.jsonl for matched timing comparison")
+    parser.add_argument(
+        "--preconsensus-window-ms",
+        type=float,
+        help="pre-consensus work budget; omitted assumes all eligible pre-execution completes before consensus",
+    )
     args = parser.parse_args()
-    validate(load_records(args.records), load_records(args.baseline) if args.baseline else None)
+    validate(
+        load_records(args.records),
+        load_records(args.baseline) if args.baseline else None,
+        args.preconsensus_window_ms,
+    )
 
 
 if __name__ == "__main__":
