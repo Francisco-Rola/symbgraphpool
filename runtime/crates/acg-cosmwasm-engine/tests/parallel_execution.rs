@@ -546,3 +546,151 @@ fn zero_workers_is_rejected_before_speculative_execution() {
         .is_err());
     assert!(before.same_world_state(&engine.snapshot()));
 }
+
+#[test]
+fn consensus_cutoff_stops_new_serial_launches_without_preconsensus_commit() {
+    let (engine, contract, _) = setup();
+    let transactions = vec![
+        canonical(
+            0,
+            request(
+                10,
+                &contract,
+                json!({"action":"sleep_set","key":"first","value":"one","delay_ms":30,"label":"first"}),
+            ),
+        ),
+        canonical(
+            1,
+            request(
+                11,
+                &contract,
+                json!({"action":"blind_set","key":"second","value":"two"}),
+            ),
+        ),
+    ];
+    let before = engine.snapshot();
+
+    let prepared = engine
+        .preexecute_dependency_plan_from_snapshot_with_cutoff(
+            &before,
+            ParallelExecutionConfig { workers: 1 },
+            transactions.clone(),
+            vec![tx_ids(&[10]), tx_ids(&[11])],
+            vec![hard_dependency(10, 11)],
+            Some(Duration::from_millis(5)),
+        )
+        .unwrap();
+
+    assert_eq!(prepared.receipts.len(), 1);
+    assert_eq!(prepared.metrics.speculative.speculative_results, 1);
+    assert!(prepared.metrics.dependency_diagnostics.cutoff_reached);
+    assert_eq!(
+        prepared
+            .metrics
+            .dependency_diagnostics
+            .receipts_ready_by_cutoff,
+        0
+    );
+    assert_eq!(
+        prepared
+            .metrics
+            .dependency_diagnostics
+            .receipts_completed_after_cutoff,
+        1
+    );
+    assert!(before.same_world_state(&engine.snapshot()));
+    assert_eq!(engine.raw_storage(&contract, b"first"), None);
+    assert_eq!(engine.raw_storage(&contract, b"second"), None);
+
+    let outcome = engine
+        .reconcile_prepared_block(transactions, prepared)
+        .unwrap();
+    assert_eq!(outcome.speculative.speculative_results, 1);
+    assert_eq!(outcome.speculative.reused_results, 1);
+    assert_eq!(outcome.speculative.canonical_transactions, 1);
+    assert_eq!(
+        engine.raw_storage(&contract, b"first"),
+        Some(b"one".to_vec())
+    );
+    assert_eq!(
+        engine.raw_storage(&contract, b"second"),
+        Some(b"two".to_vec())
+    );
+}
+
+#[test]
+fn consensus_cutoff_stops_parallel_launch_frontier_and_reconciles_remainder() {
+    let (engine, contract, _) = setup();
+    let transactions = (0_u64..4)
+        .map(|index| {
+            canonical(
+                index as u32,
+                request(
+                    20 + index,
+                    &contract,
+                    json!({
+                        "action":"sleep_set",
+                        "key":format!("parallel-{index}"),
+                        "value":format!("value-{index}"),
+                        "delay_ms":50,
+                        "label":format!("parallel-{index}")
+                    }),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let before = engine.snapshot();
+
+    let prepared = engine
+        .preexecute_dependency_plan_from_snapshot_with_cutoff(
+            &before,
+            ParallelExecutionConfig { workers: 2 },
+            transactions.clone(),
+            vec![tx_ids(&[20, 21, 22, 23])],
+            Vec::new(),
+            Some(Duration::from_millis(15)),
+        )
+        .unwrap();
+
+    assert!(prepared.metrics.dependency_diagnostics.cutoff_reached);
+    assert!(!prepared.receipts.is_empty());
+    assert!(prepared.receipts.len() <= 2);
+    assert_eq!(
+        prepared.metrics.speculative.speculative_results,
+        prepared.receipts.len() as u64
+    );
+    assert_eq!(
+        prepared
+            .metrics
+            .dependency_diagnostics
+            .receipts_ready_by_cutoff
+            + prepared
+                .metrics
+                .dependency_diagnostics
+                .receipts_completed_after_cutoff,
+        prepared.receipts.len() as u64
+    );
+    assert!(before.same_world_state(&engine.snapshot()));
+    for index in 0..4 {
+        assert_eq!(
+            engine.raw_storage(&contract, format!("parallel-{index}").as_bytes()),
+            None
+        );
+    }
+
+    let prepared_count = prepared.receipts.len() as u64;
+    let outcome = engine
+        .reconcile_prepared_block(transactions, prepared)
+        .unwrap();
+    assert_eq!(outcome.speculative.reused_results, prepared_count);
+    assert_eq!(
+        outcome.speculative.canonical_transactions,
+        4 - prepared_count
+    );
+    for index in 0..4 {
+        assert_eq!(
+            engine.raw_storage(&contract, format!("parallel-{index}").as_bytes()),
+            Some(format!("value-{index}").into_bytes())
+        );
+    }
+}

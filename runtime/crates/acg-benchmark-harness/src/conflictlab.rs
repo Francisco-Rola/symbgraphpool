@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     hint::black_box,
     path::{Path, PathBuf},
@@ -9,8 +9,8 @@ use std::{
 
 use acg_core::{ContractCodeHash, RuntimeId};
 use acg_cosmwasm_engine::{
-    Address, BlockContext, CosmWasmEngine, EngineConfig, ExecutionRequest, NativeCallContext,
-    NativeContract, TransactionId, WasmInstanceLifecycle,
+    Address, BlockContext, CodeId, CosmWasmEngine, EngineConfig, ExecutionRequest,
+    NativeCallContext, NativeContract, TransactionId, WasmInstanceLifecycle,
 };
 use acg_evaluation::RunIdentity;
 use acg_profile_graph::{EdgeBuildConfig, GraphLoadConfig, ProfileGraph, ProfileGraphArtifact};
@@ -19,7 +19,9 @@ use acg_validator_sim::{
     BlockProducer, BlockProducerConfig, IngressConfig, Mempool, ProducedBlock,
     RateControlledIngress, DEFAULT_BENCHMARK_INGRESS_TPS,
 };
-use cosmwasm_std::{to_json_binary, Binary, Empty, Env, MessageInfo, Reply, Response, Uint128};
+use cosmwasm_std::{
+    to_json_binary, Binary, Coin, Empty, Env, MessageInfo, Reply, Response, Uint128,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{parameter, BenchmarkWorkload, HarnessError, PreparedBenchmark};
@@ -65,6 +67,26 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             "conflictlab_complexity_mix".to_owned(),
             config.complexity_mix.as_str().to_owned(),
         );
+        environment.insert(
+            "conflictlab_consensus_divergence".to_owned(),
+            config.consensus_divergence.as_str().to_owned(),
+        );
+        environment.insert(
+            "conflictlab_symbolic_granularity".to_owned(),
+            config.symbolic_granularity.as_str().to_owned(),
+        );
+        environment.insert(
+            "conflictlab_prediction_fault_mode".to_owned(),
+            config.prediction_fault_mode.as_str().to_owned(),
+        );
+        environment.insert(
+            "conflictlab_prediction_fault_rate_bps".to_owned(),
+            config.prediction_fault_rate_bps.to_string(),
+        );
+        environment.insert(
+            "conflictlab_operation_mix".to_owned(),
+            config.operation_mix.as_str().to_owned(),
+        );
         let checksum = engine
             .code_metadata(code_id)
             .ok_or_else(|| {
@@ -93,13 +115,15 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             )
             .map_err(|error| HarnessError::Runtime(error.to_string()))?
             .contract;
+        seed_conflictlab_state(&engine, &contract, config)?;
 
         let context = IngestionContext::new(
             RuntimeId::new("cosmwasm").map_err(|error| HarnessError::Runtime(error.to_string()))?,
             ContractCodeHash(*checksum.as_bytes()),
             1,
         );
-        let symbolic = conflictlab_symbolic(config.prediction_quality)?;
+        let symbolic =
+            conflictlab_symbolic(config.prediction_quality, config.symbolic_granularity)?;
         let profiles = normalize_document(
             parse_slice(&symbolic).map_err(|error| HarnessError::Runtime(error.to_string()))?,
             &context,
@@ -112,51 +136,81 @@ impl BenchmarkWorkload for ConflictLabWorkload {
 
         let mut generator =
             ConflictLabGenerator::new(run.seed, config.accounts, config.warmup_hot_bps);
-        let mut blocks = Vec::with_capacity(config.warmup_blocks.saturating_add(1));
+        let mut alternate_generator = ConflictLabGenerator::new(
+            run.seed ^ 0xA5A5_5A5A_D1CE_B10C,
+            config.accounts,
+            config.warmup_hot_bps,
+        );
+        let total_warmups = config
+            .warmup_blocks
+            .saturating_add(config.postchange_warmup_blocks);
+        let mut predicted_blocks = Vec::with_capacity(total_warmups.saturating_add(1));
+        let mut decided_blocks = Vec::with_capacity(total_warmups.saturating_add(1));
         let mut next_transaction_id = 1_000_u64;
+
         for block_offset in 0..config.warmup_blocks {
             let height = u64::try_from(block_offset)
                 .map_err(|_| HarnessError::NumericOverflow)?
                 .saturating_add(1);
-            let block = generate_block(
+            let generation = GenerateBlockConfig {
+                offered_transactions: config.transactions,
+                first_transaction_id: next_transaction_id,
+                height,
+                selection_seed: run.seed ^ height,
+                code_id,
+                prediction_quality: config.prediction_quality,
+                prediction_buckets: config.prediction_buckets,
+                prediction_fault_mode: config.prediction_fault_mode,
+                prediction_fault_rate_bps: config.prediction_fault_rate_bps,
+                operation_mix: config.operation_mix,
+                work: WorkShape {
+                    work_iterations: config.warmup_work_iterations,
+                    storage_rounds: config.warmup_storage_rounds,
+                    payload_bytes: config.warmup_payload_bytes,
+                },
+                complexity_mix: config.complexity_mix,
+                simulation: config.simulation,
+            };
+            let predicted = generate_block(&contract, &mut generator, generation)?;
+            let alternate = generate_block(
                 &contract,
-                &mut generator,
+                &mut alternate_generator,
                 GenerateBlockConfig {
-                    offered_transactions: config.transactions,
-                    first_transaction_id: next_transaction_id,
-                    height,
-                    selection_seed: run.seed ^ height,
-                    prediction_quality: config.prediction_quality,
-                    prediction_buckets: config.prediction_buckets,
-                    work: WorkShape {
-                        work_iterations: config.warmup_work_iterations,
-                        storage_rounds: config.warmup_storage_rounds,
-                        payload_bytes: config.warmup_payload_bytes,
-                    },
-                    complexity_mix: config.complexity_mix,
-                    simulation: config.simulation,
+                    first_transaction_id: alternate_transaction_base(next_transaction_id, height),
+                    selection_seed: (run.seed ^ 0xD1CE_B10C) ^ height,
+                    ..generation
                 },
             )?;
+            let decided =
+                apply_consensus_divergence(&predicted, &alternate, config.consensus_divergence)?;
             next_transaction_id = next_transaction_id.saturating_add(
                 u64::try_from(config.transactions).map_err(|_| HarnessError::NumericOverflow)?,
             );
-            blocks.push(block);
+            predicted_blocks.push(predicted);
+            decided_blocks.push(decided);
         }
 
+        // Optional post-change warmups let the evaluation sample the k-th block after an abrupt
+        // workload transition while retaining one-record-per-run manifests. These blocks use the
+        // measured regime and therefore update feedback/admission before the final measured block.
         generator.hot_bps = config.hot_bps;
-        let measured_height = u64::try_from(config.warmup_blocks)
-            .map_err(|_| HarnessError::NumericOverflow)?
-            .saturating_add(1);
-        blocks.push(generate_block(
-            &contract,
-            &mut generator,
-            GenerateBlockConfig {
+        alternate_generator.hot_bps = config.hot_bps;
+        for transition_offset in 0..config.postchange_warmup_blocks {
+            let block_offset = config.warmup_blocks.saturating_add(transition_offset);
+            let height = u64::try_from(block_offset)
+                .map_err(|_| HarnessError::NumericOverflow)?
+                .saturating_add(1);
+            let generation = GenerateBlockConfig {
                 offered_transactions: config.transactions,
                 first_transaction_id: next_transaction_id,
-                height: measured_height,
-                selection_seed: run.seed ^ measured_height,
+                height,
+                selection_seed: run.seed ^ height,
+                code_id,
                 prediction_quality: config.prediction_quality,
                 prediction_buckets: config.prediction_buckets,
+                prediction_fault_mode: config.prediction_fault_mode,
+                prediction_fault_rate_bps: config.prediction_fault_rate_bps,
+                operation_mix: config.operation_mix,
                 work: WorkShape {
                     work_iterations: config.work_iterations,
                     storage_rounds: config.storage_rounds,
@@ -164,20 +218,97 @@ impl BenchmarkWorkload for ConflictLabWorkload {
                 },
                 complexity_mix: config.complexity_mix,
                 simulation: config.simulation,
+            };
+            let predicted = generate_block(&contract, &mut generator, generation)?;
+            let alternate = generate_block(
+                &contract,
+                &mut alternate_generator,
+                GenerateBlockConfig {
+                    first_transaction_id: alternate_transaction_base(next_transaction_id, height),
+                    selection_seed: (run.seed ^ 0xD1CE_B10C) ^ height,
+                    ..generation
+                },
+            )?;
+            let decided =
+                apply_consensus_divergence(&predicted, &alternate, config.consensus_divergence)?;
+            next_transaction_id = next_transaction_id.saturating_add(
+                u64::try_from(config.transactions).map_err(|_| HarnessError::NumericOverflow)?,
+            );
+            predicted_blocks.push(predicted);
+            decided_blocks.push(decided);
+        }
+
+        let measured_height = u64::try_from(total_warmups)
+            .map_err(|_| HarnessError::NumericOverflow)?
+            .saturating_add(1);
+        let generation = GenerateBlockConfig {
+            offered_transactions: config.transactions,
+            first_transaction_id: next_transaction_id,
+            height: measured_height,
+            selection_seed: run.seed ^ measured_height,
+            code_id,
+            prediction_quality: config.prediction_quality,
+            prediction_buckets: config.prediction_buckets,
+            prediction_fault_mode: config.prediction_fault_mode,
+            prediction_fault_rate_bps: config.prediction_fault_rate_bps,
+            operation_mix: config.operation_mix,
+            work: WorkShape {
+                work_iterations: config.work_iterations,
+                storage_rounds: config.storage_rounds,
+                payload_bytes: config.payload_bytes,
             },
-        )?);
-        let measured_block = blocks.pop().ok_or_else(|| {
-            HarnessError::Runtime("ConflictLab produced no measured block".to_owned())
-        })?;
+            complexity_mix: config.complexity_mix,
+            simulation: config.simulation,
+        };
+        let measured_block = generate_block(&contract, &mut generator, generation)?;
+        let measured_alternate = generate_block(
+            &contract,
+            &mut alternate_generator,
+            GenerateBlockConfig {
+                first_transaction_id: alternate_transaction_base(
+                    next_transaction_id,
+                    measured_height,
+                ),
+                selection_seed: (run.seed ^ 0xD1CE_B10C) ^ measured_height,
+                ..generation
+            },
+        )?;
+        let measured_decided_block = apply_consensus_divergence(
+            &measured_block,
+            &measured_alternate,
+            config.consensus_divergence,
+        )?;
+
+        let canonical_queries = collect_canonical_queries(
+            &engine,
+            &contract,
+            config.accounts,
+            decided_blocks
+                .iter()
+                .chain(std::iter::once(&measured_decided_block)),
+        )?;
+        let bank_balance_addresses = if config.operation_mix.uses_bank_funds() {
+            let mut addresses = (0..config.accounts)
+                .map(|account| Address::new(format!("account-{account}")))
+                .collect::<Vec<_>>();
+            addresses.push(contract.clone());
+            addresses
+        } else {
+            Vec::new()
+        };
 
         Ok(Box::new(PreparedConflictLab {
             engine,
             graph,
             contract,
             accounts: config.accounts,
+            canonical_queries,
+            bank_balance_addresses,
             environment,
-            warmup_blocks: blocks,
+            warmup_blocks: predicted_blocks,
+            warmup_decided_blocks: decided_blocks,
             measured_block,
+            measured_decided_block,
         }))
     }
 }
@@ -261,6 +392,154 @@ impl ComplexityMix {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SymbolicGranularity {
+    #[default]
+    Fine,
+    Resource,
+    Profile,
+}
+
+impl SymbolicGranularity {
+    fn parse(value: &str) -> Result<Self, HarnessError> {
+        match value {
+            "fine" => Ok(Self::Fine),
+            "resource" => Ok(Self::Resource),
+            "profile" => Ok(Self::Profile),
+            other => Err(HarnessError::WorkloadParameter(format!(
+                "symbolic_granularity must be fine, resource, or profile; got {other:?}"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fine => "fine",
+            Self::Resource => "resource",
+            Self::Profile => "profile",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PredictionFaultMode {
+    #[default]
+    None,
+    HiddenKey,
+    SpuriousKey,
+}
+
+impl PredictionFaultMode {
+    fn parse(value: &str) -> Result<Self, HarnessError> {
+        match value {
+            "none" => Ok(Self::None),
+            "hidden-key" => Ok(Self::HiddenKey),
+            "spurious-key" => Ok(Self::SpuriousKey),
+            other => Err(HarnessError::WorkloadParameter(format!(
+                "prediction_fault_mode must be none, hidden-key, or spurious-key; got {other:?}"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::HiddenKey => "hidden-key",
+            Self::SpuriousKey => "spurious-key",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum OperationMix {
+    #[default]
+    Credit,
+    PointMixed,
+    StatefulMixed,
+    RangeDelete,
+    BankFunds,
+    BankMixed,
+    Instantiate,
+    Full,
+}
+
+impl OperationMix {
+    fn parse(value: &str) -> Result<Self, HarnessError> {
+        match value {
+            "credit" => Ok(Self::Credit),
+            "point-mixed" => Ok(Self::PointMixed),
+            "stateful-mixed" => Ok(Self::StatefulMixed),
+            "range-delete" => Ok(Self::RangeDelete),
+            "bank-funds" => Ok(Self::BankFunds),
+            "bank-mixed" => Ok(Self::BankMixed),
+            "instantiate" => Ok(Self::Instantiate),
+            "full" => Ok(Self::Full),
+            other => Err(HarnessError::WorkloadParameter(format!(
+                "operation_mix must be credit, point-mixed, stateful-mixed, range-delete, bank-funds, bank-mixed, instantiate, or full; got {other:?}"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Credit => "credit",
+            Self::PointMixed => "point-mixed",
+            Self::StatefulMixed => "stateful-mixed",
+            Self::RangeDelete => "range-delete",
+            Self::BankFunds => "bank-funds",
+            Self::BankMixed => "bank-mixed",
+            Self::Instantiate => "instantiate",
+            Self::Full => "full",
+        }
+    }
+
+    fn requires_seeded_contract_balances(self) -> bool {
+        matches!(self, Self::StatefulMixed | Self::Full)
+    }
+
+    fn uses_bank_funds(self) -> bool {
+        matches!(self, Self::BankFunds | Self::BankMixed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ConsensusDivergence {
+    #[default]
+    Identical,
+    Tail5,
+    Tail20,
+    Reorder5,
+    Reorder20,
+    TailReorder10,
+}
+
+impl ConsensusDivergence {
+    fn parse(value: &str) -> Result<Self, HarnessError> {
+        match value {
+            "identical" => Ok(Self::Identical),
+            "tail-5pct" => Ok(Self::Tail5),
+            "tail-20pct" => Ok(Self::Tail20),
+            "reorder-5pct" => Ok(Self::Reorder5),
+            "reorder-20pct" => Ok(Self::Reorder20),
+            "tail-reorder-10pct" => Ok(Self::TailReorder10),
+            other => Err(HarnessError::WorkloadParameter(format!(
+                "consensus_divergence must be identical, tail-5pct, tail-20pct, reorder-5pct, reorder-20pct, or tail-reorder-10pct; got {other:?}"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Identical => "identical",
+            Self::Tail5 => "tail-5pct",
+            Self::Tail20 => "tail-20pct",
+            Self::Reorder5 => "reorder-5pct",
+            Self::Reorder20 => "reorder-20pct",
+            Self::TailReorder10 => "tail-reorder-10pct",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionBackend {
     Native,
@@ -325,6 +604,12 @@ struct ConflictLabConfig {
     prediction_quality: PredictionQuality,
     complexity_mix: ComplexityMix,
     prediction_buckets: u16,
+    symbolic_granularity: SymbolicGranularity,
+    prediction_fault_mode: PredictionFaultMode,
+    prediction_fault_rate_bps: u16,
+    operation_mix: OperationMix,
+    postchange_warmup_blocks: usize,
+    consensus_divergence: ConsensusDivergence,
     simulation: SimulationConfig,
 }
 
@@ -349,6 +634,13 @@ impl ConflictLabConfig {
             "prediction_quality",
             "complexity_mix",
             "prediction_buckets",
+            "symbolic_granularity",
+            "prediction_fault_mode",
+            "prediction_fault_rate_bps",
+            "operation_mix",
+            "postchange_warmup_blocks",
+            "consensus_divergence",
+            "consensus_cutoff_ms",
             "sim.admission_tps",
             "sim.block_interval_ms",
             "sim.block_size",
@@ -405,6 +697,34 @@ impl ConflictLabConfig {
                 .unwrap_or("exact"),
         )?;
         let prediction_buckets = parameter(&run.parameters, "prediction_buckets", 8_u16)?;
+        let symbolic_granularity = SymbolicGranularity::parse(
+            run.parameters
+                .get("symbolic_granularity")
+                .map(String::as_str)
+                .unwrap_or("fine"),
+        )?;
+        let prediction_fault_mode = PredictionFaultMode::parse(
+            run.parameters
+                .get("prediction_fault_mode")
+                .map(String::as_str)
+                .unwrap_or("none"),
+        )?;
+        let prediction_fault_rate_bps =
+            parameter(&run.parameters, "prediction_fault_rate_bps", 0_u16)?;
+        let operation_mix = OperationMix::parse(
+            run.parameters
+                .get("operation_mix")
+                .map(String::as_str)
+                .unwrap_or("credit"),
+        )?;
+        let postchange_warmup_blocks =
+            parameter(&run.parameters, "postchange_warmup_blocks", 0_usize)?;
+        let consensus_divergence = ConsensusDivergence::parse(
+            run.parameters
+                .get("consensus_divergence")
+                .map(String::as_str)
+                .unwrap_or("identical"),
+        )?;
         let block_size = parameter(&run.parameters, "sim.block_size", transactions)?;
         let admission_tps = parameter(
             &run.parameters,
@@ -456,6 +776,21 @@ impl ConflictLabConfig {
                 "hot-account probabilities must be <= {BASIS_POINTS} basis points"
             )));
         }
+        if prediction_fault_rate_bps > BASIS_POINTS {
+            return Err(HarnessError::WorkloadParameter(format!(
+                "prediction_fault_rate_bps must be <= {BASIS_POINTS}"
+            )));
+        }
+        if prediction_fault_mode == PredictionFaultMode::None && prediction_fault_rate_bps != 0 {
+            return Err(HarnessError::WorkloadParameter(
+                "prediction_fault_rate_bps requires prediction_fault_mode != none".to_owned(),
+            ));
+        }
+        if execution_backend == ExecutionBackend::Native && operation_mix != OperationMix::Credit {
+            return Err(HarnessError::WorkloadParameter(
+                "non-credit operation_mix values require execution_backend=wasm".to_owned(),
+            ));
+        }
 
         Ok(Self {
             transactions,
@@ -474,6 +809,12 @@ impl ConflictLabConfig {
             prediction_quality,
             complexity_mix,
             prediction_buckets,
+            symbolic_granularity,
+            prediction_fault_mode,
+            prediction_fault_rate_bps,
+            operation_mix,
+            postchange_warmup_blocks,
+            consensus_divergence,
             simulation: SimulationConfig {
                 admission_tps,
                 block_interval_ms,
@@ -484,39 +825,124 @@ impl ConflictLabConfig {
     }
 }
 
-fn conflictlab_symbolic(prediction_quality: PredictionQuality) -> Result<Vec<u8>, HarnessError> {
-    if prediction_quality != PredictionQuality::Coarse {
-        return Ok(CONFLICTLAB_SYMBOLIC.to_vec());
-    }
-
+fn conflictlab_symbolic(
+    prediction_quality: PredictionQuality,
+    granularity: SymbolicGranularity,
+) -> Result<Vec<u8>, HarnessError> {
     let mut document: serde_json::Value = serde_json::from_slice(CONFLICTLAB_SYMBOLIC)
         .map_err(|error| HarnessError::Runtime(error.to_string()))?;
-    let profiles = document
-        .get_mut("profiles")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(|| HarnessError::Runtime("ConflictLab symbolic profiles missing".to_owned()))?;
-    let credit = profiles
-        .iter_mut()
-        .find(|profile| {
-            profile
-                .get("entrypoint")
-                .and_then(serde_json::Value::as_str)
-                == Some("execute::Credit")
-        })
-        .ok_or_else(|| {
-            HarnessError::Runtime("ConflictLab Credit symbolic profile missing".to_owned())
-        })?;
-    let accesses = credit
-        .get_mut("accesses")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or_else(|| HarnessError::Runtime("ConflictLab Credit accesses missing".to_owned()))?;
-    for access in accesses {
-        let key = access
-            .get_mut("key")
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or_else(|| HarnessError::Runtime("ConflictLab Credit key missing".to_owned()))?;
-        key.insert("depends_on".to_owned(), serde_json::Value::Null);
+
+    if prediction_quality == PredictionQuality::Coarse {
+        let profiles = document
+            .get_mut("profiles")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| {
+                HarnessError::Runtime("ConflictLab symbolic profiles missing".to_owned())
+            })?;
+        let credit = profiles
+            .iter_mut()
+            .find(|profile| {
+                profile
+                    .get("entrypoint")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("execute::Credit")
+            })
+            .ok_or_else(|| {
+                HarnessError::Runtime("ConflictLab Credit symbolic profile missing".to_owned())
+            })?;
+        let accesses = credit
+            .get_mut("accesses")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| {
+                HarnessError::Runtime("ConflictLab Credit accesses missing".to_owned())
+            })?;
+        for access in accesses {
+            let key = access
+                .get_mut("key")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| {
+                    HarnessError::Runtime("ConflictLab Credit key missing".to_owned())
+                })?;
+            key.insert("depends_on".to_owned(), serde_json::Value::Null);
+        }
     }
+
+    match granularity {
+        SymbolicGranularity::Fine => {}
+        SymbolicGranularity::Resource => {
+            let profiles = document
+                .get_mut("profiles")
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(|| {
+                    HarnessError::Runtime("ConflictLab symbolic profiles missing".to_owned())
+                })?;
+            for profile in profiles {
+                let accesses = profile
+                    .get_mut("accesses")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .ok_or_else(|| {
+                        HarnessError::Runtime("ConflictLab profile accesses missing".to_owned())
+                    })?;
+                for access in accesses {
+                    let key = access
+                        .get_mut("key")
+                        .and_then(serde_json::Value::as_object_mut)
+                        .ok_or_else(|| {
+                            HarnessError::Runtime("ConflictLab access key missing".to_owned())
+                        })?;
+                    key.insert(
+                        "semantic_name".to_owned(),
+                        serde_json::Value::String("__whole_resource__".to_owned()),
+                    );
+                    key.insert("depends_on".to_owned(), serde_json::Value::Null);
+                }
+            }
+        }
+        SymbolicGranularity::Profile => {
+            let resources = document
+                .get_mut("storage_resources")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| {
+                    HarnessError::Runtime("ConflictLab storage resources missing".to_owned())
+                })?;
+            resources.insert(
+                "__PROFILE_STATE__".to_owned(),
+                serde_json::json!({"key_semantic_name":"all contract state"}),
+            );
+            let profiles = document
+                .get_mut("profiles")
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(|| {
+                    HarnessError::Runtime("ConflictLab symbolic profiles missing".to_owned())
+                })?;
+            for profile in profiles {
+                let accesses = profile
+                    .get_mut("accesses")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .ok_or_else(|| {
+                        HarnessError::Runtime("ConflictLab profile accesses missing".to_owned())
+                    })?;
+                for access in accesses {
+                    let object = access.as_object_mut().ok_or_else(|| {
+                        HarnessError::Runtime("ConflictLab access is not an object".to_owned())
+                    })?;
+                    object.insert(
+                        "resource".to_owned(),
+                        serde_json::Value::String("__PROFILE_STATE__".to_owned()),
+                    );
+                    object.insert(
+                        "key".to_owned(),
+                        serde_json::json!({"semantic_name":["all"],"depends_on":null}),
+                    );
+                    object.insert(
+                        "guard".to_owned(),
+                        serde_json::json!({"expression":"true","dependency_kind":"none"}),
+                    );
+                }
+            }
+        }
+    }
+
     serde_json::to_vec(&document).map_err(|error| HarnessError::Runtime(error.to_string()))
 }
 
@@ -611,14 +1037,218 @@ fn setup_engine(
     }
 }
 
+fn seed_conflictlab_state(
+    engine: &CosmWasmEngine,
+    contract: &Address,
+    config: ConflictLabConfig,
+) -> Result<(), HarnessError> {
+    if config.operation_mix.requires_seeded_contract_balances() {
+        for account_id in 0..config.accounts {
+            let account = format!("account-{account_id}");
+            let request = ExecutionRequest::Execute {
+                transaction_id: TransactionId(100_000_000_u64.saturating_add(account_id)),
+                sender: Address::new("seed"),
+                contract: contract.clone(),
+                funds: Vec::new(),
+                msg: to_json_binary(&ConflictLabExecuteMsg::Credit {
+                    account,
+                    amount: Uint128::new(1_000_000),
+                    work_iterations: 0,
+                    storage_rounds: 0,
+                    payload: Binary::default(),
+                })
+                .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+            };
+            engine
+                .execute_request(BlockContext::default(), request)
+                .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+        }
+    }
+
+    if config.operation_mix.uses_bank_funds() {
+        for account_id in 0..config.accounts {
+            engine
+                .set_balance(
+                    Address::new(format!("account-{account_id}")),
+                    &[Coin::new(1_000_000_u128, "uconflict")],
+                )
+                .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct CanonicalQuery {
+    contract: Address,
+    msg: Binary,
+}
+
+fn collect_canonical_queries<'a>(
+    engine: &CosmWasmEngine,
+    contract: &Address,
+    accounts: u64,
+    blocks: impl Iterator<Item = &'a ProducedBlock>,
+) -> Result<Vec<CanonicalQuery>, HarnessError> {
+    let mut dedup = BTreeSet::<Vec<u8>>::new();
+    let mut queries = Vec::<CanonicalQuery>::new();
+    let mut add_query = |target: Address, msg: Binary| {
+        let mut key = Vec::new();
+        key.extend_from_slice(target.as_str().as_bytes());
+        key.push(0);
+        key.extend_from_slice(msg.as_slice());
+        if dedup.insert(key) {
+            queries.push(CanonicalQuery {
+                contract: target,
+                msg,
+            });
+        }
+    };
+
+    // Preserve the historical correctness digest's complete account coverage.
+    for account_id in 0..accounts {
+        add_query(
+            contract.clone(),
+            to_json_binary(&ConflictLabQueryMsg::Balance {
+                account: format!("account-{account_id}"),
+            })
+            .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+        );
+    }
+
+    for block in blocks {
+        for pending in &block.transactions {
+            match &pending.request {
+                ExecutionRequest::Instantiate { transaction_id, .. } => {
+                    let address = engine.predict_contract_address(*transaction_id, 0);
+                    add_query(
+                        address,
+                        to_json_binary(&ConflictLabQueryMsg::Config {})
+                            .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                    );
+                }
+                ExecutionRequest::Execute {
+                    contract: target,
+                    msg,
+                    ..
+                } if target == contract => {
+                    let message: ConflictLabExecuteMsg = serde_json::from_slice(msg.as_slice())
+                        .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+                    match message {
+                        ConflictLabExecuteMsg::Credit { account, .. }
+                        | ConflictLabExecuteMsg::ReceiveTransfer { account, .. }
+                        | ConflictLabExecuteMsg::ConditionalCredit { account, .. } => {
+                            add_query(
+                                contract.clone(),
+                                to_json_binary(&ConflictLabQueryMsg::Balance { account })
+                                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                            );
+                        }
+                        ConflictLabExecuteMsg::Transfer { from, to, .. } => {
+                            for account in [from, to] {
+                                add_query(
+                                    contract.clone(),
+                                    to_json_binary(&ConflictLabQueryMsg::Balance { account })
+                                        .map_err(|error| {
+                                            HarnessError::Runtime(error.to_string())
+                                        })?,
+                                );
+                            }
+                        }
+                        ConflictLabExecuteMsg::Approve { owner, spender, .. } => {
+                            add_query(
+                                contract.clone(),
+                                to_json_binary(&ConflictLabQueryMsg::Allowance { owner, spender })
+                                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                            );
+                        }
+                        ConflictLabExecuteMsg::TransferFrom {
+                            owner, spender, to, ..
+                        } => {
+                            add_query(
+                                contract.clone(),
+                                to_json_binary(&ConflictLabQueryMsg::Allowance {
+                                    owner: owner.clone(),
+                                    spender,
+                                })
+                                .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                            );
+                            for account in [owner, to] {
+                                add_query(
+                                    contract.clone(),
+                                    to_json_binary(&ConflictLabQueryMsg::Balance { account })
+                                        .map_err(|error| {
+                                            HarnessError::Runtime(error.to_string())
+                                        })?,
+                                );
+                            }
+                        }
+                        ConflictLabExecuteMsg::IncrementCounter { shard_id } => {
+                            add_query(
+                                contract.clone(),
+                                to_json_binary(&ConflictLabQueryMsg::Counter { shard_id })
+                                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                            );
+                        }
+                        ConflictLabExecuteMsg::SetFee { .. }
+                        | ConflictLabExecuteMsg::SetEpoch { .. } => {
+                            add_query(
+                                contract.clone(),
+                                to_json_binary(&ConflictLabQueryMsg::Config {})
+                                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                            );
+                        }
+                        ConflictLabExecuteMsg::CreateOrder {
+                            order_id, owner, ..
+                        } => {
+                            add_query(
+                                contract.clone(),
+                                to_json_binary(&ConflictLabQueryMsg::Order { order_id })
+                                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                            );
+                            add_query(
+                                contract.clone(),
+                                to_json_binary(&ConflictLabQueryMsg::Balance { account: owner })
+                                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                            );
+                        }
+                        ConflictLabExecuteMsg::CancelOrder { order_id } => {
+                            add_query(
+                                contract.clone(),
+                                to_json_binary(&ConflictLabQueryMsg::Order { order_id })
+                                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                            );
+                        }
+                        ConflictLabExecuteMsg::ObserveBankBalance { shard_id, .. }
+                        | ConflictLabExecuteMsg::ObserveAllBankBalances { shard_id, .. } => {
+                            add_query(
+                                contract.clone(),
+                                to_json_binary(&ConflictLabQueryMsg::Counter { shard_id })
+                                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+                            );
+                        }
+                        ConflictLabExecuteMsg::ResetAllBalances {} => {}
+                    }
+                }
+                ExecutionRequest::Execute { .. } => {}
+            }
+        }
+    }
+    Ok(queries)
+}
+
 struct PreparedConflictLab {
     engine: CosmWasmEngine,
     graph: ProfileGraph,
     contract: Address,
     accounts: u64,
+    canonical_queries: Vec<CanonicalQuery>,
+    bank_balance_addresses: Vec<Address>,
     environment: BTreeMap<String, String>,
     warmup_blocks: Vec<ProducedBlock>,
+    warmup_decided_blocks: Vec<ProducedBlock>,
     measured_block: ProducedBlock,
+    measured_decided_block: ProducedBlock,
 }
 
 impl PreparedBenchmark for PreparedConflictLab {
@@ -634,8 +1264,16 @@ impl PreparedBenchmark for PreparedConflictLab {
         &self.warmup_blocks
     }
 
+    fn warmup_decided_blocks(&self) -> &[ProducedBlock] {
+        &self.warmup_decided_blocks
+    }
+
     fn measured_block(&self) -> &ProducedBlock {
         &self.measured_block
+    }
+
+    fn measured_decided_block(&self) -> &ProducedBlock {
+        &self.measured_decided_block
     }
 
     fn environment_metadata(&self) -> BTreeMap<String, String> {
@@ -646,21 +1284,31 @@ impl PreparedBenchmark for PreparedConflictLab {
         let mut bytes = Vec::new();
         append_bytes(&mut bytes, self.contract.as_str().as_bytes());
         bytes.extend_from_slice(&self.accounts.to_be_bytes());
-        for account_id in 0..self.accounts {
-            let account = format!("account-{account_id}");
-            append_bytes(&mut bytes, account.as_bytes());
-            let outcome = self
-                .engine
-                .query(
-                    BlockContext::default(),
-                    self.contract.clone(),
-                    to_json_binary(&ConflictLabQueryMsg::Balance {
-                        account: account.clone(),
-                    })
-                    .map_err(|error| HarnessError::Runtime(error.to_string()))?,
-                )
-                .map_err(|error| HarnessError::Runtime(error.to_string()))?;
-            append_bytes(&mut bytes, outcome.data.as_slice());
+        for query in &self.canonical_queries {
+            append_bytes(&mut bytes, query.contract.as_str().as_bytes());
+            if self.engine.contract_metadata(&query.contract).is_some() {
+                bytes.push(1);
+                let outcome = self
+                    .engine
+                    .query(
+                        BlockContext::default(),
+                        query.contract.clone(),
+                        query.msg.clone(),
+                    )
+                    .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+                append_bytes(&mut bytes, outcome.data.as_slice());
+            } else {
+                bytes.push(0);
+            }
+        }
+        for address in &self.bank_balance_addresses {
+            append_bytes(&mut bytes, address.as_str().as_bytes());
+            bytes.extend_from_slice(
+                &self
+                    .engine
+                    .balance(address.clone(), "uconflict")
+                    .to_be_bytes(),
+            );
         }
         Ok(bytes)
     }
@@ -686,12 +1334,68 @@ enum ConflictLabExecuteMsg {
         #[serde(default)]
         payload: Binary,
     },
+    Transfer {
+        from: String,
+        to: String,
+        amount: Uint128,
+    },
+    Approve {
+        owner: String,
+        spender: String,
+        amount: Uint128,
+    },
+    TransferFrom {
+        owner: String,
+        spender: String,
+        to: String,
+        amount: Uint128,
+    },
+    IncrementCounter {
+        shard_id: u64,
+    },
+    ConditionalCredit {
+        account: String,
+        expected_epoch: u64,
+        amount: Uint128,
+    },
+    SetFee {
+        new_fee_bps: u16,
+    },
+    SetEpoch {
+        new_epoch: u64,
+    },
+    ReceiveTransfer {
+        account: String,
+        amount: Uint128,
+    },
+    CreateOrder {
+        order_id: u64,
+        owner: String,
+        amount: Uint128,
+    },
+    CancelOrder {
+        order_id: u64,
+    },
+    ResetAllBalances {},
+    ObserveBankBalance {
+        account: String,
+        denom: String,
+        shard_id: u64,
+    },
+    ObserveAllBankBalances {
+        account: String,
+        shard_id: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ConflictLabQueryMsg {
+    Config {},
     Balance { account: String },
+    Allowance { owner: String, spender: String },
+    Counter { shard_id: u64 },
+    Order { order_id: u64 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -719,13 +1423,18 @@ impl NativeContract for ConflictLabRuntime {
         _info: MessageInfo,
         msg: Binary,
     ) -> Result<Response<Empty>, String> {
+        let message: ConflictLabExecuteMsg =
+            serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
         let ConflictLabExecuteMsg::Credit {
             account,
             amount,
             work_iterations,
             storage_rounds,
             payload,
-        } = serde_json::from_slice(msg.as_slice()).map_err(|error| error.to_string())?;
+        } = message
+        else {
+            return Err("native ConflictLab runtime supports only credit operation_mix".to_owned());
+        };
         let effective_account =
             opaque_account_from_payload(payload.as_slice()).unwrap_or(account.as_str());
         let key = format!("balance/{effective_account}");
@@ -775,6 +1484,7 @@ impl NativeContract for ConflictLabRuntime {
                 })
                 .map_err(|error| error.to_string())
             }
+            _ => Err("native ConflictLab runtime supports only balance queries".to_owned()),
         }
     }
 
@@ -796,26 +1506,32 @@ struct WorkShape {
 }
 
 fn light_work_shape() -> WorkShape {
+    // Intended to represent cheap transfer/storage-heavy transactions: tens of microseconds on
+    // the reference host once the Wasm instance is warm. Exact service time is reported per run.
     WorkShape {
-        work_iterations: 4_096,
+        work_iterations: 8_192,
         storage_rounds: 1,
-        payload_bytes: 64,
+        payload_bytes: 96,
     }
 }
 
 fn medium_work_shape() -> WorkShape {
+    // Mid-range contract/application transaction. The benchmark reports measured service time
+    // rather than claiming this synthetic tier maps to one particular chain.
     WorkShape {
-        work_iterations: 32_768,
-        storage_rounds: 2,
-        payload_bytes: 256,
+        work_iterations: 131_072,
+        storage_rounds: 3,
+        payload_bytes: 512,
     }
 }
 
 fn heavy_work_shape() -> WorkShape {
+    // Expensive application/contract transaction, deliberately large enough that B512 can cross
+    // the 250 ms consensus cutoff on serialized/high-contention schedules.
     WorkShape {
-        work_iterations: 262_144,
-        storage_rounds: 4,
-        payload_bytes: 1_024,
+        work_iterations: 786_432,
+        storage_rounds: 6,
+        payload_bytes: 2_048,
     }
 }
 
@@ -825,8 +1541,12 @@ struct GenerateBlockConfig {
     first_transaction_id: u64,
     height: u64,
     selection_seed: u64,
+    code_id: CodeId,
     prediction_quality: PredictionQuality,
     prediction_buckets: u16,
+    prediction_fault_mode: PredictionFaultMode,
+    prediction_fault_rate_bps: u16,
+    operation_mix: OperationMix,
     work: WorkShape,
     complexity_mix: ComplexityMix,
     simulation: SimulationConfig,
@@ -837,85 +1557,40 @@ fn generate_block(
     generator: &mut ConflictLabGenerator,
     config: GenerateBlockConfig,
 ) -> Result<ProducedBlock, HarnessError> {
-    let GenerateBlockConfig {
-        offered_transactions,
-        first_transaction_id,
-        height,
-        selection_seed,
-        prediction_quality,
-        prediction_buckets,
-        work,
-        complexity_mix,
-        simulation,
-    } = config;
     let mempool = Mempool::default();
     let mut ingress = RateControlledIngress::new(
         IngressConfig {
-            transactions_per_second: simulation.admission_tps,
+            transactions_per_second: config.simulation.admission_tps,
         },
         0,
     )
     .map_err(|error| HarnessError::Runtime(error.to_string()))?;
 
-    for offset in 0..offered_transactions {
-        let transaction_id = first_transaction_id
+    for offset in 0..config.offered_transactions {
+        let transaction_id = config
+            .first_transaction_id
             .saturating_add(u64::try_from(offset).map_err(|_| HarnessError::NumericOverflow)?);
-        let actual_account = generator.next_account();
-        let mut selector_rng = SplitMix64::new(transaction_id ^ selection_seed);
-        let transaction_work = complexity_mix.work_shape(work, selector_rng.next_u64());
-        let base_payload = deterministic_payload(
-            transaction_work.payload_bytes,
-            transaction_id ^ selection_seed,
-        );
-        let (account, payload) = match prediction_quality {
-            PredictionQuality::Exact | PredictionQuality::Coarse => (actual_account, base_payload),
-            PredictionQuality::Bucketed => {
-                let bucket = prediction_bucket(&actual_account, prediction_buckets);
-                (
-                    format!("bucket-{bucket}"),
-                    bucketed_payload(&actual_account, base_payload),
-                )
-            }
-            PredictionQuality::Opaque => (
-                format!("prediction-{transaction_id}"),
-                opaque_payload(&actual_account, base_payload),
-            ),
-        };
-        let request = ExecutionRequest::Execute {
-            transaction_id: TransactionId(transaction_id),
-            sender: Address::new("client"),
-            contract: contract.clone(),
-            funds: Vec::new(),
-            msg: to_json_binary(&ConflictLabExecuteMsg::Credit {
-                account,
-                amount: Uint128::new(1),
-                work_iterations: transaction_work.work_iterations,
-                storage_rounds: transaction_work.storage_rounds,
-                payload: Binary::from(payload),
-            })
-            .map_err(|error| HarnessError::Runtime(error.to_string()))?,
-        };
+        let request = generate_request(contract, generator, config, offset, transaction_id)?;
         ingress.enqueue(request);
     }
 
-    let block_interval = Duration::from_millis(simulation.block_interval_ms);
+    let block_interval = Duration::from_millis(config.simulation.block_interval_ms);
     let interval_nanos = block_interval.as_nanos().min(u128::from(u64::MAX)) as u64;
     ingress.pump_until(interval_nanos, &mempool);
     if mempool.is_empty() {
         return Err(HarnessError::WorkloadParameter(format!(
-            "sim.admission_tps={} and sim.block_interval_ms={} admit no transactions in one \
-             block window",
-            simulation.admission_tps, simulation.block_interval_ms
+            "sim.admission_tps={} and sim.block_interval_ms={} admit no transactions in one block window",
+            config.simulation.admission_tps, config.simulation.block_interval_ms
         )));
     }
     let producer_config = BlockProducerConfig {
         block_interval,
-        first_block_height: height,
+        first_block_height: config.height,
         first_block_time_nanos: interval_nanos,
-        max_transactions_per_block: Some(simulation.block_size),
+        max_transactions_per_block: Some(config.simulation.block_size),
         ..BlockProducerConfig::default()
     };
-    let block = match simulation.mempool_policy {
+    let block = match config.simulation.mempool_policy {
         MempoolPolicy::Fifo => BlockProducer::fifo(producer_config)
             .map_err(|error| HarnessError::Runtime(error.to_string()))?
             .produce_next(&mempool),
@@ -923,7 +1598,7 @@ fn generate_block(
             .map_err(|error| HarnessError::Runtime(error.to_string()))?
             .produce_next(&mempool),
         MempoolPolicy::SeededShuffle => {
-            { BlockProducer::seeded_shuffle(producer_config, selection_seed) }
+            { BlockProducer::seeded_shuffle(producer_config, config.selection_seed) }
                 .map_err(|error| HarnessError::Runtime(error.to_string()))?
                 .produce_next(&mempool)
         }
@@ -934,6 +1609,400 @@ fn generate_block(
         ));
     }
     Ok(block)
+}
+
+fn generate_request(
+    contract: &Address,
+    generator: &mut ConflictLabGenerator,
+    config: GenerateBlockConfig,
+    offset: usize,
+    transaction_id: u64,
+) -> Result<ExecutionRequest, HarnessError> {
+    let actual_account = generator.next_account();
+    let mut selector_rng = SplitMix64::new(transaction_id ^ config.selection_seed);
+    let selector = selector_rng.next_u64();
+    let transaction_work = config
+        .complexity_mix
+        .work_shape(config.work, selector_rng.next_u64());
+    let base_payload = deterministic_payload(
+        transaction_work.payload_bytes,
+        transaction_id ^ config.selection_seed,
+    );
+
+    let credit = |sender: Address, funds: Vec<Coin>| -> Result<ExecutionRequest, HarnessError> {
+        let (account, payload) = predicted_credit_binding(
+            &actual_account,
+            base_payload.clone(),
+            transaction_id,
+            PredictionBindingConfig {
+                quality: config.prediction_quality,
+                buckets: config.prediction_buckets,
+                fault_mode: config.prediction_fault_mode,
+                fault_rate_bps: config.prediction_fault_rate_bps,
+                selection_seed: config.selection_seed,
+            },
+        );
+        Ok(ExecutionRequest::Execute {
+            transaction_id: TransactionId(transaction_id),
+            sender,
+            contract: contract.clone(),
+            funds,
+            msg: to_json_binary(&ConflictLabExecuteMsg::Credit {
+                account,
+                amount: Uint128::new(1),
+                work_iterations: transaction_work.work_iterations,
+                storage_rounds: transaction_work.storage_rounds,
+                payload: Binary::from(payload),
+            })
+            .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+        })
+    };
+
+    if config.operation_mix == OperationMix::Instantiate {
+        return Ok(ExecutionRequest::Instantiate {
+            transaction_id: TransactionId(transaction_id),
+            sender: Address::new("creator"),
+            code_id: config.code_id,
+            admin: None,
+            label: format!("conflictlab-{transaction_id}"),
+            funds: Vec::new(),
+            msg: to_json_binary(&ConflictLabInstantiateMsg {
+                admin: None,
+                fee_bps: u16::try_from(transaction_id % 100).unwrap_or(0),
+                epoch: config.height,
+            })
+            .map_err(|error| HarnessError::Runtime(error.to_string()))?,
+        });
+    }
+
+    if config.operation_mix == OperationMix::BankFunds {
+        return credit(
+            Address::new(actual_account.clone()),
+            vec![Coin::new(1_u128, "uconflict")],
+        );
+    }
+
+    if config.operation_mix == OperationMix::BankMixed {
+        if offset % 2 == 0 {
+            return credit(
+                Address::new(actual_account.clone()),
+                vec![Coin::new(1_u128, "uconflict")],
+            );
+        }
+        let shard_id = selector % generator.accounts;
+        let message = if offset % 4 == 1 {
+            ConflictLabExecuteMsg::ObserveBankBalance {
+                account: actual_account,
+                denom: "uconflict".to_owned(),
+                shard_id,
+            }
+        } else {
+            ConflictLabExecuteMsg::ObserveAllBankBalances {
+                account: actual_account,
+                shard_id,
+            }
+        };
+        return execute_request(transaction_id, "observer", contract, message);
+    }
+
+    let request = match config.operation_mix {
+        OperationMix::Credit => return credit(Address::new("client"), Vec::new()),
+        OperationMix::PointMixed => match selector % 100 {
+            0..=54 => return credit(Address::new("client"), Vec::new()),
+            55..=69 => execute_request(
+                transaction_id,
+                "client",
+                contract,
+                ConflictLabExecuteMsg::IncrementCounter {
+                    shard_id: selector % generator.accounts,
+                },
+            )?,
+            70..=81 => execute_request(
+                transaction_id,
+                "client",
+                contract,
+                ConflictLabExecuteMsg::ConditionalCredit {
+                    account: actual_account.clone(),
+                    expected_epoch: 0,
+                    amount: Uint128::new(1),
+                },
+            )?,
+            82..=91 => execute_request(
+                transaction_id,
+                &actual_account,
+                contract,
+                ConflictLabExecuteMsg::Approve {
+                    owner: actual_account.clone(),
+                    spender: "spender".to_owned(),
+                    amount: Uint128::new(100),
+                },
+            )?,
+            _ => execute_request(
+                transaction_id,
+                "client",
+                contract,
+                ConflictLabExecuteMsg::ReceiveTransfer {
+                    account: actual_account.clone(),
+                    amount: Uint128::new(1),
+                },
+            )?,
+        },
+        OperationMix::StatefulMixed | OperationMix::Full => {
+            let phase = offset % 32;
+            let pair_owner = format!("account-{}", (offset / 32) as u64 % generator.accounts);
+            let pair_to = next_account_name(&pair_owner, generator.accounts, selector);
+            match phase {
+                24 => execute_request(
+                    transaction_id,
+                    "client",
+                    contract,
+                    ConflictLabExecuteMsg::CreateOrder {
+                        order_id: transaction_id,
+                        owner: pair_owner,
+                        amount: Uint128::new(1),
+                    },
+                )?,
+                25 => execute_request(
+                    transaction_id,
+                    &pair_owner,
+                    contract,
+                    ConflictLabExecuteMsg::CancelOrder {
+                        order_id: transaction_id.saturating_sub(1),
+                    },
+                )?,
+                26 => execute_request(
+                    transaction_id,
+                    &pair_owner,
+                    contract,
+                    ConflictLabExecuteMsg::Approve {
+                        owner: pair_owner.clone(),
+                        spender: "spender".to_owned(),
+                        amount: Uint128::new(100),
+                    },
+                )?,
+                27 => execute_request(
+                    transaction_id,
+                    "spender",
+                    contract,
+                    ConflictLabExecuteMsg::TransferFrom {
+                        owner: pair_owner,
+                        spender: "spender".to_owned(),
+                        to: pair_to,
+                        amount: Uint128::new(1),
+                    },
+                )?,
+                28 => execute_request(
+                    transaction_id,
+                    "creator",
+                    contract,
+                    ConflictLabExecuteMsg::SetFee {
+                        new_fee_bps: u16::try_from(selector % 1_000).unwrap_or(0),
+                    },
+                )?,
+                29 if config.operation_mix == OperationMix::Full => execute_request(
+                    transaction_id,
+                    "creator",
+                    contract,
+                    ConflictLabExecuteMsg::SetEpoch { new_epoch: 0 },
+                )?,
+                30 => execute_request(
+                    transaction_id,
+                    "client",
+                    contract,
+                    ConflictLabExecuteMsg::ReceiveTransfer {
+                        account: actual_account.clone(),
+                        amount: Uint128::new(1),
+                    },
+                )?,
+                _ => match selector % 100 {
+                    0..=39 => return credit(Address::new("client"), Vec::new()),
+                    40..=64 => {
+                        let to = next_account_name(&actual_account, generator.accounts, selector);
+                        execute_request(
+                            transaction_id,
+                            &actual_account,
+                            contract,
+                            ConflictLabExecuteMsg::Transfer {
+                                from: actual_account.clone(),
+                                to,
+                                amount: Uint128::new(1),
+                            },
+                        )?
+                    }
+                    65..=79 => execute_request(
+                        transaction_id,
+                        "client",
+                        contract,
+                        ConflictLabExecuteMsg::IncrementCounter {
+                            shard_id: selector % generator.accounts,
+                        },
+                    )?,
+                    80..=91 => execute_request(
+                        transaction_id,
+                        "client",
+                        contract,
+                        ConflictLabExecuteMsg::ConditionalCredit {
+                            account: actual_account.clone(),
+                            expected_epoch: 0,
+                            amount: Uint128::new(1),
+                        },
+                    )?,
+                    _ => return credit(Address::new("client"), Vec::new()),
+                },
+            }
+        }
+        OperationMix::RangeDelete => {
+            if offset == config.offered_transactions / 2 {
+                execute_request(
+                    transaction_id,
+                    "creator",
+                    contract,
+                    ConflictLabExecuteMsg::ResetAllBalances {},
+                )?
+            } else {
+                return credit(Address::new("client"), Vec::new());
+            }
+        }
+        OperationMix::BankFunds | OperationMix::BankMixed | OperationMix::Instantiate => {
+            unreachable!()
+        }
+    };
+    Ok(request)
+}
+
+fn execute_request(
+    transaction_id: u64,
+    sender: &str,
+    contract: &Address,
+    message: ConflictLabExecuteMsg,
+) -> Result<ExecutionRequest, HarnessError> {
+    Ok(ExecutionRequest::Execute {
+        transaction_id: TransactionId(transaction_id),
+        sender: Address::new(sender),
+        contract: contract.clone(),
+        funds: Vec::new(),
+        msg: to_json_binary(&message).map_err(|error| HarnessError::Runtime(error.to_string()))?,
+    })
+}
+
+fn next_account_name(account: &str, accounts: u64, selector: u64) -> String {
+    if accounts <= 1 {
+        return account.to_owned();
+    }
+    let mut account_id = selector.rotate_left(17) % accounts;
+    let candidate = format!("account-{account_id}");
+    if candidate == account {
+        account_id = (account_id + 1) % accounts;
+    }
+    format!("account-{account_id}")
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PredictionBindingConfig {
+    quality: PredictionQuality,
+    buckets: u16,
+    fault_mode: PredictionFaultMode,
+    fault_rate_bps: u16,
+    selection_seed: u64,
+}
+
+fn predicted_credit_binding(
+    actual_account: &str,
+    payload: Vec<u8>,
+    transaction_id: u64,
+    config: PredictionBindingConfig,
+) -> (String, Vec<u8>) {
+    // Hidden-key faults are transaction-local so they deliberately split true equivalence
+    // classes and exercise false-negative recovery. Spurious-key faults are selected by the
+    // actual logical key (stable within a block), so every occurrence of the same real key is
+    // coarsened consistently: this creates false positives without also hiding true conflicts.
+    let fault_sample = match config.fault_mode {
+        PredictionFaultMode::SpuriousKey => {
+            (u64::from(prediction_bucket(actual_account, BASIS_POINTS))
+                + config.selection_seed % u64::from(BASIS_POINTS))
+                % u64::from(BASIS_POINTS)
+        }
+        PredictionFaultMode::None | PredictionFaultMode::HiddenKey => {
+            SplitMix64::new(transaction_id ^ config.selection_seed ^ 0xF017_FA17).next_u64()
+                % u64::from(BASIS_POINTS)
+        }
+    };
+    if fault_sample < u64::from(config.fault_rate_bps) {
+        return match config.fault_mode {
+            PredictionFaultMode::None => (actual_account.to_owned(), payload),
+            PredictionFaultMode::HiddenKey => (
+                format!("fault-hidden-{transaction_id}"),
+                opaque_payload(actual_account, payload),
+            ),
+            PredictionFaultMode::SpuriousKey => (
+                "fault-spurious-hot".to_owned(),
+                opaque_payload(actual_account, payload),
+            ),
+        };
+    }
+
+    match config.quality {
+        PredictionQuality::Exact | PredictionQuality::Coarse => {
+            (actual_account.to_owned(), payload)
+        }
+        PredictionQuality::Bucketed => {
+            let bucket = prediction_bucket(actual_account, config.buckets);
+            (
+                format!("bucket-{bucket}"),
+                bucketed_payload(actual_account, payload),
+            )
+        }
+        PredictionQuality::Opaque => (
+            format!("prediction-{transaction_id}"),
+            opaque_payload(actual_account, payload),
+        ),
+    }
+}
+
+fn alternate_transaction_base(first_transaction_id: u64, height: u64) -> u64 {
+    1_000_000_000_u64
+        .saturating_add(height.saturating_mul(1_000_000))
+        .saturating_add(first_transaction_id)
+}
+
+fn divergence_count(len: usize, percent: usize) -> usize {
+    if len == 0 || percent == 0 {
+        0
+    } else {
+        len.saturating_mul(percent).saturating_add(99) / 100
+    }
+}
+
+fn apply_consensus_divergence(
+    predicted: &ProducedBlock,
+    alternate: &ProducedBlock,
+    divergence: ConsensusDivergence,
+) -> Result<ProducedBlock, HarnessError> {
+    if predicted.transactions.len() != alternate.transactions.len() {
+        return Err(HarnessError::Runtime(
+            "candidate and alternate block sizes differ".to_owned(),
+        ));
+    }
+    let mut decided = predicted.clone();
+    let len = decided.transactions.len();
+    let (replace_percent, reorder_percent) = match divergence {
+        ConsensusDivergence::Identical => (0, 0),
+        ConsensusDivergence::Tail5 => (5, 0),
+        ConsensusDivergence::Tail20 => (20, 0),
+        ConsensusDivergence::Reorder5 => (0, 5),
+        ConsensusDivergence::Reorder20 => (0, 20),
+        ConsensusDivergence::TailReorder10 => (10, 10),
+    };
+    let replace_count = divergence_count(len, replace_percent).min(len);
+    if replace_count > 0 {
+        let start = len - replace_count;
+        decided.transactions[start..].clone_from_slice(&alternate.transactions[start..]);
+    }
+    let reorder_count = divergence_count(len, reorder_percent).min(len);
+    if reorder_count > 1 {
+        decided.transactions[len - reorder_count..].reverse();
+    }
+    Ok(decided)
 }
 
 struct ConflictLabGenerator {
@@ -1044,4 +2113,135 @@ fn deterministic_work(iterations: u64, seed: u64, payload: &[u8]) -> u64 {
 fn append_bytes(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
     output.extend_from_slice(value);
+}
+
+#[cfg(test)]
+mod v1_evaluation_tests {
+    use super::*;
+
+    #[test]
+    fn symbolic_granularity_ablation_keeps_documents_normalizable() {
+        for granularity in [
+            SymbolicGranularity::Fine,
+            SymbolicGranularity::Resource,
+            SymbolicGranularity::Profile,
+        ] {
+            let bytes = conflictlab_symbolic(PredictionQuality::Exact, granularity).unwrap();
+            let document = parse_slice(&bytes).unwrap();
+            let context = IngestionContext::new(
+                RuntimeId::new("cosmwasm").unwrap(),
+                ContractCodeHash([7; 32]),
+                1,
+            );
+            let profiles = normalize_document(document, &context).unwrap();
+            let artifact =
+                ProfileGraphArtifact::compile(profiles, &EdgeBuildConfig::default()).unwrap();
+            let graph = ProfileGraph::load(artifact, GraphLoadConfig::default()).unwrap();
+            assert!(!graph.profiles().is_empty());
+            assert!(!graph.edges().is_empty());
+        }
+    }
+
+    #[test]
+    fn controlled_prediction_faults_change_prediction_without_changing_runtime_key() {
+        let actual = "account-7";
+        let payload = vec![1, 2, 3, 4];
+        let (hidden_prediction, hidden_payload) = predicted_credit_binding(
+            actual,
+            payload.clone(),
+            9,
+            PredictionBindingConfig {
+                quality: PredictionQuality::Exact,
+                buckets: 8,
+                fault_mode: PredictionFaultMode::HiddenKey,
+                fault_rate_bps: BASIS_POINTS,
+                selection_seed: 10,
+            },
+        );
+        assert_ne!(hidden_prediction, actual);
+        assert_eq!(opaque_account_from_payload(&hidden_payload), Some(actual));
+
+        let (spurious_prediction, spurious_payload) = predicted_credit_binding(
+            actual,
+            payload,
+            11,
+            PredictionBindingConfig {
+                quality: PredictionQuality::Exact,
+                buckets: 8,
+                fault_mode: PredictionFaultMode::SpuriousKey,
+                fault_rate_bps: BASIS_POINTS,
+                selection_seed: 12,
+            },
+        );
+        assert_eq!(spurious_prediction, "fault-spurious-hot");
+        assert_eq!(opaque_account_from_payload(&spurious_payload), Some(actual));
+
+        let selected = (0..100)
+            .map(|index| format!("account-{index}"))
+            .find(|account| {
+                predicted_credit_binding(
+                    account,
+                    Vec::new(),
+                    1,
+                    PredictionBindingConfig {
+                        quality: PredictionQuality::Exact,
+                        buckets: 8,
+                        fault_mode: PredictionFaultMode::SpuriousKey,
+                        fault_rate_bps: 5_000,
+                        selection_seed: 12,
+                    },
+                )
+                .0 == "fault-spurious-hot"
+            })
+            .expect("half-rate spurious fault selects at least one account");
+        let first = predicted_credit_binding(
+            &selected,
+            Vec::new(),
+            1,
+            PredictionBindingConfig {
+                quality: PredictionQuality::Exact,
+                buckets: 8,
+                fault_mode: PredictionFaultMode::SpuriousKey,
+                fault_rate_bps: 5_000,
+                selection_seed: 12,
+            },
+        );
+        let second = predicted_credit_binding(
+            &selected,
+            Vec::new(),
+            999_999,
+            PredictionBindingConfig {
+                quality: PredictionQuality::Exact,
+                buckets: 8,
+                fault_mode: PredictionFaultMode::SpuriousKey,
+                fault_rate_bps: 5_000,
+                selection_seed: 12,
+            },
+        );
+        assert_eq!(first.0, second.0);
+        assert_eq!(
+            opaque_account_from_payload(&first.1),
+            Some(selected.as_str())
+        );
+        assert_eq!(
+            opaque_account_from_payload(&second.1),
+            Some(selected.as_str())
+        );
+    }
+
+    #[test]
+    fn v1_operation_mix_axis_includes_runtime_semantics_cases() {
+        for value in [
+            "credit",
+            "point-mixed",
+            "stateful-mixed",
+            "range-delete",
+            "bank-funds",
+            "bank-mixed",
+            "instantiate",
+            "full",
+        ] {
+            assert_eq!(OperationMix::parse(value).unwrap().as_str(), value);
+        }
+    }
 }

@@ -175,6 +175,10 @@ fn manifest_runner_writes_stable_records_and_acceptance_files() {
 #[test]
 fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_execution() {
     let mut values = parameters();
+    values.insert(
+        "acg.compact_equivalence_groups".to_owned(),
+        "false".to_owned(),
+    );
     values.insert("acg.soft_threshold".to_owned(), "0.33".to_owned());
     values.insert("acg.hard_threshold".to_owned(), "0.91".to_owned());
     values.insert("acg.risk_budget".to_owned(), "0.12".to_owned());
@@ -205,10 +209,24 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
         "0.15".to_owned(),
     );
     values.insert(
+        "acg.serial_bypass_max_consecutive_bypasses".to_owned(),
+        "6".to_owned(),
+    );
+    values.insert(
+        "acg.pre_consensus_serialization_weight".to_owned(),
+        "0.75".to_owned(),
+    );
+    values.insert(
+        "acg.post_consensus_replay_weight".to_owned(),
+        "1.25".to_owned(),
+    );
+    values.insert("consensus_cutoff_ms".to_owned(), "500".to_owned());
+    values.insert(
         "acg.serialization_cost_reference_nanos".to_owned(),
         "500000".to_owned(),
     );
     let tuning = HarnessTuningConfig::from_parameters(&values).unwrap();
+    assert!(!tuning.planning_config.compact_equivalence_groups);
     assert_eq!(tuning.planning_config.scheduler.soft_threshold, 0.33);
     assert_eq!(tuning.planning_config.scheduler.hard_threshold, 0.91);
     assert_eq!(tuning.planning_config.scheduler.risk_budget, 0.12);
@@ -253,6 +271,28 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
     assert_eq!(
         tuning
             .planning_config
+            .serial_bypass
+            .max_consecutive_bypasses,
+        6
+    );
+    assert_eq!(
+        tuning
+            .planning_config
+            .cost_policy
+            .pre_consensus_serialization_weight,
+        0.75
+    );
+    assert_eq!(
+        tuning
+            .planning_config
+            .cost_policy
+            .post_consensus_replay_weight,
+        1.25
+    );
+    assert_eq!(tuning.consensus_cutoff.as_millis(), 500);
+    assert_eq!(
+        tuning
+            .planning_config
             .cost_policy
             .serialization_cost_reference_nanos,
         500_000
@@ -275,6 +315,18 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
     identity
         .parameters
         .insert("transactionz".to_owned(), "16".to_owned());
+    assert!(matches!(
+        ConflictLabWorkload.prepare(&identity),
+        Err(HarnessError::WorkloadParameter(_))
+    ));
+}
+
+#[test]
+fn non_credit_conflictlab_operation_mixes_require_real_wasm() {
+    let mut identity = run("static", 99);
+    identity
+        .parameters
+        .insert("operation_mix".to_owned(), "bank-mixed".to_owned());
     assert!(matches!(
         ConflictLabWorkload.prepare(&identity),
         Err(HarnessError::WorkloadParameter(_))
@@ -395,12 +447,106 @@ fn serial_bypass_skips_candidate_graph_after_losing_warmup_economics() {
     assert_eq!(record.planning.adapter_nanos, 0);
     assert_eq!(record.planning.candidate_graph_nanos, 0);
     assert_eq!(record.scheduling.candidate_edges, 0);
-    assert_eq!(record.execution.dependency_count, 0);
+    assert_eq!(record.execution.dependency_count, 31);
+    assert_eq!(record.execution.hard_dependency_count, 31);
     assert_eq!(record.execution.workers, 1);
-    assert_eq!(record.execution.canonical_transactions, 32);
+    assert_eq!(record.execution.max_in_flight, 1);
+    assert_eq!(record.execution.speculative_results, 32);
+    assert_eq!(record.execution.reused_results, 32);
+    assert_eq!(record.execution.canonical_transactions, 0);
+    assert_eq!(record.consensus.prepared_receipts, 32);
     assert_eq!(record.feedback.positive_observations, 0);
     assert_eq!(record.feedback.negative_observations, 0);
     assert_eq!(record.correctness.serial_equivalent, Some(true));
+}
+
+#[test]
+fn consensus_divergence_reconciles_candidate_preexecution_against_decided_order() {
+    let mut identity = run("probability-only", 15);
+    identity
+        .parameters
+        .insert("transactions".to_owned(), "32".to_owned());
+    identity
+        .parameters
+        .insert("accounts".to_owned(), "16".to_owned());
+    identity
+        .parameters
+        .insert("warmup_blocks".to_owned(), "1".to_owned());
+    identity.parameters.insert(
+        "consensus_divergence".to_owned(),
+        "reorder-20pct".to_owned(),
+    );
+    identity
+        .parameters
+        .insert("consensus_cutoff_ms".to_owned(), "250".to_owned());
+
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness
+        .run_manifest(&smoke_manifest(vec![identity]))
+        .unwrap();
+    let record = &outcome.records[0];
+    assert_eq!(record.correctness.serial_equivalent, Some(true));
+    assert_eq!(record.consensus.cutoff_nanos, 250_000_000);
+    assert_eq!(record.consensus.candidate_transactions, 32);
+    assert_eq!(record.consensus.decided_transactions, 32);
+    assert_eq!(record.consensus.shared_transactions, 32);
+    assert!(record.consensus.same_position_transactions < 32);
+    assert!(record.consensus.common_prefix_transactions < 32);
+
+    // Reordering changes the canonical transaction index exposed through CosmWasm Env. A receipt
+    // prepared at the old index therefore has a different block context and cannot be reused
+    // safely, even when the transaction ID and request are otherwise identical.
+    let moved_transactions = record
+        .consensus
+        .candidate_transactions
+        .saturating_sub(record.consensus.same_position_transactions);
+    assert!(moved_transactions > 0);
+    assert_eq!(record.execution.discarded_predictions, moved_transactions);
+    assert_eq!(record.execution.missing_predictions, moved_transactions);
+    assert_eq!(
+        record.execution.matched_transactions,
+        record.consensus.same_position_transactions
+    );
+}
+
+#[test]
+fn consensus_tail_replacement_discards_predictions_and_executes_decided_transactions() {
+    let mut identity = run("probability-only", 16);
+    identity
+        .parameters
+        .insert("transactions".to_owned(), "32".to_owned());
+    identity
+        .parameters
+        .insert("accounts".to_owned(), "16".to_owned());
+    identity
+        .parameters
+        .insert("warmup_blocks".to_owned(), "1".to_owned());
+    identity
+        .parameters
+        .insert("consensus_divergence".to_owned(), "tail-20pct".to_owned());
+    identity
+        .parameters
+        .insert("consensus_cutoff_ms".to_owned(), "250".to_owned());
+
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness
+        .run_manifest(&smoke_manifest(vec![identity]))
+        .unwrap();
+    let record = &outcome.records[0];
+    assert_eq!(record.correctness.serial_equivalent, Some(true));
+    assert_eq!(record.consensus.candidate_transactions, 32);
+    assert_eq!(record.consensus.decided_transactions, 32);
+    assert!(record.consensus.shared_transactions < 32);
+    assert_eq!(
+        record.consensus.same_position_transactions,
+        record.consensus.shared_transactions
+    );
+    assert_eq!(
+        record.consensus.common_prefix_transactions,
+        record.consensus.shared_transactions
+    );
+    assert!(record.execution.discarded_predictions > 0);
+    assert!(record.execution.missing_predictions > 0);
 }
 
 #[test]

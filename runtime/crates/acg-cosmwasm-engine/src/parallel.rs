@@ -426,6 +426,16 @@ impl ExecutionHotPathDiagnostics {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DependencyPreexecutionDiagnostics {
     pub executor_total: Duration,
+    /// Optional pre-consensus launch deadline applied to the dependency executor.
+    pub cutoff_budget: Option<Duration>,
+    /// Whether the deadline prevented at least one transaction from being launched.
+    pub cutoff_reached: bool,
+    /// Number of transactions for which a detached receipt was produced before returning.
+    pub completed_transactions: u64,
+    /// Receipts whose execution completed no later than the configured cutoff.
+    pub receipts_ready_by_cutoff: u64,
+    /// Receipts launched before cutoff but completed after the consensus deadline.
+    pub receipts_completed_after_cutoff: u64,
     pub dependency_plan_setup: Duration,
     pub worker_phase_wall: Duration,
     pub aggregate_ready_wait: Duration,
@@ -444,6 +454,11 @@ pub struct DependencyPreexecutionDiagnostics {
 impl DependencyPreexecutionDiagnostics {
     pub fn merge(&mut self, other: &Self) {
         self.executor_total += other.executor_total;
+        self.cutoff_budget = self.cutoff_budget.or(other.cutoff_budget);
+        self.cutoff_reached |= other.cutoff_reached;
+        self.completed_transactions += other.completed_transactions;
+        self.receipts_ready_by_cutoff += other.receipts_ready_by_cutoff;
+        self.receipts_completed_after_cutoff += other.receipts_completed_after_cutoff;
         self.dependency_plan_setup += other.dependency_plan_setup;
         self.worker_phase_wall += other.worker_phase_wall;
         self.aggregate_ready_wait += other.aggregate_ready_wait;

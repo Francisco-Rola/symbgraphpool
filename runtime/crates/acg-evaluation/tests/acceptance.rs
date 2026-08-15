@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, fs};
 
 use acg_evaluation::{
-    acceptance::read_records_jsonl, AcceptancePolicy, CorrectnessRecord, ExecutionRecord,
-    ExperimentAcceptanceStatus, ExperimentManifest, ExperimentMetadata, ExperimentRecord,
-    FeedbackRecord, FeedbackTimingRecord, ParallelismRecord, PerformanceAcceptancePolicy,
-    PipelineTimingRecord, PlanningRecord, RunAcceptanceStatus, RunIdentity, SchedulingRecord,
-    EXPERIMENT_RECORD_SCHEMA_VERSION,
+    acceptance::read_records_jsonl, AcceptancePolicy, AdaptiveStateRecord,
+    ConsensusExecutionRecord, CorrectnessRecord, ExecutionRecord, ExperimentAcceptanceStatus,
+    ExperimentManifest, ExperimentMetadata, ExperimentRecord, FeedbackRecord, FeedbackTimingRecord,
+    ParallelismRecord, PerformanceAcceptancePolicy, PipelineTimingRecord, PlanningRecord,
+    RunAcceptanceStatus, RunIdentity, SchedulingRecord, EXPERIMENT_RECORD_SCHEMA_VERSION,
 };
 
 fn complete_record() -> ExperimentRecord {
@@ -65,6 +65,8 @@ fn complete_record() -> ExperimentRecord {
         parallelism: ParallelismRecord {
             serial_equivalent_work_nanos: Some(10_000_000),
             serial_cost_dag_bound_nanos: Some(2_000_000),
+            perfect_conflict_dag_bound_nanos: Some(1_900_000),
+            perfect_conflict_parallel_lower_bound_nanos: Some(2_000_000),
             observed_service_dag_bound_nanos: Some(2_200_000),
             observed_service_work_nanos: Some(12_000_000),
             worker_capacity_bound_nanos: Some(2_000_000),
@@ -92,6 +94,7 @@ fn complete_record() -> ExperimentRecord {
             reconciliation_update_nanos: 500,
             total_nanos: 1_500,
         },
+        adaptive_state: AdaptiveStateRecord::default(),
         pipeline_timing: PipelineTimingRecord {
             planning_nanos: 70_000,
             preexecution_nanos: 2_300_000,
@@ -102,6 +105,7 @@ fn complete_record() -> ExperimentRecord {
             serial_reference_execution_nanos: Some(10_000_000),
             end_to_end_speedup_milli: Some(3_571),
         },
+        consensus: ConsensusExecutionRecord::default(),
         correctness: CorrectnessRecord {
             canonical_state_digest: Some("same-state".to_owned()),
             serial_reference_digest: Some("same-state".to_owned()),
@@ -350,18 +354,23 @@ fn schema_v2_plus_acceptance_requires_consistent_reduction_and_worker_bound_metr
 }
 
 #[test]
-fn schema_v3_acceptance_understands_true_serial_bypass_execution() {
+fn schema_v3_acceptance_understands_buffered_serial_bypass_preexecution() {
     let mut record = complete_record();
     record.planning.serial_bypassed = true;
     record.execution.workers = 1;
-    record.execution.dependency_count = 0;
-    record.execution.hard_dependency_count = 0;
+    record.scheduling.pre_reduction_dependencies = 199;
+    record.scheduling.scheduled_dependencies = 199;
+    record.scheduling.ordering_dependencies = 199;
+    record.scheduling.soft_dependencies = 0;
+    record.scheduling.hard_dependencies = 199;
+    record.execution.dependency_count = 199;
+    record.execution.hard_dependency_count = 199;
     record.execution.max_in_flight = 1;
-    record.execution.speculative_results = 0;
-    record.execution.reused_results = 0;
+    record.execution.speculative_results = 120;
+    record.execution.reused_results = 120;
     record.execution.invalidated_results = 0;
     record.execution.replayed_transactions = 0;
-    record.execution.canonical_transactions = record.execution.transactions;
+    record.execution.canonical_transactions = 80;
     let manifest = manifest_for(&record);
 
     let report = manifest.evaluate(std::slice::from_ref(&record));
@@ -369,7 +378,7 @@ fn schema_v3_acceptance_understands_true_serial_bypass_execution() {
     assert!(report.run_reports[0].issues.is_empty());
 
     let mut invalid = record;
-    invalid.execution.dependency_count = 1;
+    invalid.execution.max_in_flight = 2;
     let report = manifest.evaluate(&[invalid]);
     assert_eq!(
         report.status,
@@ -378,7 +387,57 @@ fn schema_v3_acceptance_understands_true_serial_bypass_execution() {
     assert!(report.run_reports[0]
         .issues
         .iter()
-        .any(|issue| issue.code == "serial_bypass_execution_dependencies"));
+        .any(|issue| issue.code == "serial_bypass_parallel_preexecution"));
+}
+
+#[test]
+fn schema_v3_acceptance_allows_missing_secondary_dag_diagnostics_after_speculative_failure() {
+    let mut record = complete_record();
+    record.parallelism.observed_service_dag_bound_nanos = None;
+    record.parallelism.observed_service_work_nanos = None;
+    record.parallelism.worker_capacity_bound_nanos = None;
+    record.parallelism.parallel_lower_bound_nanos = None;
+    record.parallelism.service_inflation_milli = None;
+    record.parallelism.scheduler_realization_milli = None;
+    record.parallelism.scheduler_realization_corrected_milli = None;
+    record.consensus = ConsensusExecutionRecord {
+        cutoff_nanos: 250_000_000,
+        candidate_transactions: 200,
+        decided_transactions: 200,
+        shared_transactions: 200,
+        same_position_transactions: 200,
+        common_prefix_transactions: 200,
+        prepared_receipts: 200,
+        successful_preexecution_receipts: Some(199),
+        failed_preexecution_receipts: Some(1),
+        receipts_ready_by_cutoff: 200,
+        receipts_completed_after_cutoff: 0,
+        cutoff_reached: false,
+        pre_consensus_nanos: 2_300_000,
+        pre_consensus_overrun_nanos: 0,
+        post_consensus_nanos: 400_000,
+        bottleneck_nanos: 2_300_000,
+        serial_validation_latency_nanos: Some(10_000_000),
+        validation_latency_speedup_milli: Some(25_000),
+        throughput_speedup_milli: Some(4_348),
+    };
+    let manifest = manifest_for(&record);
+
+    let report = manifest.evaluate(std::slice::from_ref(&record));
+    assert_eq!(report.status, ExperimentAcceptanceStatus::Accepted);
+    assert!(report.run_reports[0].issues.is_empty());
+
+    let mut bad_counts = record;
+    bad_counts.consensus.successful_preexecution_receipts = Some(198);
+    let report = manifest.evaluate(&[bad_counts]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "consensus_preexecution_status_count_mismatch"));
 }
 
 #[test]

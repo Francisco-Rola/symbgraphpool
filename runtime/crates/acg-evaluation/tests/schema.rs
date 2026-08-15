@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use acg_evaluation::{
-    CorrectnessRecord, ExecutionRecord, ExperimentMetadata, ExperimentRecord, FeedbackRecord,
-    FeedbackTimingRecord, ParallelismRecord, PipelineTimingRecord, PlanningRecord,
-    SchedulingRecord, EXPERIMENT_RECORD_SCHEMA_VERSION,
+    AdaptiveStateRecord, ConsensusExecutionRecord, CorrectnessRecord, ExecutionRecord,
+    ExperimentMetadata, ExperimentRecord, FeedbackRecord, FeedbackTimingRecord, ParallelismRecord,
+    PipelineTimingRecord, PlanningRecord, SchedulingRecord, EXPERIMENT_RECORD_SCHEMA_VERSION,
 };
 
 fn record() -> ExperimentRecord {
@@ -69,6 +69,7 @@ fn record() -> ExperimentRecord {
             reconciliation_update_nanos: 200,
             total_nanos: 500,
         },
+        adaptive_state: AdaptiveStateRecord::default(),
         pipeline_timing: PipelineTimingRecord {
             planning_nanos: 1_000,
             preexecution_nanos: 5_500,
@@ -79,6 +80,7 @@ fn record() -> ExperimentRecord {
             serial_reference_execution_nanos: Some(10_000),
             end_to_end_speedup_milli: Some(1_250),
         },
+        consensus: ConsensusExecutionRecord::default(),
         correctness: CorrectnessRecord {
             canonical_state_digest: Some("abc".to_owned()),
             serial_reference_digest: Some("abc".to_owned()),
@@ -97,6 +99,22 @@ fn experiment_record_json_is_deterministic_and_round_trips() {
 
     let restored = ExperimentRecord::from_json(&first).unwrap();
     assert_eq!(restored, record);
+}
+
+#[test]
+fn schema_v3_records_without_preexecution_status_accounting_remain_readable() {
+    let mut value = serde_json::to_value(record()).unwrap();
+    if let Some(consensus) = value
+        .get_mut("consensus")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        consensus.remove("successful_preexecution_receipts");
+        consensus.remove("failed_preexecution_receipts");
+    }
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let restored = ExperimentRecord::from_json(&bytes).unwrap();
+    assert_eq!(restored.consensus.successful_preexecution_receipts, None);
+    assert_eq!(restored.consensus.failed_preexecution_receipts, None);
 }
 
 #[test]

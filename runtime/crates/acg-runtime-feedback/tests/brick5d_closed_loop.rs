@@ -98,6 +98,7 @@ fn brick5d_closed_loop_hardens_after_expensive_replay_then_relaxes_after_phase_c
     let cost_policy = CostAwareEdgePolicyConfig {
         serialization_cost_reference_nanos: 250_000,
         invalidation_fanout_weight: 0.5,
+        ..CostAwareEdgePolicyConfig::default()
     };
     let scheduler = RiskBoundedSchedulerConfig {
         soft_threshold: 0.20,

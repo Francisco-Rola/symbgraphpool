@@ -467,6 +467,7 @@ fn replay_cost_changes_scheduling_risk_without_rewriting_raw_conflict_probabilit
     let cost_policy = CostAwareEdgePolicyConfig {
         serialization_cost_reference_nanos: 100_000,
         invalidation_fanout_weight: 1.0,
+        ..CostAwareEdgePolicyConfig::default()
     };
 
     let build_store = |replay_cost_nanos, invalidated_descendants| {
@@ -568,6 +569,7 @@ fn learned_serialization_cost_changes_risk_while_preserving_replay_and_probabili
     let cost_policy = CostAwareEdgePolicyConfig {
         serialization_cost_reference_nanos: 250_000,
         invalidation_fanout_weight: 0.5,
+        ..CostAwareEdgePolicyConfig::default()
     };
 
     let build_store = |serialization_cost_nanos| {
@@ -809,4 +811,25 @@ fn mature_soft_equivalence_clique_stays_compact_with_pairwise_schedule_semantics
         compact_schedule.pre_reduction_ordering_dependencies
             < pairwise_schedule.pre_reduction_ordering_dependencies
     );
+}
+
+#[test]
+fn consensus_phase_cost_weights_must_be_finite_and_positive() {
+    let invalid_pre = CostAwareEdgePolicyConfig {
+        pre_consensus_serialization_weight: 0.0,
+        ..CostAwareEdgePolicyConfig::default()
+    };
+    assert!(matches!(
+        invalid_pre.validate().unwrap_err(),
+        CandidateGraphError::InvalidPhaseWeight(value) if value == 0.0
+    ));
+
+    let invalid_post = CostAwareEdgePolicyConfig {
+        post_consensus_replay_weight: f64::NAN,
+        ..CostAwareEdgePolicyConfig::default()
+    };
+    assert!(matches!(
+        invalid_post.validate().unwrap_err(),
+        CandidateGraphError::InvalidPhaseWeight(value) if value.is_nan()
+    ));
 }

@@ -375,7 +375,7 @@ impl ExecutionRecord {
     ) -> Self {
         let diagnostics = &preexecution.dependency_diagnostics;
         Self {
-            transactions: preexecution.speculative.speculative_results,
+            transactions: reconciliation.prediction.decided_transactions,
             workers: u64::try_from(preexecution.workers).unwrap_or(u64::MAX),
             dependency_count: u64::try_from(preexecution.dependency_count).unwrap_or(u64::MAX),
             hard_dependency_count: u64::try_from(preexecution.hard_dependency_count)
@@ -441,6 +441,13 @@ impl ExecutionRecord {
 pub struct ParallelismReference {
     pub serial_equivalent_work_nanos: Option<u64>,
     pub serial_cost_dag_bound_nanos: Option<u64>,
+    /// Hindsight critical path from concrete serial-execution conflicts, oriented in canonical
+    /// transaction order. Evaluation-only lower bound for a perfect conflict oracle.
+    #[serde(default)]
+    pub perfect_conflict_dag_bound_nanos: Option<u64>,
+    /// Hindsight lower bound after also accounting for the configured worker capacity.
+    #[serde(default)]
+    pub perfect_conflict_parallel_lower_bound_nanos: Option<u64>,
 }
 
 impl ParallelismReference {
@@ -455,6 +462,8 @@ impl ParallelismReference {
         Self {
             serial_equivalent_work_nanos,
             serial_cost_dag_bound_nanos,
+            perfect_conflict_dag_bound_nanos: None,
+            perfect_conflict_parallel_lower_bound_nanos: None,
         }
     }
 }
@@ -463,6 +472,12 @@ impl ParallelismReference {
 pub struct ParallelismRecord {
     pub serial_equivalent_work_nanos: Option<u64>,
     pub serial_cost_dag_bound_nanos: Option<u64>,
+    /// Hindsight concrete-conflict critical path of the decided block.
+    #[serde(default)]
+    pub perfect_conflict_dag_bound_nanos: Option<u64>,
+    /// Hindsight concrete-conflict lower bound including worker capacity.
+    #[serde(default)]
+    pub perfect_conflict_parallel_lower_bound_nanos: Option<u64>,
     pub observed_service_dag_bound_nanos: Option<u64>,
     /// Sum of observed speculative transaction service times.
     #[serde(default)]
@@ -518,6 +533,9 @@ impl ParallelismRecord {
         Self {
             serial_equivalent_work_nanos: reference.serial_equivalent_work_nanos,
             serial_cost_dag_bound_nanos: reference.serial_cost_dag_bound_nanos,
+            perfect_conflict_dag_bound_nanos: reference.perfect_conflict_dag_bound_nanos,
+            perfect_conflict_parallel_lower_bound_nanos: reference
+                .perfect_conflict_parallel_lower_bound_nanos,
             observed_service_dag_bound_nanos,
             observed_service_work_nanos,
             worker_capacity_bound_nanos,
@@ -552,6 +570,9 @@ impl ParallelismRecord {
         Self {
             serial_equivalent_work_nanos: reference.serial_equivalent_work_nanos,
             serial_cost_dag_bound_nanos: reference.serial_cost_dag_bound_nanos,
+            perfect_conflict_dag_bound_nanos: reference.perfect_conflict_dag_bound_nanos,
+            perfect_conflict_parallel_lower_bound_nanos: reference
+                .perfect_conflict_parallel_lower_bound_nanos,
             observed_service_dag_bound_nanos,
             observed_service_work_nanos,
             worker_capacity_bound_nanos: observed_service_work_nanos,
@@ -685,11 +706,74 @@ impl From<ApplySummary> for FeedbackRecord {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ConsensusExecutionRecord {
+    /// Configured candidate-preexecution window before the consensus decision.
+    pub cutoff_nanos: u64,
+    pub candidate_transactions: u64,
+    pub decided_transactions: u64,
+    pub shared_transactions: u64,
+    pub same_position_transactions: u64,
+    pub common_prefix_transactions: u64,
+    /// Detached receipts produced by pre-execution before the executor returned.
+    pub prepared_receipts: u64,
+    /// Prepared receipts whose top-level speculative execution succeeded. Added after schema v3;
+    /// `None` means the producer predates explicit success/failure accounting.
+    #[serde(default)]
+    pub successful_preexecution_receipts: Option<u64>,
+    /// Prepared receipts whose top-level speculative execution failed. A failed receipt can still
+    /// be valid and reusable if its read dependencies remain valid; it is excluded from the
+    /// successful-only feedback timing report.
+    #[serde(default)]
+    pub failed_preexecution_receipts: Option<u64>,
+    /// Receipts whose contract execution completed no later than the consensus cutoff.
+    pub receipts_ready_by_cutoff: u64,
+    /// In-flight receipts launched before consensus but completed after the cutoff.
+    pub receipts_completed_after_cutoff: u64,
+    pub cutoff_reached: bool,
+    /// Work completed on the pre-consensus side of the boundary, capped at the cutoff.
+    pub pre_consensus_nanos: u64,
+    /// Pre-execution work that crossed the consensus boundary before reconciliation could start.
+    pub pre_consensus_overrun_nanos: u64,
+    /// Consensus-to-commit critical path: cutoff overrun + reconciliation + post feedback.
+    pub post_consensus_nanos: u64,
+    /// Slowest execution phase, used for the architecture's throughput comparison.
+    pub bottleneck_nanos: u64,
+    pub serial_validation_latency_nanos: Option<u64>,
+    pub validation_latency_speedup_milli: Option<u64>,
+    pub throughput_speedup_milli: Option<u64>,
+}
+
+impl ConsensusExecutionRecord {
+    pub fn with_serial_reference(mut self, serial_reference: Duration) -> Self {
+        let serial = nanos(serial_reference);
+        self.serial_validation_latency_nanos = Some(serial);
+        self.validation_latency_speedup_milli =
+            ratio_milli(serial, self.post_consensus_nanos.max(1));
+        self.throughput_speedup_milli = ratio_milli(serial, self.bottleneck_nanos.max(1));
+        self
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CorrectnessRecord {
     pub canonical_state_digest: Option<String>,
     pub serial_reference_digest: Option<String>,
     pub serial_equivalent: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AdaptiveStateRecord {
+    /// Immutable symbolic relationships represented by the profile graph.
+    pub static_relationships: u64,
+    /// Runtime-discovered fallback relationships retained after the measured block.
+    pub runtime_fallback_relationships: u64,
+    /// Relationships whose posterior has recorded at least one concrete candidate miss.
+    pub candidate_miss_history_relationships: u64,
+    /// Mean posterior conflict probability across static + runtime relationships, Q0.16.
+    pub mean_probability_q16: u64,
+    /// Mean posterior confidence across static + runtime relationships, Q0.16.
+    pub mean_confidence_q16: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -703,7 +787,11 @@ pub struct ExperimentRecord {
     pub feedback: FeedbackRecord,
     pub feedback_timing: FeedbackTimingRecord,
     #[serde(default)]
+    pub adaptive_state: AdaptiveStateRecord,
+    #[serde(default)]
     pub pipeline_timing: PipelineTimingRecord,
+    #[serde(default)]
+    pub consensus: ConsensusExecutionRecord,
     pub correctness: CorrectnessRecord,
 }
 
@@ -720,7 +808,9 @@ impl ExperimentRecord {
         parallelism_reference: ParallelismReference,
         feedback_summary: ApplySummary,
         feedback_timing: FeedbackTimingRecord,
+        adaptive_state: AdaptiveStateRecord,
         pipeline_timing: PipelineTimingRecord,
+        consensus: ConsensusExecutionRecord,
         correctness: CorrectnessRecord,
     ) -> Self {
         Self {
@@ -737,7 +827,9 @@ impl ExperimentRecord {
             execution: ExecutionRecord::from_reports(preexecution_metrics, reconciliation),
             feedback: feedback_summary.into(),
             feedback_timing,
+            adaptive_state,
             pipeline_timing,
+            consensus,
             correctness,
         }
     }
@@ -773,7 +865,9 @@ impl ExperimentRecord {
             ),
             feedback: FeedbackRecord::default(),
             feedback_timing: FeedbackTimingRecord::default(),
+            adaptive_state: AdaptiveStateRecord::default(),
             pipeline_timing,
+            consensus: ConsensusExecutionRecord::default(),
             correctness,
         }
     }

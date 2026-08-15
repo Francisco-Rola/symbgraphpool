@@ -12,8 +12,8 @@ use acg_cosmwasm_engine::{
     ParallelExecutionConfig, TransactionId,
 };
 use acg_evaluation::{
-    CorrectnessRecord, ExperimentMetadata, ExperimentRecord, FeedbackTimingRecord,
-    ParallelismReference, PipelineTimingRecord,
+    AdaptiveStateRecord, ConsensusExecutionRecord, CorrectnessRecord, ExperimentMetadata,
+    ExperimentRecord, FeedbackTimingRecord, ParallelismReference, PipelineTimingRecord,
 };
 use acg_feedback::{AdaptiveFeedbackConfig, ApplySummary};
 use acg_profile_graph::{EdgeBuildConfig, GraphLoadConfig, ProfileGraph, ProfileGraphArtifact};
@@ -154,6 +154,7 @@ fn setup() -> (
         feedback,
         AdaptivePlanningConfig {
             edge_materialization_threshold: 0.0,
+            compact_equivalence_groups: true,
             scheduler: RiskBoundedSchedulerConfig {
                 soft_threshold: 0.20,
                 hard_threshold: 0.80,
@@ -328,7 +329,9 @@ fn brick5e_learns_marginal_serialization_cost_and_emits_stable_record() {
             pre_feedback_duration,
             reconciliation_feedback_duration,
         ),
+        AdaptiveStateRecord::default(),
         PipelineTimingRecord::default(),
+        ConsensusExecutionRecord::default(),
         CorrectnessRecord {
             serial_equivalent: Some(true),
             ..CorrectnessRecord::default()

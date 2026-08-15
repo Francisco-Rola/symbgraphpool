@@ -17,7 +17,7 @@ fn context(code_byte: u8) -> IngestionContext {
 fn parses_conflictlab_profiles_and_expands_delegation() {
     let raw = parse_slice(CONFLICTLAB).unwrap();
     assert_eq!(raw.contract, "conflictlab");
-    assert_eq!(raw.profiles.len(), 18);
+    assert_eq!(raw.profiles.len(), 20);
 
     let profiles = normalize_document(raw, &context(21)).unwrap();
     let receive = profiles

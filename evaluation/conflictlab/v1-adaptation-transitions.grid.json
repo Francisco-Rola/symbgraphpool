@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "physical_core_limit": 6,
+  "record_schema_version": 3,
+  "policy_file": "../policies/release-tuning.json",
+  "base_run": {
+    "workload": "conflictlab",
+    "parameters": {
+      "execution_backend": "wasm",
+      "vm_instance_lifecycle": "reuse",
+      "prediction_buckets": "8",
+      "warmup_blocks": "8",
+      "postchange_warmup_blocks": "0",
+      "sim.admission_tps": "25000",
+      "sim.block_interval_ms": "2000",
+      "sim.mempool_policy": "fifo",
+      "acg.compact_equivalence_groups": "true",
+      "acg.soft_threshold": "0.20",
+      "acg.hard_threshold": "0.95",
+      "acg.risk_budget": "0.90",
+      "acg.feedback_retention_factor": "0.99",
+      "acg.feedback_confidence_scale": "20.0",
+      "acg.serial_bypass_min_transactions": "32",
+      "acg.serial_bypass_min_projected_speedup": "1.05",
+      "acg.serial_bypass_service_cost_reference_nanos_per_transaction": "150000",
+      "acg.serial_bypass_economics_ema_alpha": "0.35",
+      "acg.serial_bypass_min_economics_observations": "4",
+      "acg.serial_bypass_projected_speedup_hysteresis": "0.10",
+      "acg.serial_bypass_max_consecutive_bypasses": "4",
+      "acg.serialization_cost_reference_nanos": "250000",
+      "acg.invalidation_fanout_weight": "1.0",
+      "acg.pre_consensus_serialization_weight": "1.0",
+      "acg.post_consensus_replay_weight": "1.0",
+      "symbolic_granularity": "fine",
+      "prediction_fault_mode": "none",
+      "prediction_fault_rate_bps": "0",
+      "operation_mix": "credit",
+      "consensus_divergence": "identical",
+      "consensus_cutoff_ms": "250",
+      "prediction_quality": "bucketed"
+    }
+  },
+  "order_seed": 2026081707,
+  "experiment_id": "conflictlab-v1-adaptation-transitions",
+  "matrix": {
+    "modes": [
+      "probability-only",
+      "cost-aware"
+    ],
+    "workers": [
+      6
+    ],
+    "seeds": [
+      11,
+      47,
+      101
+    ],
+    "parameters": {
+      "postchange_warmup_blocks": [
+        "0",
+        "1",
+        "2",
+        "4",
+        "8",
+        "16"
+      ],
+      "acg.serial_bypass_enabled": [
+        "false",
+        "true"
+      ]
+    },
+    "cases": [
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "90pct",
+          "hot_account_probability_bps": "9000",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512",
+          "warmup_hot_account_probability_bps": "1000",
+          "warmup_work_iterations": "131072",
+          "warmup_storage_rounds": "3",
+          "warmup_payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "10pct",
+          "hot_account_probability_bps": "1000",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512",
+          "warmup_hot_account_probability_bps": "9000",
+          "warmup_work_iterations": "131072",
+          "warmup_storage_rounds": "3",
+          "warmup_payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "high",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "786432",
+          "storage_rounds": "6",
+          "payload_bytes": "2048",
+          "warmup_hot_account_probability_bps": "7500",
+          "warmup_work_iterations": "8192",
+          "warmup_storage_rounds": "1",
+          "warmup_payload_bytes": "96"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "low",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "8192",
+          "storage_rounds": "1",
+          "payload_bytes": "96",
+          "warmup_hot_account_probability_bps": "7500",
+          "warmup_work_iterations": "786432",
+          "warmup_storage_rounds": "6",
+          "warmup_payload_bytes": "2048"
+        }
+      }
+    ]
+  }
+}

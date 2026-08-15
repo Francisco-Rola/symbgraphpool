@@ -206,6 +206,7 @@ fn setup_with_runtime(
         feedback,
         AdaptivePlanningConfig {
             edge_materialization_threshold: 0.0,
+            compact_equivalence_groups: true,
             scheduler: RiskBoundedSchedulerConfig {
                 soft_threshold: 0.30,
                 hard_threshold: 0.70,

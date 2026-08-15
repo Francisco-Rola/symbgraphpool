@@ -16,6 +16,10 @@ METRICS = {
     "parallel_wall_ms": ("parallelism.actual_execution_wall_nanos", 1e-6),
     "serial_work_ms": ("parallelism.serial_equivalent_work_nanos", 1e-6),
     "serial_dag_ms": ("parallelism.serial_cost_dag_bound_nanos", 1e-6),
+    "perfect_conflict_dag_ms": ("parallelism.perfect_conflict_dag_bound_nanos", 1e-6),
+    "perfect_conflict_lower_bound_ms": ("parallelism.perfect_conflict_parallel_lower_bound_nanos", 1e-6),
+    "perfect_conflict_oracle_speedup": ("derived.perfect_conflict_oracle_speedup", 1.0),
+    "oracle_realization": ("derived.oracle_realization", 1.0),
     "observed_dag_ms": ("parallelism.observed_service_dag_bound_nanos", 1e-6),
     "observed_service_work_ms": ("parallelism.observed_service_work_nanos", 1e-6),
     "worker_capacity_bound_ms": ("parallelism.worker_capacity_bound_nanos", 1e-6),
@@ -30,6 +34,13 @@ METRICS = {
     "serial_bypass_mean_service_us": ("planning.serial_bypass_mean_service_nanos", 1e-3),
     "serial_bypass_admission_score": ("planning.serial_bypass_admission_score_milli", 1e-3),
     "feedback_ms": ("feedback_timing.total_nanos", 1e-6),
+    "adaptive_static_relationships": ("adaptive_state.static_relationships", 1.0),
+    "adaptive_runtime_fallback_relationships": ("adaptive_state.runtime_fallback_relationships", 1.0),
+    "adaptive_miss_history_relationships": ("adaptive_state.candidate_miss_history_relationships", 1.0),
+    "adaptive_mean_probability": ("adaptive_state.mean_probability_q16", 1.0 / 65535.0),
+    "adaptive_mean_confidence": ("adaptive_state.mean_confidence_q16", 1.0 / 65535.0),
+    "prediction_precision": ("derived.prediction_precision", 1.0),
+    "prediction_recall": ("derived.prediction_recall", 1.0),
     "pipeline_total_ms": ("pipeline_timing.total_adaptive_block_nanos", 1e-6),
     "pipeline_planning_ms": ("pipeline_timing.planning_nanos", 1e-6),
     "pipeline_preexecution_ms": ("pipeline_timing.preexecution_nanos", 1e-6),
@@ -56,6 +67,8 @@ METRICS = {
     "replayed_transactions": ("execution.replayed_transactions", 1.0),
     "invalidated_results": ("execution.invalidated_results", 1.0),
     "reused_results": ("execution.reused_results", 1.0),
+    "successful_preexecution_receipts": ("consensus.successful_preexecution_receipts", 1.0),
+    "failed_preexecution_receipts": ("consensus.failed_preexecution_receipts", 1.0),
     "candidate_edges": ("scheduling.candidate_edges", 1.0),
     "materialized_candidate_edges": ("scheduling.materialized_candidate_edges", 1.0),
     "candidate_materialization_compression": ("derived.candidate_materialization_compression", 1.0),
@@ -127,6 +140,32 @@ def derived_flat(record, preconsensus_window_ms=None):
     serial = flat.get("parallelism.serial_equivalent_work_nanos")
     flat["derived.parallel_speedup"] = (
         float(serial) / float(wall) if wall not in (None, 0) and serial is not None else None
+    )
+    oracle_bound = flat.get("parallelism.perfect_conflict_parallel_lower_bound_nanos")
+    flat["derived.perfect_conflict_oracle_speedup"] = (
+        float(serial) / float(oracle_bound)
+        if oracle_bound not in (None, 0) and serial is not None
+        else None
+    )
+    flat["derived.oracle_realization"] = (
+        float(wall) / float(oracle_bound)
+        if oracle_bound not in (None, 0) and wall is not None
+        else None
+    )
+    positives = flat.get("feedback.positive_observations")
+    negatives = flat.get("feedback.negative_observations")
+    misses = flat.get("feedback.candidate_misses")
+    precision_denominator = (positives or 0) + (negatives or 0)
+    recall_denominator = (positives or 0) + (misses or 0)
+    flat["derived.prediction_precision"] = (
+        float(positives) / float(precision_denominator)
+        if positives is not None and precision_denominator > 0
+        else None
+    )
+    flat["derived.prediction_recall"] = (
+        float(positives) / float(recall_denominator)
+        if positives is not None and recall_denominator > 0
+        else None
     )
     logical_candidates = flat.get("scheduling.candidate_edges")
     materialized_candidates = flat.get("scheduling.materialized_candidate_edges")

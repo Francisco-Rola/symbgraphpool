@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cosmwasm_std::{
     Addr, Attribute, BankMsg, Binary, BlockInfo, Coin, ContractInfo, ContractResult, CosmosMsg,
@@ -588,6 +588,28 @@ impl CosmWasmEngine {
         waves: Vec<SpeculativeWave>,
         dependencies: Vec<SpeculativeDependency>,
     ) -> EngineResult<PreparedSpeculativeBlock> {
+        self.preexecute_dependency_plan_from_snapshot_with_cutoff(
+            base,
+            config,
+            transactions,
+            waves,
+            dependencies,
+            None,
+        )
+    }
+
+    /// Deadline-aware pre-consensus dependency execution. The deadline stops *new launches*;
+    /// already-running contract calls are allowed to finish so no worker is cancelled mid-Wasm.
+    /// This makes the returned receipt set a real prefix/subset of work launched before consensus.
+    pub fn preexecute_dependency_plan_from_snapshot_with_cutoff(
+        &self,
+        base: &StateSnapshot,
+        config: ParallelExecutionConfig,
+        transactions: Vec<CanonicalTransaction>,
+        waves: Vec<SpeculativeWave>,
+        dependencies: Vec<SpeculativeDependency>,
+        cutoff: Option<Duration>,
+    ) -> EngineResult<PreparedSpeculativeBlock> {
         let executor_started = Instant::now();
         if !Arc::ptr_eq(&self.core, &base.core) {
             return Err(EngineError::InvalidConfiguration(
@@ -613,6 +635,8 @@ impl CosmWasmEngine {
                     hard_dependency_count: validated.hard_dependency_count,
                     dependency_diagnostics: DependencyPreexecutionDiagnostics {
                         executor_total: executor_started.elapsed(),
+                        cutoff_budget: cutoff,
+                        completed_transactions: 0,
                         dependency_plan_setup,
                         ..DependencyPreexecutionDiagnostics::default()
                     },
@@ -636,6 +660,7 @@ impl CosmWasmEngine {
                 completed: 0,
                 in_flight: 0,
                 max_in_flight: 0,
+                cutoff_reached: false,
                 failure: None,
             }),
             Condvar::new(),
@@ -659,6 +684,7 @@ impl CosmWasmEngine {
                 let worker_diagnostics = worker_diagnostics.clone();
                 let base_state = base.state.clone();
                 let worker_phase_origin = worker_phase_started;
+                let cutoff_origin = executor_started;
                 scope.spawn(move || {
                     let mut diagnostics = DependencyWorkerDiagnostics::default();
                     'worker: loop {
@@ -668,6 +694,13 @@ impl CosmWasmEngine {
                             let mut state = state_lock.lock();
                             loop {
                                 if state.failure.is_some() || state.completed == transaction_count {
+                                    break None;
+                                }
+                                if cutoff.is_some_and(|deadline| cutoff_origin.elapsed() >= deadline) {
+                                    if state.completed < transaction_count {
+                                        state.cutoff_reached = true;
+                                    }
+                                    ready_changed.notify_all();
                                     break None;
                                 }
                                 if let Some(index) = state.ready.pop_first() {
@@ -812,24 +845,44 @@ impl CosmWasmEngine {
         if let Some(failure) = state.failure.take() {
             return Err(EngineError::Internal(failure));
         }
-        if state.completed != transaction_count {
+        if state.completed != transaction_count && !state.cutoff_reached {
             return Err(EngineError::Internal(format!(
-                "dependency-driven speculative execution completed {} of {} transactions",
+                "dependency-driven speculative execution completed {} of {} transactions without reaching its cutoff",
                 state.completed, transaction_count
             )));
         }
         let max_in_flight = state.max_in_flight;
-        let mut ordered_receipts = Vec::with_capacity(transaction_count);
-        for (index, receipt) in state.receipts.iter_mut().enumerate() {
-            ordered_receipts.push(receipt.take().ok_or_else(|| {
-                EngineError::Internal(format!(
-                    "dependency-driven speculative execution did not produce receipt {index}"
-                ))
-            })?);
+        let cutoff_reached = state.cutoff_reached;
+        let completed_transactions = state.completed;
+        let mut ordered_receipts = Vec::with_capacity(completed_transactions);
+        for receipt in &mut state.receipts {
+            if let Some(receipt) = receipt.take() {
+                ordered_receipts.push(receipt);
+            }
         }
         drop(state);
 
+        let worker_phase_offset = worker_phase_started.duration_since(executor_started);
+        let receipts_ready_by_cutoff = cutoff.map_or(ordered_receipts.len(), |deadline| {
+            ordered_receipts
+                .iter()
+                .filter(|receipt| {
+                    worker_phase_offset
+                        .saturating_add(receipt.execution_timing.completed_after_phase)
+                        <= deadline
+                })
+                .count()
+        });
+        let receipts_completed_after_cutoff = ordered_receipts
+            .len()
+            .saturating_sub(receipts_ready_by_cutoff);
         let mut dependency_diagnostics = DependencyPreexecutionDiagnostics {
+            cutoff_budget: cutoff,
+            cutoff_reached,
+            completed_transactions: u64::try_from(completed_transactions).unwrap_or(u64::MAX),
+            receipts_ready_by_cutoff: u64::try_from(receipts_ready_by_cutoff).unwrap_or(u64::MAX),
+            receipts_completed_after_cutoff: u64::try_from(receipts_completed_after_cutoff)
+                .unwrap_or(u64::MAX),
             dependency_plan_setup,
             worker_phase_wall,
             max_in_flight,
@@ -870,6 +923,7 @@ impl CosmWasmEngine {
                 .saturating_sub(wasm_cache_before.misses),
         );
         dependency_diagnostics.executor_total = executor_started.elapsed();
+        let prepared_receipt_count = u64::try_from(ordered_receipts.len()).unwrap_or(u64::MAX);
 
         Ok(PreparedSpeculativeBlock {
             predicted_transactions: Arc::try_unwrap(transactions)
@@ -879,7 +933,7 @@ impl CosmWasmEngine {
                 workers: config.workers,
                 wave_widths,
                 speculative: SpeculativeExecutionMetrics {
-                    speculative_results: transaction_count as u64,
+                    speculative_results: prepared_receipt_count,
                     ..SpeculativeExecutionMetrics::default()
                 },
                 dependency_count: dependencies.len(),
@@ -912,6 +966,7 @@ impl CosmWasmEngine {
         }
 
         let predicted_count = prepared.predicted_transactions.len();
+        let prepared_receipt_count = prepared.receipts.len();
         let canonical_order_ids = transactions
             .iter()
             .map(CanonicalTransaction::transaction_id)
@@ -929,7 +984,7 @@ impl CosmWasmEngine {
         }
 
         let mut metrics = SpeculativeExecutionMetrics {
-            speculative_results: predicted_count as u64,
+            speculative_results: prepared_receipt_count as u64,
             ..SpeculativeExecutionMetrics::default()
         };
         let mut prediction = PredictionMatchMetrics {
@@ -1448,6 +1503,7 @@ struct DependencyExecutionState {
     completed: usize,
     in_flight: usize,
     max_in_flight: usize,
+    cutoff_reached: bool,
     failure: Option<String>,
 }
 

@@ -377,18 +377,23 @@ impl CandidateGraph {
 /// Brick 5D conversion from conflict probability + measured replay impact into scheduling risk.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CostAwareEdgePolicyConfig {
-    /// Fallback wall-time cost used until Brick 5E has confident learned serialization evidence.
-    /// The field name is retained for source compatibility with Brick 5D configuration.
+    /// Fallback pre-consensus serialization delay used until confident learned evidence exists.
     pub serialization_cost_reference_nanos: u64,
     /// Additional penalty per expected transitive invalidation descendant.
     pub invalidation_fanout_weight: f64,
+    /// Relative value of one nanosecond of pre-consensus serialization delay.
+    pub pre_consensus_serialization_weight: f64,
+    /// Relative value of one nanosecond of post-consensus replay/validation debt.
+    pub post_consensus_replay_weight: f64,
 }
 
 impl Default for CostAwareEdgePolicyConfig {
     fn default() -> Self {
         Self {
             serialization_cost_reference_nanos: 250_000,
-            invalidation_fanout_weight: 0.50,
+            invalidation_fanout_weight: 1.0,
+            pre_consensus_serialization_weight: 1.0,
+            post_consensus_replay_weight: 1.0,
         }
     }
 }
@@ -401,6 +406,20 @@ impl CostAwareEdgePolicyConfig {
         if !self.invalidation_fanout_weight.is_finite() || self.invalidation_fanout_weight < 0.0 {
             return Err(CandidateGraphError::InvalidInvalidationFanoutWeight(
                 self.invalidation_fanout_weight,
+            ));
+        }
+        if !self.pre_consensus_serialization_weight.is_finite()
+            || self.pre_consensus_serialization_weight <= 0.0
+        {
+            return Err(CandidateGraphError::InvalidPhaseWeight(
+                self.pre_consensus_serialization_weight,
+            ));
+        }
+        if !self.post_consensus_replay_weight.is_finite()
+            || self.post_consensus_replay_weight <= 0.0
+        {
+            return Err(CandidateGraphError::InvalidPhaseWeight(
+                self.post_consensus_replay_weight,
             ));
         }
         Ok(())
@@ -1104,13 +1123,23 @@ fn cost_adjusted_scheduling_risk(
     }
     let fanout_multiplier =
         1.0 + cost_policy.invalidation_fanout_weight * replay_cost.expected_invalidated_descendants;
-    let expected_speculation_penalty =
-        conflict_probability * replay_cost.expected_replay_cost_nanos * fanout_multiplier;
-    let serialization_reference = effective_serialization_cost_nanos(
+    let expected_post_consensus_debt = conflict_probability
+        * replay_cost.expected_replay_cost_nanos
+        * fanout_multiplier
+        * cost_policy.post_consensus_replay_weight;
+    let expected_pre_consensus_delay = effective_serialization_cost_nanos(
         serialization_cost,
         cost_policy.serialization_cost_reference_nanos,
-    );
-    let cost_risk = (expected_speculation_penalty / serialization_reference).clamp(0.0, 1.0);
+    ) * cost_policy.pre_consensus_serialization_weight;
+    // The scheduler is trying to minimize the slower side of the pre/post-consensus split. A
+    // normalized debt share is therefore a better risk signal than the old clamped ratio, which
+    // treated equal pre/post costs as maximally risky and over-serialized the pre-consensus path.
+    let phase_total = expected_post_consensus_debt + expected_pre_consensus_delay;
+    let cost_risk = if phase_total <= 0.0 {
+        conflict_probability
+    } else {
+        (expected_post_consensus_debt / phase_total).clamp(0.0, 1.0)
+    };
     (conflict_probability + replay_cost.confidence * (cost_risk - conflict_probability))
         .clamp(0.0, 1.0)
 }
@@ -1229,6 +1258,8 @@ pub enum CandidateGraphError {
     ZeroSerializationCostReference,
     #[error("Brick 5D invalidation fan-out weight must be finite and non-negative, got {0}")]
     InvalidInvalidationFanoutWeight(f64),
+    #[error("pre/post-consensus phase weights must be finite and greater than zero, got {0}")]
+    InvalidPhaseWeight(f64),
     #[error(transparent)]
     Feedback(#[from] FeedbackError),
 }

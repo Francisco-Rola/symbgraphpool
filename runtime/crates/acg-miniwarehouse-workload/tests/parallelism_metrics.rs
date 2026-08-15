@@ -890,6 +890,7 @@ fn adaptive_pipeline(
         feedback,
         AdaptivePlanningConfig {
             edge_materialization_threshold: measurement.edge_materialization_threshold,
+            compact_equivalence_groups: true,
             scheduler: RiskBoundedSchedulerConfig {
                 soft_threshold: measurement.soft_threshold,
                 hard_threshold: measurement.hard_threshold,

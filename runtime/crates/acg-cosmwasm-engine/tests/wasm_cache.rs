@@ -1,4 +1,6 @@
-use acg_cosmwasm_engine::{Address, BlockContext, CosmWasmEngine, TransactionId};
+use acg_cosmwasm_engine::{
+    Address, BlockContext, CosmWasmEngine, EngineConfig, TransactionId, WasmInstanceLifecycle,
+};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use cosmwasm_std::{to_json_binary, Binary, Coin};
 use serde_json::json;
@@ -7,7 +9,10 @@ const HACKATOM_BASE64: &str = include_str!("../testdata/hackatom_1.2.wasm.b64");
 
 #[test]
 fn upload_compiles_and_pins_wasm_for_later_calls() {
-    let engine = CosmWasmEngine::default();
+    let engine = CosmWasmEngine::new(EngineConfig {
+        wasm_instance_lifecycle: WasmInstanceLifecycle::Recycle,
+        ..EngineConfig::default()
+    });
     let compact: String = HACKATOM_BASE64.split_whitespace().collect();
     let wasm = STANDARD.decode(compact).unwrap();
     let code_id = engine.upload_wasm(wasm).unwrap();

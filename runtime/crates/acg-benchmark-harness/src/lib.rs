@@ -25,18 +25,20 @@ use acg_core::RuntimeId;
 use acg_cosmwasm_adapter::{CosmWasmAdapterConfig, CosmWasmCandidateAdapter};
 use acg_cosmwasm_engine::{CosmWasmEngine, ParallelExecutionConfig};
 use acg_evaluation::{
-    AcceptanceError, CorrectnessRecord, ExperimentAcceptanceReport, ExperimentManifest,
-    ExperimentMetadata, ExperimentRecord, ExperimentRecordError, FeedbackTimingRecord,
-    ParallelismReference, PipelineTimingRecord, RunIdentity,
+    AcceptanceError, AdaptiveStateRecord, ConsensusExecutionRecord, CorrectnessRecord,
+    ExperimentAcceptanceReport, ExperimentManifest, ExperimentMetadata, ExperimentRecord,
+    ExperimentRecordError, FeedbackTimingRecord, ParallelismReference, PipelineTimingRecord,
+    RunIdentity,
 };
 use acg_feedback::{AdaptiveFeedbackConfig, ApplySummary};
 use acg_profile_graph::ProfileGraph;
 use acg_runtime_feedback::{
-    AdaptiveBlockPlan, AdaptivePlanningConfig, AdaptiveSerialPipeline, RuntimeFeedbackEngine,
-    RuntimeFeedbackWeights, SerialBypassConfig, TraceConflictConfig,
+    AccessConflictDetector, AdaptiveBlockPlan, AdaptivePlanningConfig, AdaptiveSerialPipeline,
+    ObservedConflict, RuntimeFeedbackEngine, RuntimeFeedbackWeights, SerialBypassConfig,
+    TraceConflictConfig,
 };
 use acg_validator_sim::{
-    BlockExecutionReport, ExecutionPlan, ExecutionWave, ProducedBlock, SerialBlockExecutor,
+    BlockExecutionReport, ExecutionPlan, ExecutionWave, ProducedBlock,
     SpeculativeParallelBlockExecutor,
 };
 use serde::{Deserialize, Serialize};
@@ -80,7 +82,16 @@ pub trait PreparedBenchmark: Send {
     fn engine(&self) -> &CosmWasmEngine;
     fn profile_graph(&self) -> &ProfileGraph;
     fn warmup_blocks(&self) -> &[ProducedBlock];
+    /// Consensus-decided warmup blocks. Defaults to the predicted blocks for workloads without
+    /// candidate/decision divergence.
+    fn warmup_decided_blocks(&self) -> &[ProducedBlock] {
+        self.warmup_blocks()
+    }
     fn measured_block(&self) -> &ProducedBlock;
+    /// Consensus-decided measured block. Defaults to the predicted block.
+    fn measured_decided_block(&self) -> &ProducedBlock {
+        self.measured_block()
+    }
     fn canonical_state_bytes(&self) -> Result<Vec<u8>, HarnessError>;
 
     /// Extra workload-specific environment metadata copied into the stable experiment record.
@@ -243,34 +254,85 @@ impl BenchmarkHarness {
             },
         );
 
-        for block in adaptive.warmup_blocks() {
-            execute_adaptive_block(mode, &mut pipeline, graph, &executor, block, false)?;
+        if adaptive.warmup_blocks().len() != adaptive.warmup_decided_blocks().len() {
+            return Err(HarnessError::NonDeterministicTransactions);
+        }
+        for (predicted, decided) in adaptive
+            .warmup_blocks()
+            .iter()
+            .zip(adaptive.warmup_decided_blocks())
+        {
+            execute_adaptive_block(
+                &mut pipeline,
+                AdaptiveExecutionContext {
+                    mode,
+                    graph,
+                    parallel_executor: &executor,
+                    predicted_block: predicted,
+                    decided_block: decided,
+                    consensus_cutoff: tuning.consensus_cutoff,
+                    measured: false,
+                },
+            )?;
         }
 
         let measured = execute_adaptive_block(
-            mode,
             &mut pipeline,
-            graph,
-            &executor,
-            adaptive.measured_block(),
-            true,
+            AdaptiveExecutionContext {
+                mode,
+                graph,
+                parallel_executor: &executor,
+                predicted_block: adaptive.measured_block(),
+                decided_block: adaptive.measured_decided_block(),
+                consensus_cutoff: tuning.consensus_cutoff,
+                measured: true,
+            },
         )?
         .ok_or(HarnessError::MissingMeasuredArtifacts)?;
         let adaptive_state = adaptive.canonical_state_bytes()?;
         let correctness = CorrectnessRecord::from_state_bytes(&adaptive_state, &serial_state);
 
         let serial_services = serial_services(&serial_reference.report)?;
-        if serial_services.len() != measured.plan.candidate_graph.transactions().len() {
-            return Err(HarnessError::SerialReferenceShape {
-                serial_transactions: serial_services.len(),
-                measured_transactions: measured.plan.candidate_graph.transactions().len(),
-            });
-        }
         let serial_equivalent_work_nanos = nanos(serial_reference.wall);
-        let serial_cost_dag_bound_nanos = dag_bound_from_services(&measured.plan, &serial_services);
+        let concrete_conflicts = AccessConflictDetector::new(tuning.trace_config)
+            .detect(&serial_reference.report)
+            .map_err(display_error)?;
+        let perfect_conflict_dag_bound_nanos =
+            concrete_conflict_dag_bound(&serial_services, &concrete_conflicts)?;
+        let worker_count = u64::from(run.workers).max(1);
+        let perfect_worker_capacity_bound_nanos = ceil_div_u64(
+            serial_services
+                .iter()
+                .copied()
+                .fold(0_u64, u64::saturating_add),
+            worker_count,
+        );
+        let perfect_conflict_parallel_lower_bound_nanos =
+            perfect_conflict_dag_bound_nanos.max(perfect_worker_capacity_bound_nanos);
+        let same_candidate_and_decision = adaptive.measured_block().transactions
+            == adaptive.measured_decided_block().transactions;
+        let serial_cost_dag_bound_nanos = if same_candidate_and_decision {
+            if serial_services.len() != measured.plan.candidate_graph.transactions().len() {
+                return Err(HarnessError::SerialReferenceShape {
+                    serial_transactions: serial_services.len(),
+                    measured_transactions: measured.plan.candidate_graph.transactions().len(),
+                });
+            }
+            Some(dag_bound_from_services(&measured.plan, &serial_services))
+        } else {
+            // A candidate-DAG critical-path projection is not meaningful once consensus changes
+            // transaction identity or order. Keep the real decided-block serial wall, but omit the
+            // counterfactual DAG-bound diagnostic instead of pairing decided service times with
+            // unrelated candidate indices.
+            None
+        };
         let parallelism_reference = ParallelismReference {
             serial_equivalent_work_nanos: Some(serial_equivalent_work_nanos),
-            serial_cost_dag_bound_nanos: Some(serial_cost_dag_bound_nanos),
+            serial_cost_dag_bound_nanos,
+            perfect_conflict_dag_bound_nanos: Some(perfect_conflict_dag_bound_nanos),
+            perfect_conflict_parallel_lower_bound_nanos: Some(
+                perfect_conflict_parallel_lower_bound_nanos,
+            ),
         };
 
         let mut metadata = ExperimentMetadata {
@@ -297,34 +359,32 @@ impl BenchmarkHarness {
         let pipeline_timing = measured
             .pipeline_timing
             .with_serial_reference(serial_reference.wall);
-        let record = match &measured.execution {
-            MeasuredExecution::Speculative(execution) => ExperimentRecord::from_runtime(
-                metadata,
-                measured.planning_metrics,
-                pipeline.planning_config(),
-                &measured.plan,
-                &execution.preexecution_report,
-                &execution.preexecution_metrics,
-                &execution.reconciliation,
-                parallelism_reference,
-                measured.feedback_summary,
-                measured.feedback_timing,
-                pipeline_timing,
-                correctness,
-            ),
-            MeasuredExecution::SerialBypass(execution) => ExperimentRecord::from_serial_bypass(
-                metadata,
-                measured.planning_metrics,
-                pipeline.planning_config(),
-                &measured.plan,
-                &execution.report,
-                execution.execution_wall,
-                &execution.contract_diagnostics,
-                parallelism_reference,
-                pipeline_timing,
-                correctness,
-            ),
-        };
+        let consensus = measured
+            .consensus
+            .with_serial_reference(serial_reference.wall);
+        let execution = &measured.execution;
+        let adaptive_state = adaptive_state_record(
+            &pipeline,
+            graph,
+            adaptive.measured_decided_block().context.height,
+            &tuning.feedback_config,
+        )?;
+        let record = ExperimentRecord::from_runtime(
+            metadata,
+            measured.planning_metrics,
+            pipeline.planning_config(),
+            &measured.plan,
+            &execution.preexecution_report,
+            &execution.preexecution_metrics,
+            &execution.reconciliation,
+            parallelism_reference,
+            measured.feedback_summary,
+            measured.feedback_timing,
+            adaptive_state,
+            pipeline_timing,
+            consensus,
+            correctness,
+        );
         Ok(record)
     }
 }
@@ -339,12 +399,14 @@ pub struct HarnessTuningConfig {
     pub planning_config: AdaptivePlanningConfig,
     pub feedback_config: AdaptiveFeedbackConfig,
     pub trace_config: TraceConflictConfig,
+    pub consensus_cutoff: Duration,
 }
 
 impl HarnessTuningConfig {
     pub fn from_parameters(parameters: &BTreeMap<String, String>) -> Result<Self, HarnessError> {
         const ACG_KEYS: &[&str] = &[
             "acg.edge_materialization_threshold",
+            "acg.compact_equivalence_groups",
             "acg.soft_threshold",
             "acg.hard_threshold",
             "acg.risk_budget",
@@ -361,8 +423,11 @@ impl HarnessTuningConfig {
             "acg.serial_bypass_economics_ema_alpha",
             "acg.serial_bypass_min_economics_observations",
             "acg.serial_bypass_projected_speedup_hysteresis",
+            "acg.serial_bypass_max_consecutive_bypasses",
             "acg.serialization_cost_reference_nanos",
             "acg.invalidation_fanout_weight",
+            "acg.pre_consensus_serialization_weight",
+            "acg.post_consensus_replay_weight",
             "acg.feedback_retention_factor",
             "acg.feedback_confidence_scale",
             "acg.fallback_prior_probability",
@@ -384,6 +449,11 @@ impl HarnessTuningConfig {
                 parameters,
                 "acg.edge_materialization_threshold",
                 planning_default.edge_materialization_threshold,
+            )?,
+            compact_equivalence_groups: parameter(
+                parameters,
+                "acg.compact_equivalence_groups",
+                planning_default.compact_equivalence_groups,
             )?,
             scheduler: RiskBoundedSchedulerConfig {
                 soft_threshold: parameter(
@@ -449,6 +519,18 @@ impl HarnessTuningConfig {
                     "acg.invalidation_fanout_weight",
                     planning_default.cost_policy.invalidation_fanout_weight,
                 )?,
+                pre_consensus_serialization_weight: parameter(
+                    parameters,
+                    "acg.pre_consensus_serialization_weight",
+                    planning_default
+                        .cost_policy
+                        .pre_consensus_serialization_weight,
+                )?,
+                post_consensus_replay_weight: parameter(
+                    parameters,
+                    "acg.post_consensus_replay_weight",
+                    planning_default.cost_policy.post_consensus_replay_weight,
+                )?,
             },
             serial_bypass: SerialBypassConfig {
                 enabled: parameter(
@@ -488,6 +570,11 @@ impl HarnessTuningConfig {
                     "acg.serial_bypass_projected_speedup_hysteresis",
                     planning_default.serial_bypass.projected_speedup_hysteresis,
                 )?,
+                max_consecutive_bypasses: parameter(
+                    parameters,
+                    "acg.serial_bypass_max_consecutive_bypasses",
+                    planning_default.serial_bypass.max_consecutive_bypasses,
+                )?,
             },
         };
 
@@ -523,162 +610,233 @@ impl HarnessTuningConfig {
             )?,
         };
 
+        let consensus_cutoff_ms = parameter(parameters, "consensus_cutoff_ms", 500_u64)?;
+        if consensus_cutoff_ms == 0 {
+            return Err(HarnessError::WorkloadParameter(
+                "consensus_cutoff_ms must be greater than zero".to_owned(),
+            ));
+        }
+
         planning.validate().map_err(display_error)?;
         feedback.validate().map_err(display_error)?;
         Ok(Self {
             planning_config: planning,
             feedback_config: feedback,
             trace_config: trace,
+            consensus_cutoff: Duration::from_millis(consensus_cutoff_ms),
         })
     }
 }
 
-struct MeasuredSpeculativeExecution {
+struct MeasuredSplitExecution {
     preexecution_report: BlockExecutionReport,
     preexecution_metrics: acg_cosmwasm_engine::ParallelSpeculativeExecutionMetrics,
     reconciliation: acg_validator_sim::SplitPhaseSpeculativeExecutionReport,
 }
 
-struct MeasuredSerialBypassExecution {
-    report: BlockExecutionReport,
-    contract_diagnostics: acg_cosmwasm_engine::ContractExecutionDiagnostics,
-    execution_wall: Duration,
-}
-
-enum MeasuredExecution {
-    Speculative(Box<MeasuredSpeculativeExecution>),
-    SerialBypass(Box<MeasuredSerialBypassExecution>),
-}
-
 struct MeasuredAdaptiveBlock {
     plan: AdaptiveBlockPlan,
     planning_metrics: acg_runtime_feedback::AdaptivePlanningMetrics,
-    execution: MeasuredExecution,
+    execution: MeasuredSplitExecution,
     feedback_summary: ApplySummary,
     feedback_timing: FeedbackTimingRecord,
     pipeline_timing: PipelineTimingRecord,
+    consensus: ConsensusExecutionRecord,
+}
+
+struct AdaptiveExecutionContext<'a> {
+    mode: HarnessMode,
+    graph: &'a ProfileGraph,
+    parallel_executor: &'a SpeculativeParallelBlockExecutor,
+    predicted_block: &'a ProducedBlock,
+    decided_block: &'a ProducedBlock,
+    consensus_cutoff: Duration,
+    measured: bool,
 }
 
 fn execute_adaptive_block(
-    mode: HarnessMode,
     pipeline: &mut AdaptiveSerialPipeline,
-    graph: &ProfileGraph,
-    executor: &SpeculativeParallelBlockExecutor,
-    block: &ProducedBlock,
-    measured: bool,
+    context: AdaptiveExecutionContext<'_>,
 ) -> Result<Option<MeasuredAdaptiveBlock>, HarnessError> {
+    let AdaptiveExecutionContext {
+        mode,
+        graph,
+        parallel_executor,
+        predicted_block,
+        decided_block,
+        consensus_cutoff,
+        measured,
+    } = context;
     let total_started = Instant::now();
 
     let planning_started = Instant::now();
     let (plan, planning_metrics) = pipeline
-        .plan_block_with_metrics(executor.engine(), graph, block)
+        .plan_block_with_metrics(parallel_executor.engine(), graph, predicted_block)
         .map_err(display_error)?;
     let planning_wall = planning_started.elapsed();
 
-    if plan.serial_bypassed {
-        let execution_started = Instant::now();
-        let serial_executor = SerialBlockExecutor::new(executor.engine().clone());
-        let (report, contract_diagnostics) = serial_executor
-            .execute_with_diagnostics(block, &canonical_serial_plan(block.transactions.len()))
-            .map_err(display_error)?;
-        let execution_wall = execution_started.elapsed();
-        let total_adaptive_block_wall = total_started.elapsed();
-        pipeline.observe_block_economics(&report, total_adaptive_block_wall, true);
-        if !measured {
-            return Ok(None);
-        }
-        return Ok(Some(MeasuredAdaptiveBlock {
-            plan,
-            planning_metrics,
-            execution: MeasuredExecution::SerialBypass(Box::new(MeasuredSerialBypassExecution {
-                report,
-                contract_diagnostics,
-                execution_wall,
-            })),
-            feedback_summary: ApplySummary::default(),
-            feedback_timing: FeedbackTimingRecord::default(),
-            pipeline_timing: PipelineTimingRecord::from_durations(
-                planning_wall,
-                execution_wall,
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::ZERO,
-                total_adaptive_block_wall,
-            ),
-        }));
-    }
+    // A serial bypass is still ordinary detached pre-execution. It uses one worker and the
+    // canonical dependency chain, producing receipts against a private snapshot and committing
+    // nothing until the decided block is reconciled after consensus.
+    let serial_executor;
+    let executor = if plan.serial_bypassed {
+        serial_executor = SpeculativeParallelBlockExecutor::new(
+            parallel_executor.engine().clone(),
+            ParallelExecutionConfig { workers: 1 },
+        );
+        &serial_executor
+    } else {
+        parallel_executor
+    };
 
+    let remaining_budget = consensus_cutoff.saturating_sub(planning_wall);
     let preexecution_started = Instant::now();
     let prepared = executor
-        .prepare(block, &plan.speculative_execution_plan)
+        .prepare_with_cutoff(
+            predicted_block,
+            &plan.speculative_execution_plan,
+            remaining_budget,
+        )
         .map_err(display_error)?;
     let preexecution_metrics = prepared.metrics.clone();
+    let successful_preexecution_receipts = u64::try_from(
+        prepared
+            .receipts
+            .iter()
+            .filter(|receipt| receipt.is_success())
+            .count(),
+    )
+    .unwrap_or(u64::MAX);
+    let failed_preexecution_receipts = u64::try_from(
+        prepared
+            .receipts
+            .iter()
+            .filter(|receipt| !receipt.is_success())
+            .count(),
+    )
+    .unwrap_or(u64::MAX);
     let preexecution_report = executor
-        .pre_execution_report(block, &prepared)
+        .pre_execution_report(predicted_block, &prepared)
         .map_err(display_error)?;
     let preexecution_wall = preexecution_started.elapsed();
 
     let pre_feedback_started = Instant::now();
-    let pre_summary = match mode {
-        HarnessMode::Static => ApplySummary::default(),
-        HarnessMode::ProbabilityOnly => pipeline
-            .process_pre_execution_probability_only(
-                graph,
-                &plan,
-                &preexecution_report,
-                block.context.height,
-            )
-            .map_err(display_error)?,
-        HarnessMode::CostAware => pipeline
-            .process_pre_execution_report(graph, &plan, &preexecution_report, block.context.height)
-            .map_err(display_error)?,
+    let pre_summary = if plan.serial_bypassed {
+        ApplySummary::default()
+    } else {
+        match mode {
+            HarnessMode::Static => ApplySummary::default(),
+            HarnessMode::ProbabilityOnly => pipeline
+                .process_pre_execution_probability_only(
+                    graph,
+                    &plan,
+                    &preexecution_report,
+                    predicted_block.context.height,
+                )
+                .map_err(display_error)?,
+            HarnessMode::CostAware => pipeline
+                .process_pre_execution_report(
+                    graph,
+                    &plan,
+                    &preexecution_report,
+                    predicted_block.context.height,
+                )
+                .map_err(display_error)?,
+        }
     };
-    let pre_feedback_duration = if mode == HarnessMode::Static {
+    let pre_feedback_duration = if mode == HarnessMode::Static || plan.serial_bypassed {
         Duration::ZERO
     } else {
         pre_feedback_started.elapsed()
     };
 
+    let pre_consensus_eligible = planning_wall + preexecution_wall + pre_feedback_duration;
+    let pre_consensus = pre_consensus_eligible.min(consensus_cutoff);
+    let cutoff_overrun = pre_consensus_eligible.saturating_sub(consensus_cutoff);
+
     let reconciliation_started = Instant::now();
     let reconciliation = executor
-        .validate_prepared(block, prepared)
+        .validate_prepared(decided_block, prepared)
         .map_err(display_error)?;
     let reconciliation_wall = reconciliation_started.elapsed();
 
     let post_feedback_started = Instant::now();
-    let post_summary = match mode {
-        HarnessMode::Static => ApplySummary::default(),
-        HarnessMode::ProbabilityOnly => pipeline
-            .process_reconciliation_probability_only(
-                graph,
-                &plan,
-                &reconciliation,
-                block.context.height,
-            )
-            .map_err(display_error)?,
-        HarnessMode::CostAware => pipeline
-            .process_reconciliation_report(graph, &plan, &reconciliation, block.context.height)
-            .map_err(display_error)?,
+    let post_summary = if plan.serial_bypassed {
+        ApplySummary::default()
+    } else {
+        match mode {
+            HarnessMode::Static => ApplySummary::default(),
+            HarnessMode::ProbabilityOnly => pipeline
+                .process_reconciliation_probability_only(
+                    graph,
+                    &plan,
+                    &reconciliation,
+                    decided_block.context.height,
+                )
+                .map_err(display_error)?,
+            HarnessMode::CostAware => pipeline
+                .process_reconciliation_report(
+                    graph,
+                    &plan,
+                    &reconciliation,
+                    decided_block.context.height,
+                )
+                .map_err(display_error)?,
+        }
     };
-    let post_feedback_duration = if mode == HarnessMode::Static {
+    let post_feedback_duration = if mode == HarnessMode::Static || plan.serial_bypassed {
         Duration::ZERO
     } else {
         post_feedback_started.elapsed()
     };
+    let post_consensus = cutoff_overrun + reconciliation_wall + post_feedback_duration;
     let total_adaptive_block_wall = total_started.elapsed();
-    pipeline.observe_block_economics(&preexecution_report, total_adaptive_block_wall, false);
+
+    let estimated_serial_service_nanos =
+        estimated_serial_service_nanos(&preexecution_report, &reconciliation);
+    pipeline.observe_block_economics(
+        estimated_serial_service_nanos,
+        decided_block.transactions.len(),
+        pre_consensus,
+        post_consensus,
+        plan.serial_bypassed,
+    );
 
     if !measured {
         return Ok(None);
     }
+
+    let divergence = block_divergence_stats(predicted_block, decided_block);
+    let diagnostics = &preexecution_metrics.dependency_diagnostics;
+    let consensus = ConsensusExecutionRecord {
+        cutoff_nanos: nanos(consensus_cutoff),
+        candidate_transactions: u64::try_from(predicted_block.transactions.len())
+            .unwrap_or(u64::MAX),
+        decided_transactions: u64::try_from(decided_block.transactions.len()).unwrap_or(u64::MAX),
+        shared_transactions: divergence.shared_transactions,
+        same_position_transactions: divergence.same_position_transactions,
+        common_prefix_transactions: divergence.common_prefix_transactions,
+        prepared_receipts: preexecution_metrics.speculative.speculative_results,
+        successful_preexecution_receipts: Some(successful_preexecution_receipts),
+        failed_preexecution_receipts: Some(failed_preexecution_receipts),
+        receipts_ready_by_cutoff: diagnostics.receipts_ready_by_cutoff,
+        receipts_completed_after_cutoff: diagnostics.receipts_completed_after_cutoff,
+        cutoff_reached: diagnostics.cutoff_reached,
+        pre_consensus_nanos: nanos(pre_consensus),
+        pre_consensus_overrun_nanos: nanos(cutoff_overrun),
+        post_consensus_nanos: nanos(post_consensus),
+        bottleneck_nanos: nanos(pre_consensus.max(post_consensus)),
+        ..ConsensusExecutionRecord::default()
+    };
+
     Ok(Some(MeasuredAdaptiveBlock {
         plan,
         planning_metrics,
-        execution: MeasuredExecution::Speculative(Box::new(MeasuredSpeculativeExecution {
+        execution: MeasuredSplitExecution {
             preexecution_report,
             preexecution_metrics,
             reconciliation,
-        })),
+        },
         feedback_summary: merge_apply_summaries(pre_summary, post_summary),
         feedback_timing: FeedbackTimingRecord::from_durations(
             pre_feedback_duration,
@@ -692,7 +850,88 @@ fn execute_adaptive_block(
             post_feedback_duration,
             total_adaptive_block_wall,
         ),
+        consensus,
     }))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BlockDivergenceStats {
+    shared_transactions: u64,
+    same_position_transactions: u64,
+    common_prefix_transactions: u64,
+}
+
+fn block_divergence_stats(
+    predicted: &ProducedBlock,
+    decided: &ProducedBlock,
+) -> BlockDivergenceStats {
+    let predicted_ids = predicted
+        .transactions
+        .iter()
+        .map(|transaction| transaction.transaction_id())
+        .collect::<std::collections::BTreeSet<_>>();
+    let decided_ids = decided
+        .transactions
+        .iter()
+        .map(|transaction| transaction.transaction_id())
+        .collect::<std::collections::BTreeSet<_>>();
+    let shared_transactions =
+        u64::try_from(predicted_ids.intersection(&decided_ids).count()).unwrap_or(u64::MAX);
+    let same_position_transactions = u64::try_from(
+        predicted
+            .transactions
+            .iter()
+            .zip(&decided.transactions)
+            .filter(|(left, right)| left.transaction_id() == right.transaction_id())
+            .count(),
+    )
+    .unwrap_or(u64::MAX);
+    let common_prefix_transactions = u64::try_from(
+        predicted
+            .transactions
+            .iter()
+            .zip(&decided.transactions)
+            .take_while(|(left, right)| left.transaction_id() == right.transaction_id())
+            .count(),
+    )
+    .unwrap_or(u64::MAX);
+    BlockDivergenceStats {
+        shared_transactions,
+        same_position_transactions,
+        common_prefix_transactions,
+    }
+}
+
+fn estimated_serial_service_nanos(
+    preexecution: &BlockExecutionReport,
+    reconciliation: &acg_validator_sim::SplitPhaseSpeculativeExecutionReport,
+) -> u64 {
+    let pre_service = preexecution
+        .transactions
+        .iter()
+        .filter_map(|execution| {
+            execution.result.as_ref().ok().map(|_| {
+                (
+                    execution.transaction_id,
+                    nanos(execution.timing.service_duration),
+                )
+            })
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    reconciliation
+        .reconciliation
+        .iter()
+        .fold(0_u64, |total, diagnostic| {
+            let service = if diagnostic.reexecution_duration.is_zero() {
+                pre_service
+                    .get(&diagnostic.transaction_id)
+                    .copied()
+                    .unwrap_or(0)
+            } else {
+                nanos(diagnostic.reexecution_duration)
+            };
+            total.saturating_add(service)
+        })
 }
 
 struct SerialReference {
@@ -701,13 +940,13 @@ struct SerialReference {
 }
 
 fn run_serial_reference(prepared: &dyn PreparedBenchmark) -> Result<SerialReference, HarnessError> {
-    let executor = SerialBlockExecutor::new(prepared.engine().clone());
-    for block in prepared.warmup_blocks() {
+    let executor = acg_validator_sim::SerialBlockExecutor::new(prepared.engine().clone());
+    for block in prepared.warmup_decided_blocks() {
         executor
             .execute(block, &canonical_serial_plan(block.transactions.len()))
             .map_err(display_error)?;
     }
-    let block = prepared.measured_block();
+    let block = prepared.measured_decided_block();
     let started = Instant::now();
     let report = executor
         .execute(block, &canonical_serial_plan(block.transactions.len()))
@@ -735,7 +974,9 @@ fn ensure_deterministic_preparation(
     adaptive: &dyn PreparedBenchmark,
 ) -> Result<(), HarnessError> {
     if serial.warmup_blocks() != adaptive.warmup_blocks()
+        || serial.warmup_decided_blocks() != adaptive.warmup_decided_blocks()
         || serial.measured_block() != adaptive.measured_block()
+        || serial.measured_decided_block() != adaptive.measured_decided_block()
     {
         return Err(HarnessError::NonDeterministicTransactions);
     }
@@ -761,6 +1002,106 @@ fn serial_services(report: &BlockExecutionReport) -> Result<Vec<u64>, HarnessErr
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .ok_or(HarnessError::MalformedSerialReport)
+}
+
+fn adaptive_state_record(
+    pipeline: &AdaptiveSerialPipeline,
+    graph: &ProfileGraph,
+    epoch: u64,
+    config: &AdaptiveFeedbackConfig,
+) -> Result<AdaptiveStateRecord, HarnessError> {
+    let store = pipeline.feedback_store();
+    let mut relationship_count = 0_u64;
+    let mut probability_sum = 0.0_f64;
+    let mut confidence_sum = 0.0_f64;
+    let mut miss_history = 0_u64;
+    for edge in graph.edges() {
+        let estimate = store
+            .estimate_static_edge(edge.index, epoch, config)
+            .map_err(display_error)?;
+        relationship_count = relationship_count.saturating_add(1);
+        probability_sum += estimate.probability;
+        confidence_sum += estimate.confidence;
+        if estimate.has_candidate_miss_history() {
+            miss_history = miss_history.saturating_add(1);
+        }
+    }
+    for edge in store.fallback_edges() {
+        let estimate = store
+            .estimate_fallback_edge(edge.id, epoch, config)
+            .map_err(display_error)?;
+        relationship_count = relationship_count.saturating_add(1);
+        probability_sum += estimate.probability;
+        confidence_sum += estimate.confidence;
+        if estimate.has_candidate_miss_history() {
+            miss_history = miss_history.saturating_add(1);
+        }
+    }
+    let scale = f64::from(u16::MAX);
+    let mean_probability_q16 = if relationship_count == 0 {
+        0
+    } else {
+        ((probability_sum / relationship_count as f64) * scale)
+            .round()
+            .clamp(0.0, scale) as u64
+    };
+    let mean_confidence_q16 = if relationship_count == 0 {
+        0
+    } else {
+        ((confidence_sum / relationship_count as f64) * scale)
+            .round()
+            .clamp(0.0, scale) as u64
+    };
+    Ok(AdaptiveStateRecord {
+        static_relationships: u64::try_from(graph.edges().len()).unwrap_or(u64::MAX),
+        runtime_fallback_relationships: u64::try_from(store.fallback_edges().len())
+            .unwrap_or(u64::MAX),
+        candidate_miss_history_relationships: miss_history,
+        mean_probability_q16,
+        mean_confidence_q16,
+    })
+}
+
+fn concrete_conflict_dag_bound(
+    services: &[u64],
+    conflicts: &[ObservedConflict],
+) -> Result<u64, HarnessError> {
+    let mut predecessors = vec![Vec::<usize>::new(); services.len()];
+    for conflict in conflicts {
+        let left = conflict.left.0 as usize;
+        let right = conflict.right.0 as usize;
+        if left >= services.len() || right >= services.len() || left == right {
+            return Err(HarnessError::MalformedSerialReport);
+        }
+        let (predecessor, successor) = if left < right {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        predecessors[successor].push(predecessor);
+    }
+    for items in &mut predecessors {
+        items.sort_unstable();
+        items.dedup();
+    }
+    let mut completion = vec![0_u64; services.len()];
+    for transaction in 0..services.len() {
+        let predecessor_completion = predecessors[transaction]
+            .iter()
+            .map(|predecessor| completion[*predecessor])
+            .max()
+            .unwrap_or(0);
+        completion[transaction] = predecessor_completion.saturating_add(services[transaction]);
+    }
+    Ok(completion.into_iter().max().unwrap_or(0))
+}
+
+fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
+    if value == 0 {
+        0
+    } else {
+        1 + (value - 1) / divisor.max(1)
+    }
 }
 
 fn dag_bound_from_services(plan: &AdaptiveBlockPlan, services: &[u64]) -> u64 {

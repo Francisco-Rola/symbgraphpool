@@ -22,15 +22,15 @@ fn graph(bytes: &[u8], code_byte: u8) -> ProfileGraph {
 #[test]
 fn conflictlab_graph_has_expected_shape() {
     let graph = graph(CONFLICTLAB, 31);
-    assert_eq!(graph.profiles().len(), 18);
-    assert_eq!(graph.edges().len(), 63);
+    assert_eq!(graph.profiles().len(), 20);
+    assert_eq!(graph.edges().len(), 70);
     assert_eq!(
         graph
             .edges()
             .iter()
             .filter(|edge| edge.relation == EdgeRelation::Conditional)
             .count(),
-        46
+        53
     );
     assert_eq!(
         graph

@@ -96,3 +96,20 @@ The Phase-3 runner executes 864 system runs plus 108 focused exploration runs (9
 summary explicitly reports final ordering-DAG compression, bypass decisions, replay counts,
 serialization feedback batching, full-pipeline speedup, and Wasm instance acquire/recycle lifecycle
 cost per transaction and as a share of contract request execution.
+
+## ConflictLab 1.0 submission suite
+
+The current comprehensive internal-evidence suite is `v1-experimental-suite.md`. Historical Phase
+and release matrices above remain for provenance; new paper-mechanism analysis should use the
+versioned `v1-*.grid.json` campaigns and:
+
+```bash
+./scripts/run-conflictlab-v1-evaluation.sh
+```
+
+ConflictLab 1.0 adds `operation_mix` (`credit`, `point-mixed`, `stateful-mixed`, `range-delete`,
+`bank-funds`, `bank-mixed`, `instantiate`, `full`), `symbolic_granularity`
+(`fine`, `resource`, `profile`), controlled `prediction_fault_mode`/rate, post-change adaptation
+history, compact-group on/off reference runs, and binding 25/50/100/250/500 ms cutoff × decision
+-divergence campaigns. All 1.0 runs use real Wasm and six workers on the current machine. Hardware
+core-count and memory-capacity scaling are intentionally outside this first submission suite.

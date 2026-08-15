@@ -909,6 +909,79 @@
       ]
     },
     {
+      "entrypoint": "execute::ObserveBankBalance",
+      "input_parameters": [
+        "account",
+        "denom",
+        "shard_id"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "COUNTERS",
+          "key": {
+            "semantic_name": "shard_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "shard_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 1,
+            "end_line": 1,
+            "code": "Persists the observed bank-query result in COUNTERS[shard_id]; bank reads are runtime host-query dependencies."
+          },
+          "notes": [
+            "Bank-query dependency itself is intentionally runtime-observed rather than represented as contract storage."
+          ]
+        }
+      ],
+      "notes": [
+        "Exercises host bank-query dependency tracking in addition to symbolic contract-storage prediction."
+      ]
+    },
+    {
+      "entrypoint": "execute::ObserveAllBankBalances",
+      "input_parameters": [
+        "account",
+        "shard_id"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "COUNTERS",
+          "key": {
+            "semantic_name": "shard_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "shard_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/conflictlab/src/lib.rs",
+            "start_line": 1,
+            "end_line": 1,
+            "code": "Persists the observed bank-query result in COUNTERS[shard_id]; bank reads are runtime host-query dependencies."
+          },
+          "notes": [
+            "Bank-query dependency itself is intentionally runtime-observed rather than represented as contract storage."
+          ]
+        }
+      ],
+      "notes": [
+        "Exercises host bank-query dependency tracking in addition to symbolic contract-storage prediction."
+      ]
+    },
+    {
       "entrypoint": "query::Config",
       "input_parameters": [],
       "accesses": [

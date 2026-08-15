@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering},
     time::{Duration, Instant},
 };
 
@@ -18,7 +18,7 @@ use acg_profile_graph::ProfileGraph;
 use acg_validator_sim::{
     BlockExecutionError, BlockExecutionReport, ExecutionDependency, ExecutionDependencyClass,
     ExecutionPlan, ExecutionWave, ProducedBlock, SchedulingError as RuntimeSchedulingError,
-    SerialBlockExecutor, SplitPhaseSpeculativeExecutionReport,
+    SerialBlockExecutor, SplitPhaseSpeculativeExecutionReport, TransactionExecution,
 };
 use thiserror::Error;
 
@@ -43,6 +43,10 @@ pub struct SerialBypassConfig {
     pub min_economics_observations: u32,
     /// Entry/exit margin around `min_projected_speedup` used to prevent mode flapping.
     pub projected_speedup_hysteresis: f64,
+    /// Bound on consecutive serial pre-execution decisions before one adaptive block is forced
+    /// to refresh the counterfactual parallel economics. This is an admission re-probe, not
+    /// scheduler exploration: the probe still uses the normal symbolic graph and selected policy.
+    pub max_consecutive_bypasses: u32,
 }
 
 impl Default for SerialBypassConfig {
@@ -55,6 +59,7 @@ impl Default for SerialBypassConfig {
             economics_ema_alpha: 0.35,
             min_economics_observations: 4,
             projected_speedup_hysteresis: 0.10,
+            max_consecutive_bypasses: 4,
         }
     }
 }
@@ -89,6 +94,9 @@ impl SerialBypassConfig {
                 self.projected_speedup_hysteresis,
             ));
         }
+        if self.max_consecutive_bypasses == 0 {
+            return Err(AdaptivePipelineError::InvalidSerialBypassMaxConsecutive);
+        }
         Ok(())
     }
 }
@@ -99,6 +107,10 @@ pub struct AdaptivePlanningConfig {
     /// Posterior floor for unresolved `Unknown` static candidate relationships. Proven symbolic
     /// and runtime-discovered topology stays materialized so concrete evidence can soften it.
     pub edge_materialization_threshold: f64,
+    /// Evaluation/ablation switch for compact equivalence-group materialization. Production and
+    /// normal benchmark runs keep this enabled; disabling it builds the dense logical reference
+    /// graph so compact-vs-dense semantic equivalence and control-plane savings can be measured.
+    pub compact_equivalence_groups: bool,
     /// Hard/soft thresholds, risk budget and optional wave capacity from Brick 4C.
     pub scheduler: RiskBoundedSchedulerConfig,
     /// Brick 5D expected replay-cost policy used to turn posterior probability into scheduling risk.
@@ -112,6 +124,7 @@ impl Default for AdaptivePlanningConfig {
     fn default() -> Self {
         Self {
             edge_materialization_threshold: 0.05,
+            compact_equivalence_groups: true,
             scheduler: RiskBoundedSchedulerConfig::default(),
             cost_policy: CostAwareEdgePolicyConfig::default(),
             serial_bypass: SerialBypassConfig::default(),
@@ -125,7 +138,7 @@ impl AdaptivePlanningConfig {
             epoch: 0,
             edge_materialization_threshold: self.edge_materialization_threshold,
             cost_policy: self.cost_policy,
-            compact_immature_equivalence_edges: true,
+            compact_immature_equivalence_edges: self.compact_equivalence_groups,
             independent_observations_before_softening: self
                 .scheduler
                 .independent_observations_before_softening,
@@ -209,6 +222,14 @@ fn serial_bypass_threshold(config: SerialBypassConfig, active: bool) -> f64 {
     }
 }
 
+fn should_force_adaptive_probe(
+    config: SerialBypassConfig,
+    active: bool,
+    consecutive_bypasses: u32,
+) -> bool {
+    active && consecutive_bypasses >= config.max_consecutive_bypasses
+}
+
 /// One Brick 4D planning result before any speculative parallel executor exists.
 #[derive(Debug)]
 pub struct AdaptiveBlockPlan {
@@ -268,6 +289,7 @@ pub struct AdaptiveSerialPipeline {
     planning_config: AdaptivePlanningConfig,
     recent_economics: Option<RecentBlockEconomics>,
     serial_bypass_active: AtomicBool,
+    consecutive_serial_bypasses: AtomicU32,
 }
 
 impl AdaptiveSerialPipeline {
@@ -283,6 +305,7 @@ impl AdaptiveSerialPipeline {
             planning_config,
             recent_economics: None,
             serial_bypass_active: AtomicBool::new(false),
+            consecutive_serial_bypasses: AtomicU32::new(0),
         })
     }
 
@@ -364,22 +387,12 @@ impl AdaptiveSerialPipeline {
             return Ok(ApplySummary::default());
         }
 
-        let replayed_transactions = report
-            .reconciliation
-            .iter()
-            .filter(|diagnostic| diagnostic.disposition == CanonicalTxDisposition::Replayed)
-            .map(|diagnostic| {
-                Ok(TxIndex(
-                    u32::try_from(diagnostic.transaction_index).map_err(|_| {
-                        RuntimeFeedbackError::TransactionIndexOverflow(diagnostic.transaction_index)
-                    })?,
-                ))
-            })
-            .collect::<Result<BTreeSet<_>, RuntimeFeedbackError>>()?;
+        let (aligned_report, replayed_transactions) =
+            candidate_aligned_replay_report(plan, report)?;
         let replay_summary = self.feedback.process_replay_execution(
             profile_graph,
             &plan.candidate_graph,
-            &report.block,
+            &aligned_report,
             &replayed_transactions,
             epoch,
         )?;
@@ -426,22 +439,12 @@ impl AdaptiveSerialPipeline {
         // only emit observations for pairs containing at least one replayed transaction. This
         // captures replay-vs-reused evidence without double-counting reused-vs-reused pairs that
         // were already observed during pre-execution.
-        let replayed_transactions = report
-            .reconciliation
-            .iter()
-            .filter(|diagnostic| diagnostic.disposition == CanonicalTxDisposition::Replayed)
-            .map(|diagnostic| {
-                Ok(TxIndex(
-                    u32::try_from(diagnostic.transaction_index).map_err(|_| {
-                        RuntimeFeedbackError::TransactionIndexOverflow(diagnostic.transaction_index)
-                    })?,
-                ))
-            })
-            .collect::<Result<BTreeSet<_>, RuntimeFeedbackError>>()?;
+        let (aligned_report, replayed_transactions) =
+            candidate_aligned_replay_report(plan, report)?;
         let replay_summary = self.feedback.process_replay_execution(
             profile_graph,
             &plan.candidate_graph,
-            &report.block,
+            &aligned_report,
             &replayed_transactions,
             epoch,
         )?;
@@ -553,7 +556,7 @@ impl AdaptiveSerialPipeline {
                 epoch,
                 edge_materialization_threshold: self.planning_config.edge_materialization_threshold,
                 cost_policy: self.planning_config.cost_policy,
-                compact_immature_equivalence_edges: true,
+                compact_immature_equivalence_edges: self.planning_config.compact_equivalence_groups,
                 independent_observations_before_softening: self
                     .planning_config
                     .scheduler
@@ -598,27 +601,25 @@ impl AdaptiveSerialPipeline {
         ))
     }
 
-    /// Record whole adaptive-block economics for the next block's cheap bypass admission gate.
+    /// Record consensus-aware block economics for the next block's admission gate.
     ///
-    /// The numerator is serial-equivalent service work observed during execution. The denominator
-    /// is complete adaptive wall time. Both speedup and service complexity are smoothed with an EMA
-    /// so one noisy block cannot flip admission by itself.
+    /// Admission now optimizes the system objective directly: serial-equivalent service work
+    /// divided by the slower of the pre-consensus and post-consensus stages. This replaces the
+    /// Phase-5 complexity discount, which became stale once compact planning reduced control-plane
+    /// cost by an order of magnitude.
     pub fn observe_block_economics(
         &mut self,
-        report: &BlockExecutionReport,
-        adaptive_block_wall: Duration,
+        serial_service_nanos: u64,
+        transaction_count: usize,
+        pre_consensus: Duration,
+        post_consensus: Duration,
         serial_bypassed: bool,
     ) {
-        if report.transactions.is_empty() {
+        if transaction_count == 0 || serial_service_nanos == 0 {
             return;
         }
-        let serial_service_nanos = report.transactions.iter().fold(0_u64, |total, execution| {
-            total.saturating_add(duration_to_u64_nanos(execution.timing.service_duration))
-        });
-        let denominator = duration_to_u64_nanos(adaptive_block_wall).max(1);
-        let transaction_count = u64::try_from(report.transactions.len())
-            .unwrap_or(u64::MAX)
-            .max(1);
+        let denominator = duration_to_u64_nanos(pre_consensus.max(post_consensus)).max(1);
+        let transaction_count = u64::try_from(transaction_count).unwrap_or(u64::MAX).max(1);
         let sample_speedup = serial_service_nanos as f64 / denominator as f64;
         let sample_service = serial_service_nanos as f64 / transaction_count as f64;
         let alpha = self.planning_config.serial_bypass.economics_ema_alpha;
@@ -661,10 +662,10 @@ impl AdaptiveSerialPipeline {
             return None;
         }
         let recent = self.recent_economics?;
-        let complexity_factor = (recent.mean_service_nanos_per_transaction
-            / config.service_cost_reference_nanos_per_transaction as f64)
-            .clamp(0.0, 1.0);
-        let admission_score = recent.projected_speedup * complexity_factor;
+        // The projected speedup already includes planning, execution, replay and the consensus
+        // cutoff split. Do not discount cheap transactions a second time: Phase 5 showed that this
+        // caused false serial bypasses after planner compression made cheap parallel blocks viable.
+        let admission_score = recent.projected_speedup;
         Some(SerialBypassProjection {
             projected_speedup: recent.projected_speedup,
             mean_service_nanos_per_transaction: recent
@@ -681,13 +682,40 @@ impl AdaptiveSerialPipeline {
         if projection.observations < config.min_economics_observations {
             self.serial_bypass_active
                 .store(false, AtomicOrdering::Relaxed);
+            self.consecutive_serial_bypasses
+                .store(0, AtomicOrdering::Relaxed);
             return false;
         }
+
         let active = self.serial_bypass_active.load(AtomicOrdering::Relaxed);
+        if should_force_adaptive_probe(
+            config,
+            active,
+            self.consecutive_serial_bypasses
+                .load(AtomicOrdering::Relaxed),
+        ) {
+            // A serial block does not reveal the counterfactual adaptive throughput. Force one
+            // ordinary adaptive block periodically so the EMA can observe whether the regime has
+            // changed and release the bypass state. No candidate edge is explored beyond what the
+            // selected scheduling policy would normally admit.
+            self.serial_bypass_active
+                .store(false, AtomicOrdering::Relaxed);
+            self.consecutive_serial_bypasses
+                .store(0, AtomicOrdering::Relaxed);
+            return false;
+        }
+
         let threshold = serial_bypass_threshold(config, active);
         let bypass = projection.admission_score < threshold;
         self.serial_bypass_active
             .store(bypass, AtomicOrdering::Relaxed);
+        if bypass {
+            self.consecutive_serial_bypasses
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        } else {
+            self.consecutive_serial_bypasses
+                .store(0, AtomicOrdering::Relaxed);
+        }
         bypass
     }
 
@@ -846,6 +874,55 @@ fn visit_serialization_attributions(
     Ok(())
 }
 
+fn candidate_aligned_replay_report(
+    plan: &AdaptiveBlockPlan,
+    report: &SplitPhaseSpeculativeExecutionReport,
+) -> Result<(BlockExecutionReport, BTreeSet<TxIndex>), AdaptivePipelineError> {
+    let index_by_id = plan
+        .candidate_graph
+        .transactions()
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.tx_id.0, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut replayed = BTreeSet::new();
+    for diagnostic in &report.reconciliation {
+        if diagnostic.disposition != CanonicalTxDisposition::Replayed {
+            continue;
+        }
+        let Some(&candidate_index) = index_by_id.get(&diagnostic.transaction_id.0) else {
+            continue;
+        };
+        replayed.insert(TxIndex(u32::try_from(candidate_index).map_err(|_| {
+            RuntimeFeedbackError::TransactionIndexOverflow(candidate_index)
+        })?));
+    }
+
+    let mut transactions = Vec::new();
+    for execution in &report.block.transactions {
+        let Some(&candidate_index) = index_by_id.get(&execution.transaction_id.0) else {
+            continue;
+        };
+        let Ok(outcome) = &execution.result else {
+            continue;
+        };
+        transactions.push(TransactionExecution {
+            transaction_index: candidate_index,
+            transaction_id: execution.transaction_id,
+            result: Ok(outcome.clone()),
+            timing: execution.timing,
+        });
+    }
+    Ok((
+        BlockExecutionReport {
+            block_height: report.block.block_height,
+            block_time_nanos: report.block.block_time_nanos,
+            transactions,
+        },
+        replayed,
+    ))
+}
+
 fn reconciliation_attributions(
     plan: &AdaptiveBlockPlan,
     report: &SplitPhaseSpeculativeExecutionReport,
@@ -869,6 +946,13 @@ fn reconciliation_attributions(
         .map(|item| item.transaction_index)
         .collect::<BTreeSet<_>>();
 
+    let candidate_index_by_id = plan
+        .candidate_graph
+        .transactions()
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.tx_id.0, index))
+        .collect::<BTreeMap<_, _>>();
     let mut descendant_cache = BTreeMap::<usize, u32>::new();
     let mut attribution_ordinal_by_transaction = BTreeMap::<usize, usize>::new();
     let mut attributions = Vec::with_capacity(report.dependency_evidence.len());
@@ -882,13 +966,25 @@ fn reconciliation_attributions(
         let Some(conflict) = validation.conflicts().get(item.conflict_index) else {
             continue;
         };
-        let predecessor =
-            TxIndex(u32::try_from(item.predecessor_index).map_err(|_| {
-                RuntimeFeedbackError::TransactionIndexOverflow(item.predecessor_index)
-            })?);
+        let Some(predecessor_diagnostic) = report.reconciliation.get(item.predecessor_index) else {
+            continue;
+        };
+        let Some(&predecessor_candidate_index) =
+            candidate_index_by_id.get(&predecessor_diagnostic.transaction_id.0)
+        else {
+            continue;
+        };
+        let Some(&transaction_candidate_index) =
+            candidate_index_by_id.get(&transaction.transaction_id.0)
+        else {
+            continue;
+        };
+        let predecessor = TxIndex(u32::try_from(predecessor_candidate_index).map_err(|_| {
+            RuntimeFeedbackError::TransactionIndexOverflow(predecessor_candidate_index)
+        })?);
         let transaction_index =
-            TxIndex(u32::try_from(item.transaction_index).map_err(|_| {
-                RuntimeFeedbackError::TransactionIndexOverflow(item.transaction_index)
+            TxIndex(u32::try_from(transaction_candidate_index).map_err(|_| {
+                RuntimeFeedbackError::TransactionIndexOverflow(transaction_candidate_index)
             })?);
         let attribution_count = evidence_count_by_transaction
             .get(&item.transaction_index)
@@ -1098,6 +1194,8 @@ pub enum AdaptivePipelineError {
     InvalidSerialBypassEconomicsObservations,
     #[error("serial bypass hysteresis must be finite and non-negative, got {0}")]
     InvalidSerialBypassHysteresis(f64),
+    #[error("serial bypass maximum consecutive bypass count must be at least one")]
+    InvalidSerialBypassMaxConsecutive,
     #[error(
         "scheduled dependency {predecessor:?} -> {transaction:?} completed at {predecessor_completed_nanos}ns after successor started at {successor_started_nanos}ns"
     )]
@@ -1191,6 +1289,18 @@ mod tests {
             invalid_observations.validate().unwrap_err(),
             AdaptivePipelineError::InvalidSerialBypassEconomicsObservations
         ));
+
+        let invalid_bypass_streak = AdaptivePlanningConfig {
+            serial_bypass: SerialBypassConfig {
+                max_consecutive_bypasses: 0,
+                ..SerialBypassConfig::default()
+            },
+            ..AdaptivePlanningConfig::default()
+        };
+        assert!(matches!(
+            invalid_bypass_streak.validate().unwrap_err(),
+            AdaptivePipelineError::InvalidSerialBypassMaxConsecutive
+        ));
     }
 
     #[test]
@@ -1202,6 +1312,18 @@ mod tests {
         };
         assert!((serial_bypass_threshold(config, false) - 0.95).abs() < 1.0e-12);
         assert!((serial_bypass_threshold(config, true) - 1.15).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn serial_bypass_forces_a_bounded_counterfactual_refresh() {
+        let config = SerialBypassConfig {
+            max_consecutive_bypasses: 4,
+            ..SerialBypassConfig::default()
+        };
+        assert!(!should_force_adaptive_probe(config, false, 4));
+        assert!(!should_force_adaptive_probe(config, true, 3));
+        assert!(should_force_adaptive_probe(config, true, 4));
+        assert!(should_force_adaptive_probe(config, true, 9));
     }
 
     #[test]

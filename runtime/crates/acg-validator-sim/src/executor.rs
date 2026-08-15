@@ -239,6 +239,19 @@ impl SpeculativeParallelBlockExecutor {
         self.prepare_from_snapshot(&snapshot, block, plan)
     }
 
+    /// Pre-consensus execution with a real launch cutoff. Planning is expected to subtract its
+    /// own wall time before calling this method; the executor stops launching new transactions
+    /// once `cutoff` elapses, while already-running transactions are allowed to complete.
+    pub fn prepare_with_cutoff(
+        &self,
+        block: &ProducedBlock,
+        plan: &ExecutionPlan,
+        cutoff: Duration,
+    ) -> Result<PreparedSpeculativeBlock, BlockExecutionError> {
+        let snapshot = self.engine.snapshot();
+        self.prepare_from_snapshot_with_cutoff(&snapshot, block, plan, cutoff)
+    }
+
     /// Pre-consensus dependency-driven phase starting from an explicit predecessor snapshot.
     pub fn prepare_from_snapshot(
         &self,
@@ -257,6 +270,27 @@ impl SpeculativeParallelBlockExecutor {
         )?)
     }
 
+    pub fn prepare_from_snapshot_with_cutoff(
+        &self,
+        snapshot: &StateSnapshot,
+        block: &ProducedBlock,
+        plan: &ExecutionPlan,
+        cutoff: Duration,
+    ) -> Result<PreparedSpeculativeBlock, BlockExecutionError> {
+        let (canonical_transactions, speculative_waves, dependencies) =
+            split_phase_inputs(block, plan)?;
+        Ok(self
+            .engine
+            .preexecute_dependency_plan_from_snapshot_with_cutoff(
+                snapshot,
+                self.config,
+                canonical_transactions,
+                speculative_waves,
+                dependencies,
+                Some(cutoff),
+            )?)
+    }
+
     /// Build a concrete-access report from successful pre-consensus receipts without executing
     /// anything again. This is used by adaptive feedback so symbolic hard relationships can learn
     /// from the same speculative executions that produced the receipts.
@@ -265,25 +299,28 @@ impl SpeculativeParallelBlockExecutor {
         block: &ProducedBlock,
         prepared: &PreparedSpeculativeBlock,
     ) -> Result<BlockExecutionReport, BlockExecutionError> {
-        if prepared.predicted_transactions.len() != block.transactions.len()
-            || prepared.receipts.len() != block.transactions.len()
-        {
+        if prepared.predicted_transactions.len() != block.transactions.len() {
             return Err(BlockExecutionError::TransactionCountMismatch {
-                plan: prepared.receipts.len(),
+                plan: prepared.predicted_transactions.len(),
                 block: block.transactions.len(),
             });
         }
+        let index_by_id = block
+            .transactions
+            .iter()
+            .enumerate()
+            .map(|(index, pending)| (pending.transaction_id(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut transactions = Vec::with_capacity(prepared.receipts.len());
-        for (transaction_index, receipt) in prepared.receipts.iter().enumerate() {
-            let expected = block.transactions[transaction_index].transaction_id();
-            if receipt.transaction_id != expected {
-                return Err(BlockExecutionError::Engine(EngineError::InvalidConfiguration(
-                    format!(
-                        "prepared receipt at index {transaction_index} has transaction ID {}, expected {}",
-                        receipt.transaction_id.0, expected.0
-                    ),
-                )));
-            }
+        for receipt in &prepared.receipts {
+            let Some(&transaction_index) = index_by_id.get(&receipt.transaction_id) else {
+                return Err(BlockExecutionError::Engine(
+                    EngineError::InvalidConfiguration(format!(
+                        "prepared receipt transaction ID {} is absent from the predicted block",
+                        receipt.transaction_id.0
+                    )),
+                ));
+            };
             let Some(outcome) = receipt.status.outcome() else {
                 continue;
             };

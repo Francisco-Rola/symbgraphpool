@@ -621,58 +621,35 @@ pub fn evaluate_record(
                 ),
             ));
         }
-        if record.planning.serial_bypassed {
-            if record.execution.dependency_count != 0 {
-                issues.push(AcceptanceIssue::new(
-                    AcceptanceIssueCategory::ConfigurationError,
-                    "serial_bypass_execution_dependencies",
-                    format!(
-                        "serial bypass must execute with 0 dependencies, got {}",
-                        record.execution.dependency_count
-                    ),
-                ));
-            }
-            if record.execution.hard_dependency_count != 0 {
-                issues.push(AcceptanceIssue::new(
-                    AcceptanceIssueCategory::ConfigurationError,
-                    "serial_bypass_hard_execution_dependencies",
-                    format!(
-                        "serial bypass must execute with 0 hard dependencies, got {}",
-                        record.execution.hard_dependency_count
-                    ),
-                ));
-            }
-            if record.execution.canonical_transactions != record.execution.transactions {
-                issues.push(AcceptanceIssue::new(
-                    AcceptanceIssueCategory::ConfigurationError,
-                    "serial_bypass_canonical_transaction_mismatch",
-                    format!(
-                        "serial bypass canonical transaction count {} differs from transactions {}",
-                        record.execution.canonical_transactions, record.execution.transactions
-                    ),
-                ));
-            }
-        } else {
-            if record.execution.dependency_count != record.scheduling.scheduled_dependencies {
-                issues.push(AcceptanceIssue::new(
-                    AcceptanceIssueCategory::ConfigurationError,
-                    "execution_dependency_count_mismatch",
-                    format!(
-                        "execution dependency_count {} differs from scheduled_dependencies {}",
-                        record.execution.dependency_count, record.scheduling.scheduled_dependencies
-                    ),
-                ));
-            }
-            if record.execution.hard_dependency_count != record.scheduling.hard_dependencies {
-                issues.push(AcceptanceIssue::new(
-                    AcceptanceIssueCategory::ConfigurationError,
-                    "execution_hard_dependency_count_mismatch",
-                    format!(
-                        "execution hard_dependency_count {} differs from hard_dependencies {}",
-                        record.execution.hard_dependency_count, record.scheduling.hard_dependencies
-                    ),
-                ));
-            }
+        if record.execution.dependency_count != record.scheduling.scheduled_dependencies {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "execution_dependency_count_mismatch",
+                format!(
+                    "execution dependency_count {} differs from scheduled_dependencies {}",
+                    record.execution.dependency_count, record.scheduling.scheduled_dependencies
+                ),
+            ));
+        }
+        if record.execution.hard_dependency_count != record.scheduling.hard_dependencies {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "execution_hard_dependency_count_mismatch",
+                format!(
+                    "execution hard_dependency_count {} differs from hard_dependencies {}",
+                    record.execution.hard_dependency_count, record.scheduling.hard_dependencies
+                ),
+            ));
+        }
+        if record.planning.serial_bypassed && record.execution.max_in_flight > 1 {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "serial_bypass_parallel_preexecution",
+                format!(
+                    "serial bypass pre-execution must have max_in_flight <= 1, got {}",
+                    record.execution.max_in_flight
+                ),
+            ));
         }
     }
     let feedback_total = record
@@ -741,6 +718,105 @@ pub fn evaluate_record(
                 "pipeline speedup cannot be present without a serial reference wall time",
             ));
         }
+
+        if record.consensus.cutoff_nanos > 0 {
+            if record.consensus.candidate_transactions == 0
+                || record.consensus.decided_transactions == 0
+            {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::Incomplete,
+                    "missing_consensus_block_shape",
+                    "consensus-aware records must report non-zero candidate and decided transaction counts",
+                ));
+            }
+            if record.consensus.prepared_receipts != record.execution.speculative_results {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "consensus_prepared_receipt_mismatch",
+                    format!(
+                        "consensus prepared_receipts {} differs from execution speculative_results {}",
+                        record.consensus.prepared_receipts, record.execution.speculative_results
+                    ),
+                ));
+            }
+            match (
+                record.consensus.successful_preexecution_receipts,
+                record.consensus.failed_preexecution_receipts,
+            ) {
+                (Some(successful), Some(failed)) => {
+                    if successful.saturating_add(failed) != record.consensus.prepared_receipts {
+                        issues.push(AcceptanceIssue::new(
+                            AcceptanceIssueCategory::ConfigurationError,
+                            "consensus_preexecution_status_count_mismatch",
+                            format!(
+                                "successful+failed pre-execution receipts total {}, prepared_receipts is {}",
+                                successful.saturating_add(failed),
+                                record.consensus.prepared_receipts
+                            ),
+                        ));
+                    }
+                }
+                (None, None) => {}
+                _ => issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "partial_consensus_preexecution_status_accounting",
+                    "successful and failed pre-execution receipt counts must be reported together",
+                )),
+            }
+            let classified_receipts = record
+                .consensus
+                .receipts_ready_by_cutoff
+                .saturating_add(record.consensus.receipts_completed_after_cutoff);
+            if classified_receipts != record.consensus.prepared_receipts {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "consensus_receipt_cutoff_classification_mismatch",
+                    format!(
+                        "ready+after-cutoff receipts total {classified_receipts}, prepared_receipts is {}",
+                        record.consensus.prepared_receipts
+                    ),
+                ));
+            }
+            if record.consensus.pre_consensus_nanos > record.consensus.cutoff_nanos {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "consensus_pre_phase_exceeds_cutoff",
+                    "pre_consensus_nanos cannot exceed the configured consensus cutoff",
+                ));
+            }
+            if record.consensus.bottleneck_nanos
+                != record
+                    .consensus
+                    .pre_consensus_nanos
+                    .max(record.consensus.post_consensus_nanos)
+            {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "consensus_bottleneck_mismatch",
+                    "bottleneck_nanos must equal max(pre_consensus_nanos, post_consensus_nanos)",
+                ));
+            }
+            if let Some(serial) = record.consensus.serial_validation_latency_nanos {
+                let validation_expected =
+                    ratio_milli(serial, record.consensus.post_consensus_nanos.max(1));
+                if validation_expected != record.consensus.validation_latency_speedup_milli {
+                    issues.push(AcceptanceIssue::new(
+                        AcceptanceIssueCategory::ConfigurationError,
+                        "consensus_validation_speedup_mismatch",
+                        "validation_latency_speedup_milli does not match serial/post-consensus latency",
+                    ));
+                }
+                let throughput_expected =
+                    ratio_milli(serial, record.consensus.bottleneck_nanos.max(1));
+                if throughput_expected != record.consensus.throughput_speedup_milli {
+                    issues.push(AcceptanceIssue::new(
+                        AcceptanceIssueCategory::ConfigurationError,
+                        "consensus_throughput_speedup_mismatch",
+                        "throughput_speedup_milli does not match serial/bottleneck latency",
+                    ));
+                }
+            }
+        }
     }
 
     let largest_planning_stage = [
@@ -768,55 +844,71 @@ pub fn evaluate_record(
             "missing_serial_equivalent_work",
             "serial_equivalent_work_nanos is required",
         );
-        require_metric(
-            &mut issues,
-            record.parallelism.serial_cost_dag_bound_nanos,
-            "missing_serial_cost_dag_bound",
-            "serial_cost_dag_bound_nanos is required",
-        );
-        require_metric(
-            &mut issues,
-            record.parallelism.observed_service_dag_bound_nanos,
-            "missing_observed_service_dag_bound",
-            "observed_service_dag_bound_nanos is required",
-        );
-        require_metric(
-            &mut issues,
-            record.parallelism.service_inflation_milli,
-            "missing_service_inflation",
-            "service_inflation_milli is required when serial references are required",
-        );
-        require_metric(
-            &mut issues,
-            record.parallelism.scheduler_realization_milli,
-            "missing_scheduler_realization",
-            "scheduler_realization_milli is required when serial references are required",
-        );
-        if record.schema_version >= 2 {
+
+        // Full DAG-bound diagnostics require a one-to-one candidate/decided block and a complete
+        // successful pre-execution service sample. A real consensus cutoff can leave the candidate
+        // report partial, divergence makes decided service times incomparable with candidate DAG
+        // indices, and failed speculative receipts are intentionally absent from the successful-only
+        // feedback report. Keep the real serial wall mandatory, but do not manufacture these
+        // secondary counterfactual diagnostics when their assumptions are false.
+        let full_comparable_preexecution = record.consensus.cutoff_nanos == 0
+            || (record.consensus.candidate_transactions == record.consensus.decided_transactions
+                && record.consensus.shared_transactions == record.consensus.candidate_transactions
+                && record.consensus.same_position_transactions
+                    == record.consensus.candidate_transactions
+                && record.consensus.prepared_receipts == record.consensus.candidate_transactions
+                && record.consensus.failed_preexecution_receipts.unwrap_or(0) == 0);
+        if full_comparable_preexecution {
             require_metric(
                 &mut issues,
-                record.parallelism.observed_service_work_nanos,
-                "missing_observed_service_work",
-                "observed_service_work_nanos is required for schema v2+ evaluation records",
+                record.parallelism.serial_cost_dag_bound_nanos,
+                "missing_serial_cost_dag_bound",
+                "serial_cost_dag_bound_nanos is required for comparable complete pre-execution",
             );
             require_metric(
                 &mut issues,
-                record.parallelism.worker_capacity_bound_nanos,
-                "missing_worker_capacity_bound",
-                "worker_capacity_bound_nanos is required for schema v2+ evaluation records",
+                record.parallelism.observed_service_dag_bound_nanos,
+                "missing_observed_service_dag_bound",
+                "observed_service_dag_bound_nanos is required for comparable complete pre-execution",
             );
             require_metric(
                 &mut issues,
-                record.parallelism.parallel_lower_bound_nanos,
-                "missing_parallel_lower_bound",
-                "parallel_lower_bound_nanos is required for schema v2+ evaluation records",
+                record.parallelism.service_inflation_milli,
+                "missing_service_inflation",
+                "service_inflation_milli is required for comparable complete pre-execution",
             );
             require_metric(
                 &mut issues,
-                record.parallelism.scheduler_realization_corrected_milli,
-                "missing_corrected_scheduler_realization",
-                "scheduler_realization_corrected_milli is required for schema v2+ evaluation records",
+                record.parallelism.scheduler_realization_milli,
+                "missing_scheduler_realization",
+                "scheduler_realization_milli is required for comparable complete pre-execution",
             );
+            if record.schema_version >= 2 {
+                require_metric(
+                    &mut issues,
+                    record.parallelism.observed_service_work_nanos,
+                    "missing_observed_service_work",
+                    "observed_service_work_nanos is required for comparable complete pre-execution",
+                );
+                require_metric(
+                    &mut issues,
+                    record.parallelism.worker_capacity_bound_nanos,
+                    "missing_worker_capacity_bound",
+                    "worker_capacity_bound_nanos is required for comparable complete pre-execution",
+                );
+                require_metric(
+                    &mut issues,
+                    record.parallelism.parallel_lower_bound_nanos,
+                    "missing_parallel_lower_bound",
+                    "parallel_lower_bound_nanos is required for comparable complete pre-execution",
+                );
+                require_metric(
+                    &mut issues,
+                    record.parallelism.scheduler_realization_corrected_milli,
+                    "missing_corrected_scheduler_realization",
+                    "scheduler_realization_corrected_milli is required for comparable complete pre-execution",
+                );
+            }
         }
         if record.schema_version >= 3 {
             require_metric(

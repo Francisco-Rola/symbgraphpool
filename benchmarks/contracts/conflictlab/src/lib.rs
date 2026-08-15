@@ -77,6 +77,19 @@ pub enum ExecuteMsg {
         order_id: u64,
     },
     ResetAllBalances {},
+    /// Read one bank balance through the CosmWasm querier and persist the observation so the
+    /// runtime must track bank-read dependencies as part of receipt validation.
+    ObserveBankBalance {
+        account: String,
+        denom: String,
+        shard_id: u64,
+    },
+    /// Read the complete bank-balance set for one account, exercising all-balances/range
+    /// dependency tracking in the host querier.
+    ObserveAllBankBalances {
+        account: String,
+        shard_id: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -217,6 +230,14 @@ pub fn execute(
         } => execute_create_order(deps, order_id, owner, amount),
         ExecuteMsg::CancelOrder { order_id } => execute_cancel_order(deps, info, order_id),
         ExecuteMsg::ResetAllBalances {} => execute_reset_all_balances(deps, info),
+        ExecuteMsg::ObserveBankBalance {
+            account,
+            denom,
+            shard_id,
+        } => execute_observe_bank_balance(deps, account, denom, shard_id),
+        ExecuteMsg::ObserveAllBankBalances { account, shard_id } => {
+            execute_observe_all_bank_balances(deps, account, shard_id)
+        }
     }
 }
 
@@ -458,6 +479,40 @@ fn execute_reset_all_balances(deps: DepsMut, info: MessageInfo) -> Result<Respon
         .add_attribute("removed", accounts.len().to_string()))
 }
 
+fn execute_observe_bank_balance(
+    deps: DepsMut,
+    account: String,
+    denom: String,
+    shard_id: u64,
+) -> Result<Response, ContractError> {
+    let account = deps.api.addr_validate(&account)?;
+    let balance = deps.querier.query_balance(account.clone(), denom)?;
+    let observed = u64::try_from(balance.amount.u128()).unwrap_or(u64::MAX);
+    COUNTERS.save(deps.storage, shard_id, &observed)?;
+    Ok(Response::new()
+        .add_attribute("action", "observe_bank_balance")
+        .add_attribute("account", account)
+        .add_attribute("observed", observed.to_string()))
+}
+
+fn execute_observe_all_bank_balances(
+    deps: DepsMut,
+    account: String,
+    shard_id: u64,
+) -> Result<Response, ContractError> {
+    let account = deps.api.addr_validate(&account)?;
+    let balances = deps.querier.query_all_balances(account.clone())?;
+    let observed = balances
+        .iter()
+        .fold(0_u128, |sum, coin| sum.saturating_add(coin.amount.u128()));
+    let observed = u64::try_from(observed).unwrap_or(u64::MAX);
+    COUNTERS.save(deps.storage, shard_id, &observed)?;
+    Ok(Response::new()
+        .add_attribute("action", "observe_all_bank_balances")
+        .add_attribute("account", account)
+        .add_attribute("observed", observed.to_string()))
+}
+
 fn debit_balance(
     storage: &mut dyn cosmwasm_std::Storage,
     account: &str,
@@ -621,6 +676,54 @@ mod tests {
             from_json(query(deps.as_ref(), mock_env(), QueryMsg::Counter { shard_id: 2 }).unwrap())
                 .unwrap();
         assert_eq!(counter.value, 1);
+    }
+
+    #[test]
+    fn bank_query_operations_persist_observed_point_and_all_balance_state() {
+        let mut deps = mock_dependencies();
+        deps.querier.update_balance(
+            "alice",
+            vec![
+                cosmwasm_std::coin(7, "uconflict"),
+                cosmwasm_std::coin(3, "uother"),
+            ],
+        );
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("admin", &[]),
+            InstantiateMsg {
+                admin: None,
+                fee_bps: 0,
+                epoch: 1,
+            },
+        )
+        .unwrap();
+
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("observer", &[]),
+            ExecuteMsg::ObserveBankBalance {
+                account: "alice".to_owned(),
+                denom: "uconflict".to_owned(),
+                shard_id: 10,
+            },
+        )
+        .unwrap();
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("observer", &[]),
+            ExecuteMsg::ObserveAllBankBalances {
+                account: "alice".to_owned(),
+                shard_id: 11,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(COUNTERS.load(deps.as_ref().storage, 10).unwrap(), 7);
+        assert_eq!(COUNTERS.load(deps.as_ref().storage, 11).unwrap(), 10);
     }
 
     #[test]

@@ -75,3 +75,41 @@ scripts/                validation, sweep generation and aggregation commands
 docs/                   architecture/status/tuning notes
 research/                quarantined research artifacts
 ```
+
+## Phase 6 consensus-realism evaluation
+
+The consensus-cutoff, buffered serial pre-execution and candidate/decided-block divergence campaign
+is documented in `evaluation/conflictlab/phase6-consensus-realism.md`.
+
+Use `./scripts/run-all-tests.sh` after every patch. It formats and tests all Cargo workspaces and
+runs the repository's shell/Python/evaluation-tool checks. Run
+`./scripts/run-conflictlab-phase6-evaluation.sh` separately for the 952-run real-Wasm evaluation.
+
+## ConflictLab 1.0 submission experimental suite
+
+The frozen internal EuroSys/OSDI evidence suite is documented in
+`evaluation/conflictlab/v1-experimental-suite.md`. It expands ConflictLab beyond the original point
+credit workload to cover stateful point operations, ranges/deletes, bank reads/writes and queries,
+contract creation, compact-vs-dense reference execution, symbolic-granularity ablations, controlled
+prediction faults, workload transitions, binding consensus cutoffs, candidate/decided divergence,
+fixed-hardware block scaling, statistical repetitions, and a long-history soak.
+
+Run the repository gate before any long evaluation:
+
+```bash
+./scripts/run-all-tests.sh
+```
+
+Then run the complete 4,630-record real-Wasm suite:
+
+```bash
+./scripts/run-conflictlab-v1-evaluation.sh
+```
+
+The suite intentionally fixes ACG to six workers on the current six-physical-core evaluation machine;
+core-count and memory-capacity scaling are deferred. Paper-facing reports distinguish measured
+post-consensus validation latency, the `max(pre, post)` **phase-bottleneck** metric, measured
+non-overlapped sequential block time, and a hindsight concrete-conflict lower bound. It does not claim
+or implement cross-block execution overlap. The V1 runner is resumable when invoked again with the
+same output directory: fully accepted campaigns are reused only after an exact manifest/record
+identity check, while incomplete or stale campaigns are rerun from a clean campaign directory.

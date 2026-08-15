@@ -65,3 +65,52 @@ Static construction-environment validation completed with TOML/JSON parsing, she
 lightweight changed-Rust delimiter checks, and patch whitespace/application checks. Definitive Rust
 acceptance remains local `cargo fmt`, runtime workspace tests, and runtime workspace Clippy with
 `-D warnings`, followed by the focused harness diagnostics runner.
+
+## Full repository gate
+
+After every patch, run:
+
+```bash
+./scripts/run-all-tests.sh
+```
+
+The gate runs `cargo fmt --all` for the root, runtime and benchmark workspaces, repository diff and
+script syntax checks, every Rust workspace/all-target test, doc tests, Clippy with `-D warnings`, and
+the evaluation-tool tests. The long ConflictLab matrices are intentionally separate.
+
+## ConflictLab 1.0 submission evidence gate
+
+The full internal submission suite is separate from the normal repository gate because it contains
+4,630 measured real-Wasm configurations plus warm-up/history blocks. The suite definition and claim
+mapping live in `evaluation/conflictlab/v1-experimental-suite.md`.
+
+Before running it:
+
+```bash
+./scripts/run-all-tests.sh
+```
+
+For the complete evidence set:
+
+```bash
+./scripts/run-conflictlab-v1-evaluation.sh
+```
+
+The runner merges every campaign into one `records.jsonl`, runs Brick-5F/Phase acceptance, executes
+`scripts/validate-conflictlab-v1.py`, aggregates CSVs, and writes
+`scripts/summarize-conflictlab-v1.py`'s reviewer-facing summary. Reusing the same output directory
+resumes the suite: only campaigns whose cached manifest, accepted report, record count, and run
+identities exactly match the current grid are reused; incomplete/stale campaign directories are
+removed before rerun. A failed campaign no longer prevents later independent campaigns from
+running, but the suite still exits non-zero after post-processing until every requested campaign is
+valid. All 1.0 grids are fixed to six workers; this initial suite intentionally does not make
+core-count or memory-capacity scaling claims.
+
+Evaluation-only ablations (`acg.compact_equivalence_groups`, symbolic granularity, and controlled
+prediction faults) must remain out of the production default path. Additive 1.0 telemetry remains
+schema-3 compatible through serde defaults so historical records continue to parse.
+
+For a final paper/artifact run, use a clean commit (`git_dirty=false`) on the intended evaluation
+machine and preserve `suite-environment.txt`, `campaign-counts.json`, validation output, merged raw
+records, and aggregate CSVs together. High-percentile paper claims should come from the dedicated
+statistical campaign/repeated clean process runs rather than two-seed coverage matrices.
