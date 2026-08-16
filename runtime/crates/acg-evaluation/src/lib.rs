@@ -1,4 +1,4 @@
-//! Stable Brick 5E experiment records plus Brick 5F acceptance gates shared by all workloads.
+//! Stable Phase 5E experiment records plus Phase 5F acceptance gates shared by all workloads.
 //!
 //! Wall-clock values are validator-local measurement only. Nothing in this crate is consensus
 //! visible or participates in canonical validation/replay decisions.

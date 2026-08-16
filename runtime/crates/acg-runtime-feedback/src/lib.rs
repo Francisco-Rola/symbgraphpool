@@ -720,7 +720,7 @@ pub struct ValidationEvidence {
     pub kind: ValidationEvidenceKind,
 }
 
-/// Brick 5E local estimate of the marginal ready-time delay caused by one scheduled dependency.
+/// Phase 5E local estimate of the marginal ready-time delay caused by one scheduled dependency.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerializationCostEvidence {
     pub predecessor: TxIndex,
@@ -728,7 +728,7 @@ pub struct SerializationCostEvidence {
     pub marginal_ready_delay_nanos: u64,
 }
 
-/// Upstream-aggregated Brick-5E serialization evidence keyed by learned relationship.
+/// Upstream-aggregated Phase-5E serialization evidence keyed by learned relationship.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AggregatedSerializationCostBuffer {
     batches: BTreeMap<EdgeProvenance, (u64, usize)>,
@@ -1755,7 +1755,7 @@ impl RuntimeFeedbackEngine {
             .apply_aggregated_batch(profile_graph, observations, &self.adaptive_config)?)
     }
 
-    /// Apply Brick 5E dependency serialization-cost evidence.
+    /// Apply Phase 5E dependency serialization-cost evidence.
     ///
     /// The evidence is local performance data only. It changes future speculative scheduling
     /// policy but never validation or canonical state.

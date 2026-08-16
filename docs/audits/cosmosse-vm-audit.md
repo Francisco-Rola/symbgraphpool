@@ -47,7 +47,7 @@ contract ownership out of a global map. Errors are propagated as typed engine er
 `STMStorage` and parts of `STMQuerier` contain `todo!()` implementations for core storage methods.
 Those types are exported from the VM testing module despite not being operational.
 
-**Resolution:** no incomplete MVCC implementation was migrated. A later runtime brick can implement
+**Resolution:** no incomplete MVCC implementation was migrated. A later runtime phase can implement
 versioned storage behind the engine's transaction-state boundary and test it independently.
 
 ### 5. Chain-specific behavior leaked into general CosmWasm types

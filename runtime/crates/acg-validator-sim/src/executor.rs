@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::block::ProducedBlock;
 use crate::scheduler::{ExecutionDependencyClass, ExecutionPlan, SchedulingError};
 
-/// Validator-local execution timing used by Brick 5E measurement and cost estimation.
+/// Validator-local execution timing used by Phase 5E measurement and cost estimation.
 /// These values are never consensus inputs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransactionExecutionTiming {
@@ -195,7 +195,7 @@ pub struct ReconciliationTransactionDiagnostic {
     pub disposition: CanonicalTxDisposition,
     pub validation: Option<ValidationOutcome>,
     /// Canonical execution time paid because speculation could not be reused. Zero for reused
-    /// receipts. Brick 5D consumes this only as adaptive cost evidence.
+    /// receipts. Phase 5D consumes this only as adaptive cost evidence.
     pub reexecution_duration: std::time::Duration,
 }
 

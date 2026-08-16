@@ -2019,7 +2019,7 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
 
     println!();
     println!("============================================================");
-    println!(" MiniWarehouse Brick-5C.7 block-local MVCC measurement");
+    println!(" MiniWarehouse Phase-5C.7 block-local MVCC measurement");
     println!("============================================================");
     println!("runtime model:                 real MiniWarehouse CosmWasm Wasm");
     println!("Wasm artifact:                 {}", wasm_path.display());
@@ -2877,6 +2877,6 @@ fn miniwarehouse_prints_expected_vs_realized_parallelism() {
     println!("NOTE: an explicit execution dependency guarantees that predecessor completed before the victim launched; a replayed guarded predecessor is therefore reported as a cascade candidate.");
     println!("NOTE: scheduler waves are diagnostic dependency levels only. The executor launches ready transactions across levels without global barriers and resolves completed earlier-canonical versions lazily through block-local MVCC.");
     println!("NOTE: dependency cost diagnostics intentionally measure the current implementation's per-transaction deep snapshot clone plus replay of completed earlier versions; aggregate worker-stage times overlap and must not be summed as wall-clock components.");
-    println!("NOTE: the current post-consensus validator is intentionally single-threaded. Parallel validation remains a future Brick-5 optimization; these diagnostics come first.");
+    println!("NOTE: the current post-consensus validator is intentionally single-threaded. Parallel validation remains a future Phase-5 optimization; these diagnostics come first.");
     println!();
 }

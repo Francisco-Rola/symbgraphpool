@@ -195,7 +195,7 @@ be used before reporting high-percentile latency.
 
 ## Required invariants
 
-`scripts/validate-conflictlab-v1.py` rejects a complete dataset unless:
+`scripts/internal/validate-conflictlab-v1.py` rejects a complete dataset unless:
 
 - all expected campaign counts are present;
 - every record is schema 3, real Wasm, within the fixed six-worker/six-physical-core budget, and
@@ -280,7 +280,7 @@ When V1 post-processing fails, `run-conflictlab-v1-evaluation.sh` writes `valida
 to create a self-contained upload bundle under `debug-bundles/`. It can also be generated manually:
 
 ```bash
-./scripts/collect-conflictlab-v1-debug-bundle.sh benchmark-results/conflictlab-v1-core
+./scripts/internal/collect-conflictlab-v1-debug-bundle.sh benchmark-results/conflictlab-v1-core
 ```
 
 The ZIP contains the combined `records.jsonl`, validation/summary output, campaign manifests and

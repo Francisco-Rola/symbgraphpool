@@ -22,7 +22,7 @@ const MINIWAREHOUSE: &[u8] =
     include_bytes!("../../../../benchmarks/symbolic/miniwarehouse.symbolic.json");
 
 /// Deliberately produces no state accesses. This fixture turns a symbolic NewOrder/Restock stock
-/// edge into repeated concrete independence so the test can verify that Brick 4D feeds execution
+/// edge into repeated concrete independence so the test can verify that Phase 4D feeds execution
 /// evidence back into the next block's schedule.
 struct NoopWarehouseRuntime;
 
@@ -113,7 +113,7 @@ fn setup() -> (
 ) {
     let engine = CosmWasmEngine::default();
     let code_id = engine
-        .register_native("miniwarehouse-brick4d", Arc::new(NoopWarehouseRuntime))
+        .register_native("miniwarehouse-phase4d", Arc::new(NoopWarehouseRuntime))
         .unwrap();
     let checksum = engine.code_metadata(code_id).unwrap().checksum;
     let contract = engine
@@ -255,7 +255,7 @@ fn miniwarehouse_runtime_independence_changes_future_wave_placement() {
     assert_eq!(statistics.negative_observations, 3);
     assert!(third_edge.probability() < first_edge.probability());
 
-    // Even after the adaptive planner emits a wide wave, actual Brick 4D execution remains serial.
+    // Even after the adaptive planner emits a wide wave, actual Phase 4D execution remains serial.
     assert_eq!(third.execution_plan.waves.len(), 2);
     assert_eq!(third.execution_plan.waves[0].transaction_indices, vec![0]);
     assert_eq!(third.execution_plan.waves[1].transaction_indices, vec![1]);

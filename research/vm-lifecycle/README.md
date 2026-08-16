@@ -1,11 +1,11 @@
 # VM lifecycle research archive
 
-This directory is research-only. Production uses normal fresh CosmWasm instance semantics.
+Historical experiments for fresh-instance pools, cache sharding, retained instances and related VM
+lifecycle ideas live here. They are not the normal production/runtime path.
 
-The archive preserves experiments for fresh-instance pools, adaptive preparation, unsafe dirty VM
-reuse, cache sharding and related diagnostics. Dirty reuse was faster but leaks VM-local state and
-is not correct. Cache sharding preserved fresh semantics but recovered little of the retained-VM
-upper bound.
+ConflictLab's canonical performance runs use benchmark-scoped retained instance reuse with a
+non-binding gas meter, backed by fresh/recycle semantic controls. Do not promote archived VM ideas
+without a new correctness design and the current Phase-5F acceptance gates.
 
-Do not copy these implementations back into production without a new correctness design and the
-current Brick-5F evaluation gates.
+`ARCHIVE_MANIFEST.txt` preserves the original historical artifact filenames verbatim, including the
+old naming, so archived checksums/paths are not rewritten.

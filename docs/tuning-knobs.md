@@ -1,7 +1,7 @@
 # Tuning knobs
 
 This file is the current tuning surface for experiments. Parameters recorded in a manifest are part
-of the exact Brick-5F run identity.
+of the exact Phase-5F run identity.
 
 ## Execution mode
 
@@ -22,7 +22,7 @@ of the exact Brick-5F run identity.
 | `acg.exploration_rate` | `0.0` | deterministic fraction of transactions permitted to use the exploration risk budget |
 | `acg.exploration_risk_budget` | `0.90` | same-wave risk budget for controlled-exploration transactions |
 | `acg.independent_observations_before_softening` | `8` | independence samples before initially-hard edges may soften |
-| `acg.serialization_cost_reference_nanos` | `250000` | cold-start serialization-cost fallback before 5E learns an edge cost |
+| `acg.serialization_cost_reference_nanos` | `250000` | cold-start serialization-cost fallback before Phase 5E learns an edge cost |
 | `acg.invalidation_fanout_weight` | `0.50` | replay penalty added per expected invalidated descendant; replay/fan-out evidence is marginally split across simultaneous causal edges |
 | `acg.serial_bypass_enabled` | `false` | skip candidate-graph/scheduler/feedback work when prior full-pipeline economics project a loss |
 | `acg.serial_bypass_min_transactions` | `32` | minimum block size eligible for the economics bypass |
@@ -81,6 +81,7 @@ These are the knobs needed to study how imperfect block prediction affects 5C.5 
 | `warmup_blocks` | `0` | deterministic adaptive-history blocks before the measured block |
 | `accounts` | `16` | account-key cardinality |
 | `hot_account_probability_bps` | `0` | probability (0–10000 bps) of choosing account 0 |
+| `parallelism_lanes` | `0` | evaluation-only control: positive `N` assigns tx `i` to `account-(i % N)`, creating `N` balanced credit conflict chains |
 | `work_iterations` | `0` | deterministic contract compute iterations |
 | `storage_rounds` | `0` | semantically neutral repeated read/write rounds on the same account key |
 | `payload_bytes` | `0` | deterministic message payload bytes processed by the contract |

@@ -101,7 +101,7 @@ impl SerialBypassConfig {
     }
 }
 
-/// Runtime-facing configuration for Brick 4D adaptive block planning.
+/// Runtime-facing configuration for Phase 4D adaptive block planning.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdaptivePlanningConfig {
     /// Posterior floor for unresolved `Unknown` static candidate relationships. Proven symbolic
@@ -111,9 +111,9 @@ pub struct AdaptivePlanningConfig {
     /// normal benchmark runs keep this enabled; disabling it builds the dense logical reference
     /// graph so compact-vs-dense semantic equivalence and control-plane savings can be measured.
     pub compact_equivalence_groups: bool,
-    /// Hard/soft thresholds, risk budget and optional wave capacity from Brick 4C.
+    /// Hard/soft thresholds, risk budget and optional wave capacity from Phase 4C.
     pub scheduler: RiskBoundedSchedulerConfig,
-    /// Brick 5D expected replay-cost policy used to turn posterior probability into scheduling risk.
+    /// Phase 5D expected replay-cost policy used to turn posterior probability into scheduling risk.
     pub cost_policy: CostAwareEdgePolicyConfig,
     /// Optional economics gate evaluated from prior whole-block observations before request
     /// adaptation, candidate-graph construction or scheduling.
@@ -170,7 +170,7 @@ impl AdaptivePlanningMetrics {
     }
 }
 
-/// Brick 5D.1 concrete attribution for one validation conflict that forced replay.
+/// Phase 5D.1 concrete attribution for one validation conflict that forced replay.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplayAttribution {
     pub predecessor: TxIndex,
@@ -187,7 +187,7 @@ pub struct ReplayAttribution {
     pub candidate_edge_present: bool,
 }
 
-/// Brick 5E realized marginal dependency-ready delay for one scheduled edge.
+/// Phase 5E realized marginal dependency-ready delay for one scheduled edge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerializationAttribution {
     pub predecessor: TxIndex,
@@ -230,12 +230,12 @@ fn should_force_adaptive_probe(
     active && consecutive_bypasses >= config.max_consecutive_bypasses
 }
 
-/// One Brick 4D planning result before any speculative parallel executor exists.
+/// One Phase 4D planning result before any speculative parallel executor exists.
 #[derive(Debug)]
 pub struct AdaptiveBlockPlan {
     pub candidate_graph: CandidateGraph,
     pub schedule: RiskBoundedSchedule,
-    /// Runtime dependency plan. `waves` are scheduler levels for diagnostics; split-phase Brick
+    /// Runtime dependency plan. `waves` are scheduler levels for diagnostics; split-phase Phase
     /// 5C.6 execution uses `dependencies` as a ready DAG rather than imposing level barriers.
     pub speculative_execution_plan: ExecutionPlan,
     pub serial_bypassed: bool,
@@ -245,7 +245,7 @@ pub struct AdaptiveBlockPlan {
 }
 
 impl AdaptiveBlockPlan {
-    /// Serial block-order execution used as the Brick 4D correctness boundary.
+    /// Serial block-order execution used as the Phase 4D correctness boundary.
     ///
     /// Candidate `TxIndex` values are block positions, so this plan deliberately ignores the
     /// speculative wave grouping and executes the finalized/predicted block order one-by-one.
@@ -271,13 +271,13 @@ impl AdaptiveBlockPlan {
 #[derive(Debug)]
 pub struct AdaptiveBlockRun {
     pub plan: AdaptiveBlockPlan,
-    /// The actual execution plan used by Brick 4D. This remains canonical and serial until Brick 5.
+    /// The actual execution plan used by Phase 4D. This remains canonical and serial until Phase 5.
     pub execution_plan: ExecutionPlan,
     pub execution_report: BlockExecutionReport,
     pub feedback_summary: ApplySummary,
 }
 
-/// Connects the CosmWasm adapter, weighted candidate graph, Brick 4C scheduler and Brick 3 feedback
+/// Connects the CosmWasm adapter, weighted candidate graph, Phase 4C scheduler and Phase 3 feedback
 /// engine while retaining canonical serial execution.
 ///
 /// Each call plans from the feedback state available at the start of the block, executes the block
@@ -358,8 +358,8 @@ impl AdaptiveSerialPipeline {
 
     /// Apply only probability/topology evidence from pre-execution.
     ///
-    /// This is the Brick 4/5D ablation path used by the common benchmark harness. It deliberately
-    /// excludes Brick 5E serialization-cost observations so cost-aware scheduling can be compared
+    /// This is the Phase 4/5D ablation path used by the common benchmark harness. It deliberately
+    /// excludes Phase 5E serialization-cost observations so cost-aware scheduling can be compared
     /// against probability-only learning without changing execution correctness.
     pub fn process_pre_execution_probability_only(
         &mut self,
@@ -484,7 +484,7 @@ impl AdaptiveSerialPipeline {
         Ok(merge_apply_summaries(replay_summary, validation_summary))
     }
 
-    /// Return Brick 5D.1 replay attributions without mutating feedback state.
+    /// Return Phase 5D.1 replay attributions without mutating feedback state.
     pub fn reconciliation_attributions(
         &self,
         plan: &AdaptiveBlockPlan,
@@ -493,7 +493,7 @@ impl AdaptiveSerialPipeline {
         reconciliation_attributions(plan, report)
     }
 
-    /// Return Brick 5E dependency-ready delay attributions without mutating feedback state.
+    /// Return Phase 5E dependency-ready delay attributions without mutating feedback state.
     pub fn serialization_attributions(
         &self,
         plan: &AdaptiveBlockPlan,
@@ -729,7 +729,7 @@ impl AdaptiveSerialPipeline {
         bypass
     }
 
-    /// Runs one complete Brick 4D iteration.
+    /// Runs one complete Phase 4D iteration.
     ///
     /// The adaptive schedule is retained for inspection/metrics, but the actual execution plan is
     /// canonical and serial. Concrete access evidence is applied only after execution completes.

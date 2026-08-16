@@ -82,7 +82,7 @@ pub struct TransactionEdge {
     /// becomes eligible for speculation after repeated executions *did not* observe the conflict.
     #[serde(default)]
     pub concrete_independent_observations: u32,
-    /// Brick 5D cost-adjusted scheduling risk. Raw conflict probability remains separately visible.
+    /// Phase 5D cost-adjusted scheduling risk. Raw conflict probability remains separately visible.
     #[serde(default)]
     pub scheduling_risk_q16: u16,
     /// Decayed mean direct replay cost learned for this profile relationship.
@@ -94,7 +94,7 @@ pub struct TransactionEdge {
     /// Confidence in the replay-cost estimate, quantized to Q16.
     #[serde(default)]
     pub replay_cost_confidence_q16: u16,
-    /// Brick 5E learned marginal dependency-ready delay for this profile relationship.
+    /// Phase 5E learned marginal dependency-ready delay for this profile relationship.
     #[serde(default)]
     pub expected_serialization_cost_nanos: u64,
     /// Confidence in the learned serialization-cost estimate, quantized to Q16.
@@ -126,7 +126,7 @@ impl TransactionEdge {
     }
 
     pub fn scheduling_risk(&self) -> f64 {
-        // Legacy/binary edges serialized before Brick 5D may have a zero default here. Preserve
+        // Legacy/binary edges serialized before Phase 5D may have a zero default here. Preserve
         // their old semantics by falling back to raw probability when there is no cost evidence.
         if self.scheduling_risk_q16 == 0 && self.replay_cost_confidence_q16 == 0 {
             self.probability()
@@ -143,7 +143,7 @@ impl TransactionEdge {
         dequantize_q16(self.serialization_cost_confidence_q16)
     }
 
-    /// Effective Brick 5E serialization reference after confidence-weighted blending with the
+    /// Effective Phase 5E serialization reference after confidence-weighted blending with the
     /// configured fallback.
     pub fn effective_serialization_cost_nanos(
         &self,
@@ -374,7 +374,7 @@ impl CandidateGraph {
     }
 }
 
-/// Brick 5D conversion from conflict probability + measured replay impact into scheduling risk.
+/// Phase 5D conversion from conflict probability + measured replay impact into scheduling risk.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CostAwareEdgePolicyConfig {
     /// Fallback pre-consensus serialization delay used until confident learned evidence exists.
@@ -437,8 +437,8 @@ pub struct WeightedCandidateGraphConfig {
     /// runtime-discovered topology stay materialized so learning can demote them from Hard to
     /// Soft without silently deleting a known dependency relationship.
     pub edge_materialization_threshold: f64,
-    /// Cost-aware Brick 5D policy. With no replay-cost evidence, scheduling risk exactly matches
-    /// the Brick 4 posterior probability.
+    /// Cost-aware Phase 5D policy. With no replay-cost evidence, scheduling risk exactly matches
+    /// the Phase 4 posterior probability.
     pub cost_policy: CostAwareEdgePolicyConfig,
     /// Compact provable equivalence cliques into a group representation at every maturity level.
     ///
@@ -484,10 +484,10 @@ impl<'graph> CandidateGraphBuilder<'graph> {
         }
     }
 
-    /// Builds the pre-Brick-4 binary graph.
+    /// Builds the pre-Phase-4 binary graph.
     ///
     /// Materialized symbolic edges carry probability 1.0 and confidence 0.0. Keeping this path
-    /// intact provides the binary-graph baseline and preserves existing callers while Brick 4
+    /// intact provides the binary-graph baseline and preserves existing callers while Phase 4
     /// introduces adaptive construction through [`Self::build_weighted`].
     pub fn build(
         &self,
@@ -1254,9 +1254,9 @@ pub enum CandidateGraphError {
     InvalidInclusionProbability { tx_id: TxId, value: f32 },
     #[error("edge materialization threshold must be finite and within [0, 1], got {0}")]
     InvalidMaterializationThreshold(f64),
-    #[error("Brick 5D serialization cost reference must be greater than zero")]
+    #[error("Phase 5D serialization cost reference must be greater than zero")]
     ZeroSerializationCostReference,
-    #[error("Brick 5D invalidation fan-out weight must be finite and non-negative, got {0}")]
+    #[error("Phase 5D invalidation fan-out weight must be finite and non-negative, got {0}")]
     InvalidInvalidationFanoutWeight(f64),
     #[error("pre/post-consensus phase weights must be finite and greater than zero, got {0}")]
     InvalidPhaseWeight(f64),

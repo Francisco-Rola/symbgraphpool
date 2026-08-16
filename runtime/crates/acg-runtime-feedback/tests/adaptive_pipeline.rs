@@ -162,7 +162,7 @@ fn setup_with_runtime(
 ) {
     let engine = CosmWasmEngine::default();
     let code_id = engine
-        .register_native("conflictlab-brick4d", Arc::new(runtime))
+        .register_native("conflictlab-phase4d", Arc::new(runtime))
         .unwrap();
     let checksum = engine.code_metadata(code_id).unwrap().checksum;
     let contract = engine
@@ -293,7 +293,7 @@ fn conflictlab_adaptive_plan_groups_independent_work_but_executes_canonically_an
         vec![0, 2]
     );
 
-    // Brick 4D never hands the wide speculative plan to the serial executor.
+    // Phase 4D never hands the wide speculative plan to the serial executor.
     assert_eq!(run.execution_plan.waves.len(), 3);
     assert_eq!(run.execution_plan.waves[0].transaction_indices, vec![0]);
     assert_eq!(run.execution_plan.waves[1].transaction_indices, vec![1]);
@@ -320,7 +320,7 @@ fn conflictlab_adaptive_plan_groups_independent_work_but_executes_canonically_an
 }
 
 #[test]
-fn brick5d_reconciliation_attribution_measures_replay_cost_and_transitive_fanout() {
+fn phase5d_reconciliation_attribution_measures_replay_cost_and_transitive_fanout() {
     let (engine, contract, graph, mut pipeline) =
         setup_with_runtime(ConflictLabRuntime::barrier_first_execute_calls(4));
     let mempool = Mempool::default();

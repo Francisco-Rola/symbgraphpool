@@ -1,76 +1,30 @@
 # Evaluation
 
-Evaluation is manifest-driven. A declared run is executed with an independent serial reference and
-one speculative policy, produces a stable `ExperimentRecord`, and must pass Brick-5F acceptance.
+Evaluation is manifest-driven. Every measured run builds an independent serial reference, emits a
+schema-v3 `ExperimentRecord`, and passes the Phase-5F acceptance policy before it is reported.
 
-## One manifest
+## Main entrypoints
 
-```bash
-./scripts/run-benchmark-manifest.sh evaluation/conflictlab-harness-smoke.json
-```
-
-## Generate a matrix
+ConflictLab 1.0 — broad correctness/mechanism evaluation:
 
 ```bash
-python3 scripts/generate-manifest-matrix.py \
-  evaluation/conflictlab/quick.grid.json /tmp/conflictlab.json
+./scripts/run-conflictlab-v1-evaluation.sh
 ```
 
-A matrix expands modes, workers, seeds, parameter grids and linked complexity cases into exact run
-identities. Unknown workload/tuning parameters are rejected by the harness.
-
-## Aggregate results
+Controlled six-worker parallelism ceiling + overhead attribution:
 
 ```bash
-python3 scripts/aggregate-experiment.py records.jsonl --out-dir aggregate
+./scripts/run-conflictlab-parallelism-evaluation.sh
 ```
 
-Outputs:
-
-- `records-flat.csv`: one flattened row per raw sample;
-- `summary-wide.csv`: one grouped row with metric statistics;
-- `plot-long.csv`: tidy/plot-ready metric rows, including corrected scheduler realization, dependency compression and feedback/serialization batching factors;
-- `summary.json`: record/group counts and exported metric list.
-
-Raw JSONL is always the source of truth. Confidence intervals use the normal 1.96×SEM approximation;
-keep raw samples for any later bootstrap/non-parametric analysis. Matrix files may set `order_seed` to
-deterministically shuffle run order and reduce systematic thermal/order bias.
-
-## Release ConflictLab campaign
+Run one explicit manifest:
 
 ```bash
-./scripts/run-conflictlab-release-suite.sh quick
-./scripts/run-conflictlab-release-suite.sh core
-./scripts/run-conflictlab-release-suite.sh full
+./scripts/run-benchmark-manifest.sh manifest.json [output-directory]
 ```
 
-`quick` validates the release pipeline; `core` covers the primary research axes; `full` additionally
-covers admission/block packing and scheduler-policy tuning. See `conflictlab/README.md` and
-`../docs/tuning-knobs.md`.
+`records.jsonl` is the source of truth. Aggregated CSVs and text reports are derived artifacts.
+Implementation helpers live under `scripts/internal/`; they are not intended as user-facing
+entrypoints.
 
-## Control-plane/adaptation calibration
-
-Before the large ConflictLab matrices, validate the dense-graph corrections and exercise real
-adaptive decisions:
-
-```bash
-./scripts/run-control-plane-corrections-diagnostics.sh
-./scripts/run-conflictlab-control-plane-evaluation.sh
-```
-
-ExperimentRecord schema v3 retains the dependency-reduction/batching and finite-worker metrics,
-adds measured adaptive-pipeline stage/wall timings and a serial-reference end-to-end speedup, and
-remains backward-readable for schema-v1/v2 records. The focused matrices sweep measured block sizes
-16, 32, 64, 128, 256, and 512 transactions.
-
-## Phase 3 system validation
-
-Phase 3 evaluates the final ordering-DAG reduction, upstream serialization-cost aggregation,
-previous-block economics bypass, bucketed prediction, and controlled exploration/marginal replay
-attribution. The focused matrix keeps VM lifecycle cost as a first-class axis by running light,
-medium, and heavy **real Wasm** transactions at B32/B128/B512:
-
-```bash
-./scripts/run-phase3-control-plane-diagnostics.sh
-./scripts/run-conflictlab-phase3-evaluation.sh
-```
+See `conflictlab/README.md` for the active workload axes and experiment definitions.

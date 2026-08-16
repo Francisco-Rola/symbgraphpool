@@ -34,7 +34,7 @@ pub struct SpeculativeDependency {
 
 /// One scheduler level expressed in engine transaction identities.
 ///
-/// Levels are retained for diagnostics and theoretical parallelism. The dependency-driven Brick-5
+/// Levels are retained for diagnostics and theoretical parallelism. The dependency-driven Phase-5
 /// executor does not impose a global barrier between them; successors launch as soon as their
 /// pairwise [`SpeculativeDependency`] predecessors complete.
 #[derive(Clone, Debug, PartialEq, Eq)]

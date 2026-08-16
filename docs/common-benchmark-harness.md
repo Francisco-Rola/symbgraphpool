@@ -1,6 +1,6 @@
 # Common benchmark harness
 
-The harness turns one Brick-5F `RunIdentity` into one measured block plus an independent serial
+The harness turns one Phase-5F `RunIdentity` into one measured block plus an independent serial
 reference. Workload setup is performed twice and must generate identical initial state and blocks.
 Final serial/speculative state digests must match.
 
@@ -26,10 +26,11 @@ All modes use the same speculative executor and canonical validation/replay path
 ./scripts/run-benchmark-manifest.sh manifest.json
 ```
 
-For release ConflictLab matrices:
+For current ConflictLab evaluation use:
 
 ```bash
-./scripts/run-conflictlab-release-suite.sh quick
+./scripts/run-conflictlab-v1-evaluation.sh
+./scripts/run-conflictlab-parallelism-evaluation.sh
 ```
 
 Parameter definitions live in `docs/tuning-knobs.md`. Matrix generation/aggregation is documented in

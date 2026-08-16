@@ -398,7 +398,7 @@ fn weighted_build_projects_decay_without_mutating_feedback_state() {
 }
 
 #[test]
-fn legacy_binary_builder_preserves_pre_brick4_behavior() {
+fn legacy_binary_builder_preserves_pre_phase4_behavior() {
     let graph = graph();
     let edge_index = static_edge(&graph, "execute::Credit", "execute::Credit");
     let candidate = CandidateGraphBuilder::new(&graph)

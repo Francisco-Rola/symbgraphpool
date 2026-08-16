@@ -1,4 +1,4 @@
-//! Helpers for self-identifying Brick 5F experiment records.
+//! Helpers for self-identifying Phase 5F experiment records.
 
 use std::{
     fs,
@@ -14,7 +14,7 @@ use crate::{CorrectnessRecord, ExperimentMetadata};
 
 impl ExperimentMetadata {
     /// Best-effort capture of stable host/build metadata. Missing values remain missing so the
-    /// Brick 5F publication gate can reject an incomplete record instead of silently inventing
+    /// Phase 5F publication gate can reject an incomplete record instead of silently inventing
     /// provenance.
     pub fn capture_standard_environment(mut self, repo_root: impl AsRef<Path>) -> Self {
         let repo_root = repo_root.as_ref();

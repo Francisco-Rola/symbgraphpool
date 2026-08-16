@@ -2,7 +2,7 @@
 //!
 //! Networking and consensus are deliberately modeled as timing/admission components rather than
 //! real protocols. All submitted transactions are accepted, block production is FIFO by default,
-//! while split-phase Brick-5 execution can use dependency-driven speculative pre-execution with
+//! while split-phase Phase-5 execution can use dependency-driven speculative pre-execution with
 //! canonical validation/replay as the correctness boundary.
 
 mod block;

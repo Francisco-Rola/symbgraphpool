@@ -10,7 +10,7 @@ fn record() -> ExperimentRecord {
     ExperimentRecord {
         schema_version: EXPERIMENT_RECORD_SCHEMA_VERSION,
         metadata: ExperimentMetadata {
-            experiment_id: "brick5e-schema".to_owned(),
+            experiment_id: "phase5e-schema".to_owned(),
             workload: "conflictlab".to_owned(),
             mode: "adaptive".to_owned(),
             run_index: 2,

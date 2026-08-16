@@ -1,4 +1,4 @@
-# Adaptive Conflict Graph architecture through Brick 2
+# Adaptive Conflict Graph architecture through Phase 2
 
 ## Trust boundary
 

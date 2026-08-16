@@ -41,6 +41,6 @@ run_workspace "$ROOT/runtime/Cargo.toml" 'runtime'
 run_workspace "$ROOT/benchmarks/Cargo.toml" 'benchmark contracts'
 
 echo '=== evaluation-tool regression suite ==='
-"$ROOT/scripts/run-evaluation-tools-tests.sh"
+python3 "$ROOT/scripts/tests/test_evaluation_tools.py"
 
 echo '=== ALL REPOSITORY TESTS PASSED ==='

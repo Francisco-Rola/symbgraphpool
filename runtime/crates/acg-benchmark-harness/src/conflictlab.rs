@@ -107,6 +107,10 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             "conflictlab_operation_mix".to_owned(),
             config.operation_mix.as_str().to_owned(),
         );
+        environment.insert(
+            "conflictlab_parallelism_lanes".to_owned(),
+            config.parallelism_lanes.to_string(),
+        );
         let checksum = engine
             .code_metadata(code_id)
             .ok_or_else(|| {
@@ -183,6 +187,7 @@ impl BenchmarkWorkload for ConflictLabWorkload {
                 prediction_fault_mode: config.prediction_fault_mode,
                 prediction_fault_rate_bps: config.prediction_fault_rate_bps,
                 operation_mix: config.operation_mix,
+                parallelism_lanes: config.parallelism_lanes,
                 work: WorkShape {
                     work_iterations: config.warmup_work_iterations,
                     storage_rounds: config.warmup_storage_rounds,
@@ -231,6 +236,7 @@ impl BenchmarkWorkload for ConflictLabWorkload {
                 prediction_fault_mode: config.prediction_fault_mode,
                 prediction_fault_rate_bps: config.prediction_fault_rate_bps,
                 operation_mix: config.operation_mix,
+                parallelism_lanes: config.parallelism_lanes,
                 work: WorkShape {
                     work_iterations: config.work_iterations,
                     storage_rounds: config.storage_rounds,
@@ -272,6 +278,7 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             prediction_fault_mode: config.prediction_fault_mode,
             prediction_fault_rate_bps: config.prediction_fault_rate_bps,
             operation_mix: config.operation_mix,
+            parallelism_lanes: config.parallelism_lanes,
             work: WorkShape {
                 work_iterations: config.work_iterations,
                 storage_rounds: config.storage_rounds,
@@ -629,6 +636,10 @@ struct ConflictLabConfig {
     prediction_fault_mode: PredictionFaultMode,
     prediction_fault_rate_bps: u16,
     operation_mix: OperationMix,
+    /// Zero keeps the normal random/hot-account generator. A positive value assigns transaction
+    /// `i` to `account-(i % parallelism_lanes)`, creating exactly that many balanced conflict
+    /// chains for the controlled parallelism-ceiling experiment.
+    parallelism_lanes: u64,
     postchange_warmup_blocks: usize,
     consensus_divergence: ConsensusDivergence,
     simulation: SimulationConfig,
@@ -660,6 +671,7 @@ impl ConflictLabConfig {
             "prediction_fault_mode",
             "prediction_fault_rate_bps",
             "operation_mix",
+            "parallelism_lanes",
             "postchange_warmup_blocks",
             "consensus_divergence",
             "consensus_cutoff_ms",
@@ -744,6 +756,7 @@ impl ConflictLabConfig {
                 .map(String::as_str)
                 .unwrap_or("credit"),
         )?;
+        let parallelism_lanes = parameter(&run.parameters, "parallelism_lanes", 0_u64)?;
         let postchange_warmup_blocks =
             parameter(&run.parameters, "postchange_warmup_blocks", 0_usize)?;
         let consensus_divergence = ConsensusDivergence::parse(
@@ -818,6 +831,31 @@ impl ConflictLabConfig {
                 "non-credit operation_mix values require execution_backend=wasm".to_owned(),
             ));
         }
+        if parallelism_lanes > 0 {
+            if operation_mix != OperationMix::Credit {
+                return Err(HarnessError::WorkloadParameter(
+                    "parallelism_lanes is defined only for operation_mix=credit".to_owned(),
+                ));
+            }
+            if parallelism_lanes > accounts {
+                return Err(HarnessError::WorkloadParameter(format!(
+                    "parallelism_lanes={parallelism_lanes} exceeds accounts={accounts}"
+                )));
+            }
+            let transaction_count =
+                u64::try_from(transactions).map_err(|_| HarnessError::NumericOverflow)?;
+            if parallelism_lanes > transaction_count {
+                return Err(HarnessError::WorkloadParameter(format!(
+                    "parallelism_lanes={parallelism_lanes} exceeds transactions={transactions}"
+                )));
+            }
+            if hot_bps != 0 || warmup_hot_bps != 0 {
+                return Err(HarnessError::WorkloadParameter(
+                    "parallelism_lanes requires hot_account_probability_bps=0 (including warmup)"
+                        .to_owned(),
+                ));
+            }
+        }
 
         Ok(Self {
             transactions,
@@ -841,6 +879,7 @@ impl ConflictLabConfig {
             prediction_fault_mode,
             prediction_fault_rate_bps,
             operation_mix,
+            parallelism_lanes,
             postchange_warmup_blocks,
             consensus_divergence,
             simulation: SimulationConfig {
@@ -1635,6 +1674,7 @@ struct GenerateBlockConfig {
     prediction_fault_mode: PredictionFaultMode,
     prediction_fault_rate_bps: u16,
     operation_mix: OperationMix,
+    parallelism_lanes: u64,
     work: WorkShape,
     complexity_mix: ComplexityMix,
     simulation: SimulationConfig,
@@ -1699,6 +1739,17 @@ fn generate_block(
     Ok(block)
 }
 
+fn controlled_parallelism_account(
+    offset: usize,
+    parallelism_lanes: u64,
+) -> Result<Option<String>, HarnessError> {
+    if parallelism_lanes == 0 {
+        return Ok(None);
+    }
+    let offset = u64::try_from(offset).map_err(|_| HarnessError::NumericOverflow)?;
+    Ok(Some(format!("account-{}", offset % parallelism_lanes)))
+}
+
 fn generate_request(
     contract: &Address,
     generator: &mut ConflictLabGenerator,
@@ -1706,7 +1757,8 @@ fn generate_request(
     offset: usize,
     transaction_id: u64,
 ) -> Result<ExecutionRequest, HarnessError> {
-    let actual_account = generator.next_account();
+    let actual_account = controlled_parallelism_account(offset, config.parallelism_lanes)?
+        .unwrap_or_else(|| generator.next_account());
     let mut selector_rng = SplitMix64::new(transaction_id ^ config.selection_seed);
     let selector = selector_rng.next_u64();
     let transaction_work = config
@@ -2361,6 +2413,48 @@ mod v1_evaluation_tests {
             opaque_account_from_payload(&second.1),
             Some(selected.as_str())
         );
+    }
+
+    #[test]
+    fn controlled_parallelism_lanes_assign_balanced_conflict_chains() {
+        let lanes = 6_u64;
+        let accounts = (0..24)
+            .map(|offset| {
+                controlled_parallelism_account(offset, lanes)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for lane in 0..lanes {
+            assert_eq!(
+                accounts
+                    .iter()
+                    .filter(|account| *account == &format!("account-{lane}"))
+                    .count(),
+                4
+            );
+        }
+        assert_eq!(controlled_parallelism_account(0, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn parallelism_lanes_parameter_is_rejected_when_it_cannot_mean_balanced_credit_chains() {
+        let mut parameters = BTreeMap::new();
+        parameters.insert("transactions".to_owned(), "24".to_owned());
+        parameters.insert("accounts".to_owned(), "4".to_owned());
+        parameters.insert("parallelism_lanes".to_owned(), "6".to_owned());
+        let run = RunIdentity {
+            workload: "conflictlab".to_owned(),
+            mode: "static".to_owned(),
+            run_index: 1,
+            seed: 1,
+            workers: 6,
+            parameters,
+        };
+        let error = ConflictLabConfig::from_run(&run).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("parallelism_lanes=6 exceeds accounts=4"));
     }
 
     #[test]

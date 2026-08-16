@@ -1,4 +1,4 @@
-//! Brick 5F acceptance manifests and machine-readable evaluation gates.
+//! Phase 5F acceptance manifests and machine-readable evaluation gates.
 //!
 //! Acceptance is deliberately separate from execution. A record can be rejected as incomplete,
 //! scientifically inadmissible, or a performance regression without changing any canonical state

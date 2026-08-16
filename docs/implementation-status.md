@@ -1,183 +1,62 @@
 # Implementation status
 
-This document is the repository checkpoint after Brick 5F, with Brick 5C.7 as the production execution substrate and VM-lifecycle work preserved as research.
+ACG's main execution path is implemented end to end.
 
-## Production implementation
+## Phase 1 — symbolic profiles
 
-### Brick 1 — symbolic profile graph foundation — implemented
+Symbolic contract accesses are normalized into stable profile identities and conflict predicates.
+Unknown analyzer information is preserved conservatively.
 
-- parse and validate analyzer JSON;
-- normalize symbolic profiles;
-- stable content-derived profile identity;
-- dense validator-local `ProfileId` assignment;
-- indexed offline profile-edge derivation;
-- portable graph artifact + immutable CSR graph;
-- compiler/inspection CLI;
-- ConflictLab, MiniWarehouse, and Astroport fixtures/profiles;
-- minimal deterministic CosmWasm runtime and validator simulation substrate.
+## Phase 2 — concrete candidate graph
 
-### Brick 2 — concrete transaction graph — implemented
+Runtime transaction inputs refine symbolic relationships into concrete candidate conflicts. Clause-
+level matching, stable contract identity, and compact equivalence groups are implemented.
 
-- runtime transactions are adapted to `ProfileId`, `InstanceId`, and concrete input bindings;
-- precompiled three-valued predicates evaluate concrete candidate relationships;
-- only persistent profile adjacency is traversed;
-- `False` prunes, while `True` and `Unknown` materialize conservative candidate edges.
+## Phase 3 — runtime feedback
 
-### Brick 2.1 — clause-level conflict resolution — implemented
+Concrete execution produces positive/negative conflict evidence, decayed probability/confidence,
+candidate-miss history, and runtime fallback relationships. Checkpoints use stable relationship keys.
 
-- alternative conflict clauses are classified independently;
-- explicit unknown-reason metadata is retained;
-- contract-local relationships use dense instance identity, preventing deployments of the same code from colliding solely by shared code hash.
+## Phase 4 — adaptive scheduling
 
-### Brick 2.5 — structured MiniWarehouse integration — implemented
+Candidate relationships carry raw conflict probability and scheduling risk. The scheduler classifies
+Low/Soft/Hard relationships, builds a risk-bounded ordering DAG, and performs exact transitive
+reduction before execution.
 
-- deterministic workload generator;
-- sparse/bootstrap state setup;
-- variable order-line bindings;
-- input-derived `(warehouse, district, order)` prefixes;
-- remote-stock and skew controls;
-- structured ConflictLab/MiniWarehouse acceptance coverage.
+## Phase 5 — safe speculative execution
 
-### Brick 3 — runtime feedback and adaptive statistics — implemented
+Implemented runtime behavior:
 
-- concrete execution/access attribution;
-- positive and negative evidence;
-- decayed Beta statistics per static relationship;
-- runtime-discovered fallback edges for symbolic topology misses;
-- distinct evidence weights for pre-execution/canonical/validation/replay;
-- stable-key checkpoints across dense-ID reassignment.
+- detached speculative receipts and transaction-local writes;
+- canonical validation, reuse and selective replay;
+- dependency-driven READY-DAG execution without global wave barriers;
+- block-local persistent MVCC visibility for storage/bank/contract state;
+- replay/fan-out and serialization-cost learning;
+- serial bypass admission based on previous-block economics;
+- schema-v3 experiment records with planning/execution/feedback/consensus timing;
+- manifest-driven Phase-5F correctness/provenance acceptance.
 
-### Brick 4 — adaptive weighted scheduling — implemented
+Canonical validation/replay remains the correctness authority when prediction is incomplete.
 
-- feedback-projected weighted candidate graph;
-- runtime fallback topology participates in candidate construction;
-- configurable hard/soft probability thresholds;
-- deterministic hard-dependency orientation;
-- cumulative-risk-bounded wave construction;
-- schedule validation;
-- integrated adaptive planning pipeline.
+## Current evaluation state
 
-Scheduler waves are diagnostic/planning structures, not execution barriers.
+ConflictLab 1.0 provides the main internal mechanism evidence. It covers correctness, prediction
+faults, symbolic granularity, compaction, consensus timing/divergence, non-stationary adaptation,
+runtime semantics, fixed-six-worker block scaling, policy tuning, VM lifecycle controls and
+statistical repetitions.
 
-### Brick 5A — isolated speculative state and receipts — implemented
+A dedicated controlled parallelism-ceiling experiment now creates exact 1/2/3/4/6-lane conflict
+patterns plus a fully independent block. It compares nominal 6-worker capacity, the hindsight
+concrete-conflict oracle, actual executor wall time, phase throughput and full adaptive wall time,
+then reports planning/executor/reconciliation/feedback and Wasm/host/MVCC overhead.
 
-- detached transaction-visible state;
-- speculative execution without canonical mutation;
-- commit-ready write sets;
-- correctness read dependencies for point/range storage, bank state, all-balances, and contract metadata;
-- reverted-child read preservation and reverted-write exclusion.
+## Next engineering work
 
-### Brick 5B — canonical validation, reuse, and selective replay — implemented
+1. Run the controlled parallelism ceiling on native Linux and use its overhead breakdown to remove
+   execution/control-path losses before adding more policy complexity.
+2. Add core-count and memory/RSS scaling.
+3. Move MiniWarehouse onto the same current harness/reporting methodology.
+4. Add external workloads and competitive baselines.
+5. Freeze one clean revision for the final publication artifact.
 
-- receipts are bound to request/block/engine identity;
-- validation occurs in canonical transaction order;
-- valid successful receipts atomically commit detached writes and reuse outputs;
-- valid failed receipts are reused without writes;
-- invalid receipts replay canonically;
-- range/all-balances phantom detection is part of validation.
-
-### Brick 5C historical strict-wave prototype — removed from production
-
-The Rayon strict-wave runtime proved concurrent detached receipt execution but introduced global barriers and an inadequate predecessor visibility model. It has been superseded.
-
-### Brick 5C.5 — split-phase timeline — implemented
-
-- N+1 graph/schedule planning may overlap N validation;
-- N+1 transaction execution starts only after N has canonically committed;
-- pre-execution snapshots therefore use committed predecessor state.
-
-### Brick 5C.6 — dependency-driven versioned pre-execution — superseded by 5C.7
-
-This stage introduced successor-driven launch and versioned predecessor visibility. Its useful semantics remain in 5C.7; historical reconstruction machinery was removed.
-
-### Brick 5C.7 — READY-DAG + block-local persistent MVCC — implemented
-
-- no global wave barriers;
-- workers launch a transaction as soon as all predictive predecessors are complete;
-- one immutable block base is shared by the predicted block;
-- successful speculative transactions publish block-local storage/bank/contract versions;
-- each launch captures a compact immutable visibility mask;
-- reads resolve the newest visible canonical-earlier version lazily, then fall through to the block base;
-- transaction-local writes remain private until successful receipt completion;
-- failed transactions publish no versions;
-- concrete receipt validation/replay remains the correctness authority for missed/soft/unknown conflicts.
-
-## Performance findings that affect design
-
-These findings are research evidence, not additional production features:
-
-- after accounting for both critical-path and finite-worker capacity, the READY-DAG scheduler is generally within a few percent of the feasible observed-service lower bound;
-- controlled six/four/two/one-lane compute workloads follow their dependency ceilings closely;
-- compute-heavy fully independent Wasm reaches about 5.2x wall-clock speedup on six physical cores;
-- small transactions suffer large fixed/concurrent service-cost inflation;
-- ordinary conflict-free point MVCC is not the dominant source of that inflation;
-- VM lifecycle is material: unsafe retained instances provide a large upper-bound improvement but violate isolation;
-- fresh cache sharding preserves tested fresh semantics but gives only small/inconsistent end-to-end gains;
-- deeper VM snapshot/reset/COW work remains research, not production.
-
-See `research/vm-lifecycle/README.md` for the archived VM work.
-
-### Brick 5D — cost-aware validation/replay policy — implemented
-
-- 5D.1: concrete reconciliation attribution retains the exact stale validation dependency, responsible canonical predecessor, measured direct replay cost, candidate-edge presence, and transitive replay fan-out;
-- 5D.2: decayed replay-cost/fan-out statistics are persisted beside conflict probability; Brick 5E checkpoint v3 remains backward-compatible with v1/v2;
-- 5D.3: candidate edges retain raw conflict probability separately from cost-adjusted scheduling risk, and the risk-bounded scheduler uses the latter;
-- 5D.4: closed-loop phase-change tests prove expensive replay evidence hardens future scheduling and later independence/decay relaxes it again.
-
-Measured wall time remains validator-local optimization evidence and never becomes a correctness or consensus input. See [`brick-5d.md`](brick-5d.md).
-
-## Current Brick 5 completion
-
-### Brick 5E — learned serialization cost + stable evaluation records — implemented
-
-- READY-DAG transactions expose validator-local start/completion/service timing for performance attribution;
-- each scheduled edge learns decayed marginal dependency-ready delay as its serialization cost;
-- 5D's configured 250 us serialization reference is now only a low-confidence fallback and is blended toward learned per-relationship cost;
-- feedback checkpoints are v3 with v1/v2 backward-compatible restore;
-- the `acg-evaluation` runtime crate emits schema-v3 deterministic JSON/JSONL records (with v1/v2 read compatibility) spanning planning, dependency reduction, finite-worker/DAG bounds, VM/host/MVCC execution, replay, upstream-aggregated feedback overhead, full measured adaptive-pipeline wall/stages, and correctness digests.
-
-See [`brick-5e.md`](brick-5e.md).
-
-### Brick 5F — formal acceptance and reproducible evaluation gates — implemented
-
-- publication and smoke acceptance policies distinguish scientific completeness from mechanism-only tests;
-- publication records require provenance, explicit workload parameters, serial/DAG references, clean release-build metadata, state digests, and serial equivalence;
-- versioned experiment manifests enumerate the complete expected run matrix and enforce the physical-core budget;
-- versioned acceptance reports classify incomplete records, correctness failures, configuration errors, and explicitly configured performance regressions;
-- missing, unexpected, and duplicate samples are machine-detectable;
-- deterministic SHA-256 state-digest and best-effort host/build metadata helpers are available to future workload adapters;
-- `acg-evaluate` and `scripts/validate-experiment-records.sh` provide a shared JSONL acceptance gate.
-
-See [`brick-5f.md`](brick-5f.md) and [`../evaluation/README.md`](../evaluation/README.md).
-
-## Common benchmark harness — implemented
-
-- manifest runs are executed through one workload-independent lifecycle: deterministic setup, independent serial reference, requested speculative policy, state digests, Brick 5E record, Brick 5F acceptance;
-- the workload adapter boundary is isolated from READY-DAG/MVCC and evaluation schemas;
-- static, probability-only, and cost-aware policy ablations use the same executor/canonical replay path;
-- common `acg.*` tuning parameters are manifest-driven and preserved in exact run identity;
-- ConflictLab is the first built-in adapter and an end-to-end smoke manifest validates the runner;
-- dense hard dependency sets are reduced exactly before READY-DAG execution while preserving reachability;
-- feedback observations are aggregated by learned relationship/epoch before adaptive-state mutation while raw observation counts remain visible;
-- ConflictLab exposes exact/coarse/opaque prediction-quality modes so adaptive false-positive/false-negative behavior can be measured.
-
-See [`common-benchmark-harness.md`](common-benchmark-harness.md).
-
-## ConflictLab release evaluation suite — implemented
-
-- compact matrix definitions expand deterministically into complete Brick-5F manifests;
-- accepted JSONL can be flattened and aggregated into wide and plot-ready long CSV statistics;
-- ConflictLab release runs can use the real CosmWasm artifact instead of the native smoke contract;
-- transaction complexity independently varies compute iterations, repeated storage rounds, and payload bytes while preserving account-level conflict semantics;
-- release matrices cover transaction granularity, contention, worker scaling, block/planner scaling, phase changes, admission/block packing, and later policy tuning;
-- `sim.admission_tps`, `sim.block_interval_ms`, `sim.block_size`, and deterministic mempool ordering are explicit run parameters.
-
-See [`../evaluation/conflictlab/README.md`](../evaluation/conflictlab/README.md) and [`tuning-knobs.md`](tuning-knobs.md).
-
-## Proposed follow-on engineering
-
-1. Run the accepted release ConflictLab matrices and optimize only bottlenecks visible in those data.
-2. Add an oracle-conflict baseline and explicit predicted-block/produced-block perturbation.
-3. Connect MiniWarehouse to the same harness and aggregation pipeline.
-4. Add external workloads after both first-party workload families use the same methodology.
-5. Keep VM snapshot/reset/COW work separate until accepted workloads show it remains a material bottleneck.
+Detailed historical phase notes remain under `docs/phase-*.md`.

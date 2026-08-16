@@ -3,8 +3,8 @@
 //! One [`RunIdentity`](acg_evaluation::RunIdentity) corresponds to one measured block. Workload
 //! adapters may create deterministic warm-up blocks before it. The harness independently prepares
 //! a canonical serial reference and the requested speculative mode, verifies identical initial
-//! state/workload generation, executes both, emits one stable Brick-5E [`ExperimentRecord`], and
-//! finally evaluates the complete dataset through Brick 5F.
+//! state/workload generation, executes both, emits one stable Phase-5E [`ExperimentRecord`], and
+//! finally evaluates the complete dataset through Phase 5F.
 //!
 //! The harness is performance/evaluation infrastructure only. It never changes canonical validity
 //! or commit semantics.
@@ -55,10 +55,10 @@ pub enum HarnessMode {
     /// Static symbolic/prior graph. Concrete execution is validated/replayed but no feedback is
     /// retained for later blocks.
     Static,
-    /// Brick-3/4 conflict-probability learning only. Replay/serialization cost observations are
+    /// Phase-3/4 conflict-probability learning only. Replay/serialization cost observations are
     /// intentionally excluded.
     ProbabilityOnly,
-    /// Full Brick-5D/5E conflict probability + replay cost/fan-out + learned serialization cost.
+    /// Full Phase-5D/5E conflict probability + replay cost/fan-out + learned serialization cost.
     CostAware,
 }
 

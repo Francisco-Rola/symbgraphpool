@@ -1,6 +1,6 @@
 # ADR 0001: Stable profile keys and dense local IDs
 
-- Status: accepted for brick 1
+- Status: accepted for phase 1
 - Date: 2026-08-06
 
 ## Context

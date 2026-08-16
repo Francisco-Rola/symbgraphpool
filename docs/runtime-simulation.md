@@ -41,7 +41,7 @@ configurable.
 `BlockSelectionPolicy` will support future size, gas, fee, account, or benchmark-specific block
 construction policies.
 
-`BlockScheduler` will consume the Brick 2 candidate transaction graph and produce hard/soft
+`BlockScheduler` will consume the Phase 2 candidate transaction graph and produce hard/soft
 conflict-aware waves.
 
 `BlockExecutor` will gain a speculative parallel implementation only after isolated execution,

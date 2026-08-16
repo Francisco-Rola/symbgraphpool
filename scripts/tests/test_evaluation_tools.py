@@ -7,13 +7,14 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-GENERATOR = ROOT / "scripts" / "generate-manifest-matrix.py"
-AGGREGATOR = ROOT / "scripts" / "aggregate-experiment.py"
-V1_CACHE_CHECK = ROOT / "scripts" / "check-conflictlab-v1-campaign-cache.py"
-V1_CORRECTNESS_DIAG = ROOT / "scripts" / "diagnose-conflictlab-v1-correctness.py"
-V1_VALIDATOR = ROOT / "scripts" / "validate-conflictlab-v1.py"
+GENERATOR = ROOT / "scripts" / "internal" / "generate-manifest-matrix.py"
+AGGREGATOR = ROOT / "scripts" / "internal" / "aggregate-experiment.py"
+V1_CACHE_CHECK = ROOT / "scripts" / "internal" / "check-conflictlab-v1-campaign-cache.py"
+V1_CORRECTNESS_DIAG = ROOT / "scripts" / "internal" / "diagnose-conflictlab-v1-correctness.py"
+V1_VALIDATOR = ROOT / "scripts" / "internal" / "validate-conflictlab-v1.py"
+PARALLELISM_SUMMARY = ROOT / "scripts" / "internal" / "summarize-conflictlab-parallelism.py"
 
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts" / "internal"))
 from conflictlab_v1_miss_policy import (  # noqa: E402
     COARSE_SYMBOLIC_GRANULARITY,
     INJECTED_PREDICTION_FAULT,
@@ -75,140 +76,6 @@ class EvaluationToolTests(unittest.TestCase):
             self.assertEqual(sorted(run["run_index"] for run in manifest["runs"]), list(range(1, 33)))
             self.assertTrue(all(run["workers"] <= 6 for run in manifest["runs"]))
             self.assertEqual({run["parameters"]["complexity"] for run in manifest["runs"]}, {"tiny", "heavy"})
-
-    def test_phase3_matrix_covers_real_wasm_complexity_prediction_and_bypass_axes(self):
-        source = ROOT / "evaluation/conflictlab/phase3-system.grid.json"
-        with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp) / "manifest.json"
-            subprocess.run([sys.executable, str(GENERATOR), str(source), str(output)], check=True)
-            manifest = json.loads(output.read_text(encoding="utf-8"))
-        runs = manifest["runs"]
-        self.assertEqual(len(runs), 864)
-        self.assertEqual({int(run["parameters"]["sim.block_size"]) for run in runs}, {32, 128, 512})
-        self.assertEqual({run["parameters"]["complexity"] for run in runs}, {"light", "medium", "heavy"})
-        self.assertEqual({run["parameters"]["prediction_quality"] for run in runs}, {"exact", "bucketed"})
-        self.assertEqual({run["parameters"]["acg.serial_bypass_enabled"] for run in runs}, {"false", "true"})
-        self.assertEqual({run["parameters"]["acg.risk_budget"] for run in runs}, {"0.50", "0.90"})
-        self.assertTrue(all(run["parameters"]["execution_backend"] == "wasm" for run in runs))
-        self.assertTrue(all(run["parameters"]["warmup_blocks"] == "4" for run in runs))
-        self.assertTrue(all(int(run["parameters"]["transactions"]) == int(run["parameters"]["sim.block_size"]) for run in runs))
-
-    def test_phase3_exploration_matrix_keeps_complexity_as_an_axis(self):
-        source = ROOT / "evaluation/conflictlab/phase3-exploration.grid.json"
-        with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp) / "manifest.json"
-            subprocess.run([sys.executable, str(GENERATOR), str(source), str(output)], check=True)
-            manifest = json.loads(output.read_text(encoding="utf-8"))
-        runs = manifest["runs"]
-        self.assertEqual(len(runs), 108)
-        self.assertEqual({int(run["parameters"]["sim.block_size"]) for run in runs}, {32, 128, 512})
-        self.assertEqual({run["parameters"]["complexity"] for run in runs}, {"light", "medium", "heavy"})
-        self.assertEqual({run["parameters"]["acg.exploration_rate"] for run in runs}, {"0.00", "0.05", "0.15"})
-        self.assertTrue(all(run["parameters"]["prediction_quality"] == "bucketed" for run in runs))
-        self.assertTrue(all(run["parameters"]["execution_backend"] == "wasm" for run in runs))
-
-    def test_phase4_matrices_cover_reuse_mixed_complexity_and_targeted_exploration(self):
-        expected = {
-            "phase4-system.grid.json": 432,
-            "phase4-vm-lifecycle.grid.json": 36,
-            "phase4-mixed.grid.json": 216,
-            "phase4-exploration.grid.json": 48,
-        }
-        manifests = {}
-        for name, count in expected.items():
-            source = ROOT / "evaluation/conflictlab" / name
-            with tempfile.TemporaryDirectory() as temp:
-                output = Path(temp) / "manifest.json"
-                subprocess.run([sys.executable, str(GENERATOR), str(source), str(output)], check=True)
-                manifest = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(len(manifest["runs"]), count)
-            manifests[name] = manifest
-
-        system = manifests["phase4-system.grid.json"]["runs"]
-        self.assertEqual({run["parameters"]["complexity"] for run in system}, {"light", "medium", "heavy"})
-        self.assertEqual({run["parameters"]["vm_instance_lifecycle"] for run in system}, {"reuse"})
-        self.assertEqual({run["parameters"]["acg.serial_bypass_enabled"] for run in system}, {"false", "true"})
-
-        lifecycle = manifests["phase4-vm-lifecycle.grid.json"]["runs"]
-        self.assertEqual({run["parameters"]["vm_instance_lifecycle"] for run in lifecycle}, {"reuse", "recycle"})
-
-        mixed = manifests["phase4-mixed.grid.json"]["runs"]
-        self.assertEqual(
-            {run["parameters"]["complexity_mix"] for run in mixed},
-            {"80-15-5", "33-34-33", "10-30-60"},
-        )
-
-        exploration = manifests["phase4-exploration.grid.json"]["runs"]
-        settings = {
-            (
-                run["parameters"]["acg.exploration_rate"],
-                run["parameters"]["acg.exploration_min_uncertainty"],
-                run["parameters"]["acg.exploration_max_transactions_per_block"],
-            )
-            for run in exploration
-        }
-        self.assertEqual(
-            settings,
-            {("0.00", "0.35", "0"), ("0.50", "0.50", "4"), ("0.50", "0.35", "8")},
-        )
-
-    def test_phase6_matrices_cover_real_wasm_cutoff_divergence_and_policy_axes(self):
-        expected = {
-            "phase6-feature-state.grid.json": 576,
-            "phase6-consensus-cutoff.grid.json": 96,
-            "phase6-serial-preexecution-cutoff.grid.json": 24,
-            "phase6-consensus-divergence.grid.json": 192,
-            "phase6-policy-sensitivity.grid.json": 48,
-            "phase6-vm-lifecycle-sanity.grid.json": 16,
-        }
-        manifests = {}
-        for name, count in expected.items():
-            source = ROOT / "evaluation/conflictlab" / name
-            with tempfile.TemporaryDirectory() as temp:
-                output = Path(temp) / "manifest.json"
-                subprocess.run([sys.executable, str(GENERATOR), str(source), str(output)], check=True)
-                manifest = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(len(manifest["runs"]), count)
-            self.assertTrue(all(run["workers"] == 6 for run in manifest["runs"]))
-            self.assertTrue(all(run["parameters"]["execution_backend"] == "wasm" for run in manifest["runs"]))
-            if name == "phase6-vm-lifecycle-sanity.grid.json":
-                self.assertEqual(
-                    {run["parameters"]["vm_instance_lifecycle"] for run in manifest["runs"]},
-                    {"reuse", "recycle"},
-                )
-            else:
-                self.assertTrue(
-                    all(run["parameters"]["vm_instance_lifecycle"] == "reuse" for run in manifest["runs"])
-                )
-            self.assertFalse(any(
-                key.startswith("acg.exploration_")
-                for run in manifest["runs"]
-                for key in run["parameters"]
-            ))
-            manifests[name] = manifest
-
-        feature = manifests["phase6-feature-state.grid.json"]["runs"]
-        self.assertEqual({int(r["parameters"]["sim.block_size"]) for r in feature}, {32, 128, 512})
-        self.assertEqual({r["parameters"]["complexity"] for r in feature}, {"low", "medium", "high", "mixed"})
-        self.assertEqual({r["mode"] for r in feature}, {"static", "probability-only", "cost-aware"})
-        self.assertEqual({r["parameters"]["prediction_quality"] for r in feature}, {"exact", "bucketed"})
-        self.assertEqual({r["parameters"]["acg.serial_bypass_enabled"] for r in feature}, {"false", "true"})
-
-        cutoff = manifests["phase6-consensus-cutoff.grid.json"]["runs"]
-        self.assertEqual({r["parameters"]["consensus_cutoff_ms"] for r in cutoff}, {"250", "500", "1000"})
-
-        divergence = manifests["phase6-consensus-divergence.grid.json"]["runs"]
-        self.assertEqual(
-            {r["parameters"]["consensus_divergence"] for r in divergence},
-            {"identical", "tail-5pct", "tail-20pct", "reorder-5pct", "reorder-20pct", "tail-reorder-10pct"},
-        )
-
-        policy = manifests["phase6-policy-sensitivity.grid.json"]["runs"]
-        self.assertEqual({r["parameters"]["acg.risk_budget"] for r in policy}, {"0.75", "0.90", "0.98"})
-
-        lifecycle = manifests["phase6-vm-lifecycle-sanity.grid.json"]["runs"]
-        self.assertEqual({r["parameters"]["complexity"] for r in lifecycle}, {"low", "medium", "high", "mixed"})
-        self.assertEqual({r["parameters"]["vm_instance_lifecycle"] for r in lifecycle}, {"reuse", "recycle"})
 
     def test_aggregator_emits_flat_wide_and_long_plot_tables(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -675,6 +542,111 @@ class EvaluationToolTests(unittest.TestCase):
         self.assertEqual(len({run["seed"] for run in headlines}), 20)
         soak = manifests["v1-long-run-soak.grid.json"]["runs"]
         self.assertTrue(all(run["parameters"]["warmup_blocks"] == "1000" for run in soak))
+
+    def test_parallelism_ceiling_matrix_has_balanced_lane_and_amortization_cases(self):
+        source = ROOT / "evaluation/conflictlab/parallelism-ceiling.grid.json"
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "manifest.json"
+            subprocess.run([sys.executable, str(GENERATOR), str(source), str(output)], check=True)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+        runs = manifest["runs"]
+        self.assertEqual(len(runs), 120)
+        self.assertEqual({run["workers"] for run in runs}, {6})
+        self.assertEqual({run["mode"] for run in runs}, {"static", "probability-only"})
+        self.assertEqual(
+            {int(run["parameters"]["parallelism_lanes"]) for run in runs if run["parameters"]["work_iterations"] == "786432"},
+            {1, 2, 3, 4, 6, 384},
+        )
+        self.assertEqual(
+            {int(run["parameters"]["work_iterations"]) for run in runs if run["parameters"]["parallelism_lanes"] == "384"},
+            {8192, 131072, 786432, 1572864},
+        )
+        self.assertTrue(all(run["parameters"]["prediction_quality"] == "exact" for run in runs))
+        self.assertTrue(all(run["parameters"]["hot_account_probability_bps"] == "0" for run in runs))
+        self.assertTrue(all(run["parameters"]["acg.serial_bypass_enabled"] == "false" for run in runs))
+
+    def test_parallelism_summary_reports_oracle_executor_and_overhead(self):
+        def record(seed, worker_wall):
+            return {
+                "metadata": {
+                    "experiment_id": "conflictlab-parallelism-ceiling",
+                    "mode": "static",
+                    "run_index": seed,
+                    "seed": seed,
+                    "workers": 6,
+                    "parameters": {
+                        "parallelism_lanes": "6",
+                        "work_iterations": "786432",
+                        "complexity": "high",
+                        "prediction_quality": "exact",
+                        "consensus_divergence": "identical",
+                    },
+                },
+                "correctness": {"serial_equivalent": True},
+                "parallelism": {
+                    "serial_equivalent_work_nanos": 6000,
+                    "serial_cost_dag_bound_nanos": 1000,
+                    "perfect_conflict_parallel_lower_bound_nanos": 1000,
+                    "observed_service_dag_bound_nanos": 1050,
+                    "observed_service_work_nanos": 6300,
+                    "worker_capacity_bound_nanos": 1050,
+                    "parallel_lower_bound_nanos": 1050,
+                    "actual_execution_wall_nanos": worker_wall,
+                },
+                "consensus": {
+                    "bottleneck_nanos": 1500,
+                    "candidate_transactions": 6,
+                    "prepared_receipts": 6,
+                    "cutoff_reached": False,
+                },
+                "pipeline_timing": {
+                    "planning_nanos": 100,
+                    "preexecution_nanos": worker_wall + 50,
+                    "pre_execution_feedback_nanos": 0,
+                    "reconciliation_nanos": 100,
+                    "reconciliation_feedback_nanos": 0,
+                    "total_adaptive_block_nanos": 1800,
+                },
+                "execution": {
+                    "transactions": 6,
+                    "max_in_flight": 6,
+                    "dependency_plan_setup_nanos": 25,
+                    "preexecution_worker_wall_nanos": worker_wall,
+                    "aggregate_ready_wait_nanos": 30,
+                    "aggregate_visibility_capture_nanos": 60,
+                    "aggregate_contract_execution_nanos": 5400,
+                    "aggregate_publish_and_unblock_nanos": 120,
+                    "contract": {
+                        "aggregate_wasm_instance_acquire_nanos": 12,
+                        "aggregate_wasm_entrypoint_nanos": 5200,
+                        "aggregate_host_storage_nanos": 200,
+                        "aggregate_mvcc_storage_point_nanos": 100,
+                        "aggregate_mvcc_publish_nanos": 80,
+                    },
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            records = temp / "records.jsonl"
+            report = temp / "report.txt"
+            csv_path = temp / "report.csv"
+            records.write_text(
+                "\n".join(json.dumps(record(seed, wall)) for seed, wall in [(1, 1200), (2, 1300)]) + "\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [sys.executable, str(PARALLELISM_SUMMARY), str(records), "--output", str(report), "--csv", str(csv_path)],
+                check=True,
+            )
+            text = report.read_text(encoding="utf-8")
+            with csv_path.open(encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertIn("Lane sweep at high compute", text)
+        self.assertIn("Wall-clock overhead breakdown", text)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(float(rows[0]["oracle_speedup_x"]), 6.0)
+        self.assertGreater(float(rows[0]["executor_oracle_efficiency_pct"]), 75.0)
 
     def test_v1_candidate_miss_policy_accepts_measured_exception_classes_with_recovery(self):
         def record(

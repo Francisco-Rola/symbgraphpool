@@ -12,7 +12,7 @@ fn complete_record() -> ExperimentRecord {
     ExperimentRecord {
         schema_version: EXPERIMENT_RECORD_SCHEMA_VERSION,
         metadata: ExperimentMetadata {
-            experiment_id: "brick5f-acceptance".to_owned(),
+            experiment_id: "phase5f-acceptance".to_owned(),
             workload: "conflictlab".to_owned(),
             mode: "cost-aware".to_owned(),
             run_index: 1,
@@ -244,7 +244,7 @@ fn manifest_detects_missing_unexpected_and_duplicate_samples() {
     second.metadata.run_index = 2;
     second.metadata.seed = 43;
     let manifest = ExperimentManifest::new(
-        "brick5f-acceptance",
+        "phase5f-acceptance",
         6,
         vec![
             RunIdentity::from_record(&first),
@@ -270,12 +270,12 @@ fn manifest_validation_rejects_duplicate_and_oversubscribed_run_specs() {
     let record = complete_record();
     let identity = RunIdentity::from_record(&record);
     let duplicate =
-        ExperimentManifest::new("brick5f-acceptance", 6, vec![identity.clone(), identity]);
+        ExperimentManifest::new("phase5f-acceptance", 6, vec![identity.clone(), identity]);
     assert!(duplicate.validate().is_err());
 
     let mut too_wide = RunIdentity::from_record(&record);
     too_wide.workers = 7;
-    let oversubscribed = ExperimentManifest::new("brick5f-acceptance", 6, vec![too_wide]);
+    let oversubscribed = ExperimentManifest::new("phase5f-acceptance", 6, vec![too_wide]);
     assert!(oversubscribed.validate().is_err());
 }
 
@@ -283,7 +283,7 @@ fn manifest_validation_rejects_duplicate_and_oversubscribed_run_specs() {
 fn jsonl_reader_and_state_digest_helper_are_stable() {
     let record = complete_record();
     let mut path = std::env::temp_dir();
-    path.push(format!("acg-brick5f-{}.jsonl", std::process::id()));
+    path.push(format!("acg-phase5f-{}.jsonl", std::process::id()));
     let bytes = [record.to_json_line().unwrap(), b"\n".to_vec()].concat();
     fs::write(&path, bytes).unwrap();
     let restored = read_records_jsonl(&path).unwrap();

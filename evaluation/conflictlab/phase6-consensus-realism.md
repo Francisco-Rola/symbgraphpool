@@ -89,21 +89,15 @@ The purpose is broad service-cost coverage. Real chain execution times vary subs
 host functions, state backend, hardware and transaction type, so observed serial service time is the
 quantity to use when interpreting results.
 
-## Evaluation campaigns
+## Current status
 
-`run-conflictlab-phase6-evaluation.sh` runs 952 real-Wasm records:
+This document describes the pre-V1 Phase 6 design. Its cutoff, divergence, policy, and VM-lifecycle
+coverage is now subsumed by ConflictLab 1.0. Use the current suite instead of the historical Phase 6
+runner:
 
-| Campaign | Runs | Purpose |
-| --- | ---: | --- |
-| `phase6-feature-state` | 576 | B32/B128/B512, low/medium/high/mixed, 25/75% contention, exact/bucketed, static/probability/cost-aware, admission off/on |
-| `phase6-consensus-cutoff` | 96 | B512 high/mixed, 250/500/1000 ms physical cutoffs, probability/cost-aware |
-| `phase6-serial-preexecution-cutoff` | 24 | forced serial admission across all four complexity classes and all three cutoffs |
-| `phase6-consensus-divergence` | 192 | replacement and ordering perturbation behavior at B512 |
-| `phase6-policy-sensitivity` | 48 | bucketed B512 risk budgets 0.75/0.90/0.98 for probability/cost-aware |
-| `phase6-vm-lifecycle-sanity` | 16 | matched B512 reuse/recycle semantic and lifecycle-cost sentinel across all complexity classes |
-
-All campaigns use real Wasm, instance reuse, at most six workers and two deterministic seeds. The
-matrix is intentionally decomposed instead of taking one enormous Cartesian product.
+```bash
+./scripts/run-conflictlab-v1-evaluation.sh
+```
 
 ## Repository gate
 

@@ -26,7 +26,7 @@ fn metadata_capture_populates_portable_fields_without_overwriting_explicit_value
 
 #[test]
 fn sha256_digest_is_deterministic() {
-    assert_eq!(sha256_hex(b"brick5f"), sha256_hex(b"brick5f"));
-    assert_ne!(sha256_hex(b"brick5f"), sha256_hex(b"brick5e"));
-    assert_eq!(sha256_hex(b"brick5f").len(), 64);
+    assert_eq!(sha256_hex(b"phase5f"), sha256_hex(b"phase5f"));
+    assert_ne!(sha256_hex(b"phase5f"), sha256_hex(b"phase5e"));
+    assert_eq!(sha256_hex(b"phase5f").len(), 64);
 }

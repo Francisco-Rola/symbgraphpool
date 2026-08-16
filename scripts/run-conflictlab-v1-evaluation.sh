@@ -62,8 +62,8 @@ run_grid() {
   local campaign_dir="$OUT/$name"
   local cache_reason
 
-  python3 "$ROOT/scripts/generate-manifest-matrix.py" "$ROOT/$grid" "$expected_manifest" >/dev/null
-  if cache_reason=$(python3 "$ROOT/scripts/check-conflictlab-v1-campaign-cache.py" "$campaign_dir" "$expected_manifest" 2>&1); then
+  python3 "$ROOT/scripts/internal/generate-manifest-matrix.py" "$ROOT/$grid" "$expected_manifest" >/dev/null
+  if cache_reason=$(python3 "$ROOT/scripts/internal/check-conflictlab-v1-campaign-cache.py" "$campaign_dir" "$expected_manifest" 2>&1); then
     echo "=== ConflictLab 1.0: $name ==="
     echo "REUSE: $cache_reason"
     return 0
@@ -74,7 +74,7 @@ run_grid() {
   # The matrix runner appends records. Remove any incomplete/stale campaign directory before a
   # rerun so a failed earlier attempt cannot duplicate records in the resumed suite.
   rm -rf "$campaign_dir"
-  if "$ROOT/scripts/run-conflictlab-release-matrix.sh" "$grid" "$campaign_dir" \
+  if "$ROOT/scripts/internal/run-conflictlab-release-matrix.sh" "$grid" "$campaign_dir" \
       2>&1 | tee "$OUT/$name-run.log"; then
     return 0
   fi
@@ -105,13 +105,13 @@ done
 postprocess_failures=()
 validator_args=()
 if [[ "$PROFILE" != full ]]; then validator_args+=(--allow-partial); fi
-if ! python3 "$ROOT/scripts/validate-conflictlab-v1.py" "$OUT/records.jsonl" "${validator_args[@]}" | tee "$OUT/validation.txt"; then
+if ! python3 "$ROOT/scripts/internal/validate-conflictlab-v1.py" "$OUT/records.jsonl" "${validator_args[@]}" | tee "$OUT/validation.txt"; then
   postprocess_failures+=(validation)
 fi
-if ! python3 "$ROOT/scripts/aggregate-experiment.py" "$OUT/records.jsonl" --out-dir "$OUT/aggregate"; then
+if ! python3 "$ROOT/scripts/internal/aggregate-experiment.py" "$OUT/records.jsonl" --out-dir "$OUT/aggregate"; then
   postprocess_failures+=(aggregate)
 fi
-if ! python3 "$ROOT/scripts/summarize-conflictlab-v1.py" "$OUT/records.jsonl" \
+if ! python3 "$ROOT/scripts/internal/summarize-conflictlab-v1.py" "$OUT/records.jsonl" \
     --output "$OUT/results-summary.txt" --markdown "$OUT/paper-analysis.md" > "$OUT/summary-run.log"; then
   postprocess_failures+=(summary)
 fi
@@ -142,8 +142,8 @@ if ((${#campaign_failures[@]} > 0 || ${#postprocess_failures[@]} > 0)); then
     printf '  postprocess: %s\n' "${postprocess_failures[@]}" >&2
   fi
   echo "Completed independent campaigns were retained and will be reused on the next run." >&2
-  if [[ -x "$ROOT/scripts/collect-conflictlab-v1-debug-bundle.sh" ]]; then
-    if debug_bundle=$("$ROOT/scripts/collect-conflictlab-v1-debug-bundle.sh" "$OUT" 2>/dev/null); then
+  if [[ -x "$ROOT/scripts/internal/collect-conflictlab-v1-debug-bundle.sh" ]]; then
+    if debug_bundle=$("$ROOT/scripts/internal/collect-conflictlab-v1-debug-bundle.sh" "$OUT" 2>/dev/null); then
       echo "Debug bundle for upload: $debug_bundle" >&2
     else
       echo "Debug bundle collection failed; upload $OUT/validation.txt and $OUT/records.jsonl." >&2
@@ -161,4 +161,4 @@ echo "  $OUT/aggregate/summary-wide.csv"
 echo "  $OUT/aggregate/plot-long.csv"
 echo "  $OUT/suite-environment.txt"
 echo "or create one self-contained debug/analysis bundle:"
-echo "  ./scripts/collect-conflictlab-v1-debug-bundle.sh $OUT"
+echo "  ./scripts/internal/collect-conflictlab-v1-debug-bundle.sh $OUT"

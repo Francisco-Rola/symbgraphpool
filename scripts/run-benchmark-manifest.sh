@@ -49,4 +49,4 @@ if [[ $status -ne 0 ]]; then
   exit "$status"
 fi
 
-echo "PASS: manifest executed and Brick 5F accepted all records" | tee -a "$summary"
+echo "PASS: manifest executed and Phase 5F accepted all records" | tee -a "$summary"

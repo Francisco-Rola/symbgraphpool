@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "physical_core_limit": 6,
+  "record_schema_version": 3,
+  "policy_file": "../policies/release-tuning.json",
+  "base_run": {
+    "workload": "conflictlab",
+    "parameters": {
+      "execution_backend": "wasm",
+      "vm_instance_lifecycle": "reuse",
+      "vm_gas_limit": "18446744073709551615",
+      "warmup_blocks": "0",
+      "postchange_warmup_blocks": "0",
+      "prediction_quality": "exact",
+      "prediction_buckets": "8",
+      "symbolic_granularity": "fine",
+      "prediction_fault_mode": "none",
+      "prediction_fault_rate_bps": "0",
+      "operation_mix": "credit",
+      "consensus_divergence": "identical",
+      "consensus_cutoff_ms": "5000",
+      "hot_account_probability_bps": "0",
+      "complexity_mix": "homogeneous",
+      "storage_rounds": "0",
+      "payload_bytes": "512",
+      "sim.admission_tps": "25000",
+      "sim.block_interval_ms": "2000",
+      "sim.block_size": "384",
+      "transactions": "384",
+      "accounts": "384",
+      "acg.compact_equivalence_groups": "true",
+      "acg.serial_bypass_enabled": "false",
+      "acg.soft_threshold": "0.20",
+      "acg.hard_threshold": "0.95",
+      "acg.risk_budget": "0.90",
+      "acg.feedback_retention_factor": "0.99",
+      "acg.feedback_confidence_scale": "20.0",
+      "acg.serialization_cost_reference_nanos": "250000",
+      "acg.invalidation_fanout_weight": "1.0",
+      "acg.pre_consensus_serialization_weight": "1.0",
+      "acg.post_consensus_replay_weight": "1.0"
+    }
+  },
+  "order_seed": 202608161,
+  "experiment_id": "conflictlab-parallelism-ceiling",
+  "matrix": {
+    "modes": [
+      "static",
+      "probability-only"
+    ],
+    "workers": [
+      6
+    ],
+    "seeds": [
+      11,
+      47,
+      101,
+      1001,
+      1009
+    ],
+    "cases": [
+      {
+        "parameters": {
+          "complexity": "high",
+          "work_iterations": "786432",
+          "parallelism_lanes": "1",
+          "contention": "controlled-1-lane"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "high",
+          "work_iterations": "786432",
+          "parallelism_lanes": "2",
+          "contention": "controlled-2-lane"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "high",
+          "work_iterations": "786432",
+          "parallelism_lanes": "3",
+          "contention": "controlled-3-lane"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "high",
+          "work_iterations": "786432",
+          "parallelism_lanes": "4",
+          "contention": "controlled-4-lane"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "high",
+          "work_iterations": "786432",
+          "parallelism_lanes": "6",
+          "contention": "controlled-6-lane"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "high",
+          "work_iterations": "786432",
+          "parallelism_lanes": "384",
+          "contention": "independent"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "light",
+          "work_iterations": "8192",
+          "parallelism_lanes": "6",
+          "contention": "controlled-6-lane"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "131072",
+          "parallelism_lanes": "6",
+          "contention": "controlled-6-lane"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "ceiling",
+          "work_iterations": "1572864",
+          "parallelism_lanes": "6",
+          "contention": "controlled-6-lane"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "light",
+          "work_iterations": "8192",
+          "parallelism_lanes": "384",
+          "contention": "independent"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "medium",
+          "work_iterations": "131072",
+          "parallelism_lanes": "384",
+          "contention": "independent"
+        }
+      },
+      {
+        "parameters": {
+          "complexity": "ceiling",
+          "work_iterations": "1572864",
+          "parallelism_lanes": "384",
+          "contention": "independent"
+        }
+      }
+    ]
+  }
+}

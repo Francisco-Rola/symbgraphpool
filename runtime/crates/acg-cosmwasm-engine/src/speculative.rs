@@ -133,7 +133,7 @@ impl SpeculativeExecutionStatus {
     }
 }
 
-/// Brick 5E validator-local timing for one speculative execution.
+/// Phase 5E validator-local timing for one speculative execution.
 ///
 /// Offsets are measured from the dependency worker phase origin. They are observational only and
 /// never participate in validation, replay correctness, or consensus-visible state.
@@ -160,7 +160,7 @@ pub struct SpeculativeTxResult {
     pub accesses: Vec<AccessRecord>,
     pub read_dependencies: Vec<ReadDependency>,
     pub write_set: StateWriteSet,
-    /// Brick 5E local execution timing used only for cost estimation and experiment records.
+    /// Phase 5E local execution timing used only for cost estimation and experiment records.
     pub execution_timing: SpeculativeExecutionTiming,
     pub(crate) engine_identity: Arc<()>,
 }
@@ -207,7 +207,7 @@ pub struct CanonicalTxResult {
     /// Wall time spent canonically executing this transaction during reconciliation.
     ///
     /// This is non-zero only for a replayed speculative receipt or a transaction that had no
-    /// matching pre-consensus receipt. Reused receipts keep this at zero. Brick 5D uses the replay
+    /// matching pre-consensus receipt. Reused receipts keep this at zero. Phase 5D uses the replay
     /// duration as cost evidence; it is observational and never participates in correctness.
     pub reexecution_duration: Duration,
     pub result: Result<ExecutionOutcome, EngineError>,

@@ -35,7 +35,7 @@ pub struct ScheduledDependency {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RiskBoundedSchedulerConfig {
     /// Cost-adjusted scheduling risk at or above which an ordinary adaptive edge contributes
-    /// same-wave risk. Before Brick 5D has replay-cost evidence this equals conflict probability.
+    /// same-wave risk. Before Phase 5D has replay-cost evidence this equals conflict probability.
     pub soft_threshold: f64,
     /// Cost-adjusted scheduling risk at or above which an evidence-mature edge remains a hard
     /// predecessor dependency.
@@ -142,7 +142,7 @@ impl RiskBoundedSchedulerConfig {
 
 /// One dependency level retained for diagnostics/theoretical scheduling metrics.
 ///
-/// The Brick-5 executor no longer treats these as global barriers. Actual launch eligibility is
+/// The Phase-5 executor no longer treats these as global barriers. Actual launch eligibility is
 /// driven by [`RiskBoundedSchedule::ordering_dependencies`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduledWave {

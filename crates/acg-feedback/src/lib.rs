@@ -58,7 +58,7 @@ pub struct ConflictObservation {
     pub epoch: u64,
     /// False for a concrete overlap that the candidate graph failed to materialize.
     pub candidate_edge_present: bool,
-    /// Brick 5D replay-cost attribution. Zero for ordinary access/validation observations.
+    /// Phase 5D replay-cost attribution. Zero for ordinary access/validation observations.
     #[serde(default)]
     pub replay_cost_nanos: u64,
     /// Number of later replayed transactions transitively attributable to this invalidation.
@@ -157,7 +157,7 @@ impl ConflictObservation {
 
     /// Attach measured replay impact to an already constructed conflict observation.
     ///
-    /// The probability update remains the same; this additional evidence is consumed by Brick 5D's
+    /// The probability update remains the same; this additional evidence is consumed by Phase 5D's
     /// cost model when selecting scheduling risk for future blocks.
     pub fn with_replay_impact(
         mut self,
@@ -354,7 +354,7 @@ pub struct EdgeEstimate {
 impl EdgeEstimate {
     /// Whether concrete execution has ever observed a conflict that candidate construction missed.
     ///
-    /// Brick 4 uses this as the gate that allows learned history to override an otherwise-false
+    /// Phase 4 uses this as the gate that allows learned history to override an otherwise-false
     /// symbolic predicate. A symbolic prior by itself is not enough to bypass concrete pruning.
     pub fn has_candidate_miss_history(&self) -> bool {
         self.candidate_miss_observations > 0
@@ -967,7 +967,7 @@ pub struct ApplySummary {
     pub fallback_edges_created: usize,
     /// Concrete conflicts absent from the candidate graph, whether due to predicate or topology miss.
     pub candidate_misses: usize,
-    /// Conflict observations carrying Brick 5D measured replay impact.
+    /// Conflict observations carrying Phase 5D measured replay impact.
     pub replay_impact_observations: usize,
     /// Direct replay nanoseconds attributed across the observations in this batch.
     pub attributed_replay_cost_nanos: u64,
@@ -975,7 +975,7 @@ pub struct ApplySummary {
     pub attributed_invalidated_descendants: u64,
     /// Number of profile-relationship/epoch batches mutated by probability/replay feedback.
     pub observation_batches_applied: usize,
-    /// Brick 5E marginal dependency-ready delay observations learned from realized scheduling.
+    /// Phase 5E marginal dependency-ready delay observations learned from realized scheduling.
     pub serialization_cost_observations: usize,
     /// Sum of marginal dependency-ready delay attributed in this batch.
     pub attributed_serialization_cost_nanos: u64,
@@ -1238,7 +1238,7 @@ impl AdaptiveFeedbackStore {
 
     /// Runtime-discovered relationships incident to `profile`.
     ///
-    /// This adjacency is maintained when fallback edges are created/restored so Brick 4 candidate
+    /// This adjacency is maintained when fallback edges are created/restored so Phase 4 candidate
     /// construction can traverse learned topology in the same profile-bucket style as the static
     /// graph instead of scanning every fallback relationship.
     pub fn fallback_edges_for_profile(
