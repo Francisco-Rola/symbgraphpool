@@ -258,3 +258,89 @@ fn learned_negative_evidence_can_change_a_future_pair_from_hard_to_soft() {
         after_schedule.wave_for(TxIndex(1))
     );
 }
+
+#[test]
+fn compact_and_dense_soft_equivalence_cliques_schedule_identically_from_one_checkpoint() {
+    let graph = graph();
+    let credit = profile_id(&graph, "execute::Credit");
+    let edge_index = graph.edge_between_profiles(credit, credit).unwrap();
+    let feedback_config = feedback_config();
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+
+    // Mature the proven symbolic relationship into the Soft class without changing the
+    // checkpoint between the dense and compact builds.
+    let mut observations = ObservationBuffer::default();
+    for offset in 0..24_u64 {
+        observations.push(
+            ConflictObservation::independent(
+                credit,
+                credit,
+                TxId(10_000 + offset * 2),
+                TxId(10_001 + offset * 2),
+                ObservationSource::CanonicalExecution,
+                ObservationTarget::Static { edge_index },
+                1.0,
+                1,
+                true,
+            )
+            .unwrap(),
+        );
+    }
+    store
+        .apply_batch(&graph, observations, &feedback_config)
+        .unwrap();
+
+    let transactions = (0..12_u64)
+        .map(|offset| {
+            candidate(
+                &graph,
+                offset + 1,
+                u32::try_from(offset).unwrap(),
+                "execute::Credit",
+                1,
+                json!({"account":"alice"}),
+            )
+        })
+        .collect::<Vec<_>>();
+    let build = |compact| {
+        CandidateGraphBuilder::new(&graph)
+            .build_weighted(
+                transactions.clone(),
+                &store,
+                &feedback_config,
+                WeightedCandidateGraphConfig {
+                    epoch: 2,
+                    edge_materialization_threshold: 0.0,
+                    cost_policy: Default::default(),
+                    compact_immature_equivalence_edges: compact,
+                    independent_observations_before_softening: 8,
+                },
+            )
+            .unwrap()
+    };
+    let dense = build(false);
+    let compact = build(true);
+    assert_eq!(dense.logical_edge_count(), compact.logical_edge_count());
+    assert!(compact.edges().len() < dense.edges().len());
+
+    let scheduler = RiskBoundedScheduler::new(RiskBoundedSchedulerConfig {
+        soft_threshold: 0.0,
+        hard_threshold: 0.95,
+        risk_budget: 0.90,
+        max_wave_width: None,
+        exploration_rate: 0.0,
+        exploration_risk_budget: 0.90,
+        exploration_min_uncertainty: 0.35,
+        exploration_max_transactions_per_block: 0,
+        independent_observations_before_softening: 8,
+    })
+    .unwrap();
+    assert_eq!(
+        scheduler.classify_edge(dense.edge_between(TxIndex(0), TxIndex(1)).unwrap()),
+        EdgeClass::Soft
+    );
+
+    let dense_schedule = scheduler.schedule(&dense).unwrap();
+    let compact_schedule = scheduler.schedule(&compact).unwrap();
+    assert_eq!(dense_schedule, compact_schedule);
+}

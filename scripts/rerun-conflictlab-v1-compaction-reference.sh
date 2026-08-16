@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/benchmark-results/conflictlab-v1-core}"
 MODE="${2:-run}"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
-BACKUP="$OUT/.pre-compaction-reference-window-fix/$STAMP"
+BACKUP="$OUT/.pre-compaction-reference-normalized-warmup/$STAMP"
 CAMPAIGN="compaction-reference"
 
 python3 - "$ROOT" <<'PY'
@@ -17,10 +17,14 @@ doc=json.load(open(path, encoding='utf-8'))
 base=doc.get('base_run',{}).get('parameters',{})
 if base.get('consensus_cutoff_ms') != '5000':
     raise SystemExit('expected compaction reference consensus_cutoff_ms=5000')
+if base.get('acg.warmup_compact_equivalence_groups') != 'false':
+    raise SystemExit('expected compaction reference dense normalized warm-up')
+if base.get('acg.warmup_workers') != '1':
+    raise SystemExit('expected compaction reference deterministic single-worker warm-up')
 vals=doc.get('matrix',{}).get('parameters',{}).get('acg.compact_equivalence_groups',[])
 if set(vals) != {'true','false'}:
     raise SystemExit(f'expected compact/dense pair axis, found {vals}')
-print('verified compaction-reference semantic window: 5000 ms, compact+dense paired')
+print('verified compaction-reference design: dense single-worker warm-up, 5000 ms measured window, compact+dense paired')
 PY
 
 if [[ "$MODE" == "--dry-run" ]]; then
@@ -60,11 +64,14 @@ fi
 
 cat > "$BACKUP/README.txt" <<EOF2
 This backup contains the pre-fix compaction-reference campaign and combined V1 postprocessing.
-The old reference used a 250 ms consensus cutoff. Because compaction changes planning wall time,
-compact and dense warm-up blocks could expose slightly different execution-evidence populations
-before cutoff, which then perturbed probability-only feedback/posteriors. The replacement uses a
-non-binding 5000 ms reference window and validation requires complete preexecution before exact
-logical feedback/posterior equality is compared.
+The previous reference allowed compact and dense runs to train their adaptive posterior under
+different physical representations and then, after that was normalized, still executed the dense
+warm-up trajectory independently on six workers. Parallel warm-up execution could produce small
+feedback/reconciliation differences before the measured toggle. The replacement trains both halves
+with dense materialization and a deterministic single-worker speculative executor for all warm-up
+blocks, restores each run's compact/dense toggle only for the measured 6-worker block, and retains
+the non-binding 5000 ms reference window. Exact feedback/posterior equality is therefore compared
+from a deterministic common training procedure.
 created_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF2
 

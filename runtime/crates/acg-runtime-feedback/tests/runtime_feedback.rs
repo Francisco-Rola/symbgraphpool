@@ -1358,3 +1358,89 @@ fn detector_rejects_mismatched_access_transaction_ids() {
         .to_string()
         .contains("does not match access transaction ID"));
 }
+
+#[test]
+fn compact_and_dense_aggregated_feedback_match_on_the_same_execution_report() {
+    let graph = profile_graph();
+    let feedback_config = AdaptiveFeedbackConfig::default();
+    let seed_store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let transactions = (0..6_u64)
+        .map(|offset| {
+            // The symbolic prediction deliberately places every transaction in one equivalence
+            // class. Concrete execution below splits them across several actual keys, exercising
+            // both positive and negative observations inside the compact group.
+            candidate_tx(
+                &graph,
+                offset + 1,
+                "execute::Credit",
+                json!({"account":"predicted-bucket-0"}),
+            )
+        })
+        .collect::<Vec<_>>();
+    let build = |compact| {
+        CandidateGraphBuilder::new(&graph)
+            .build_weighted(
+                transactions.clone(),
+                &seed_store,
+                &feedback_config,
+                WeightedCandidateGraphConfig {
+                    epoch: 7,
+                    edge_materialization_threshold: 0.0,
+                    cost_policy: Default::default(),
+                    compact_immature_equivalence_edges: compact,
+                    independent_observations_before_softening: 8,
+                },
+            )
+            .unwrap()
+    };
+    let dense = build(false);
+    let compact = build(true);
+    assert_eq!(dense.logical_edge_count(), compact.logical_edge_count());
+    assert!(compact.edges().len() < dense.edges().len());
+
+    let actual_keys: [&[u8]; 6] = [b"a", b"a", b"b", b"b", b"c", b"d"];
+    let execution = report(
+        actual_keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                successful_execution(
+                    index,
+                    u64::try_from(index).unwrap() + 1,
+                    vec![access(
+                        u64::try_from(index).unwrap() + 1,
+                        "contract-a",
+                        AccessKind::StorageWrite,
+                        key,
+                        None,
+                        false,
+                    )],
+                )
+            })
+            .collect(),
+    );
+
+    let collector = collector();
+    let mut dense_store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let mut compact_store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let dense_batch = collector
+        .collect_block_aggregated(&graph, &dense, &execution, &dense_store, 7)
+        .unwrap();
+    let compact_batch = collector
+        .collect_block_aggregated(&graph, &compact, &execution, &compact_store, 7)
+        .unwrap();
+    let dense_summary = dense_store
+        .apply_aggregated_batch(&graph, dense_batch, &feedback_config)
+        .unwrap();
+    let compact_summary = compact_store
+        .apply_aggregated_batch(&graph, compact_batch, &feedback_config)
+        .unwrap();
+
+    assert_eq!(dense_summary, compact_summary);
+    assert_eq!(dense_summary.positive_observations, 2);
+    assert_eq!(dense_summary.negative_observations, 13);
+    assert_eq!(
+        dense_store.checkpoint(&graph).unwrap(),
+        compact_store.checkpoint(&graph).unwrap()
+    );
+}

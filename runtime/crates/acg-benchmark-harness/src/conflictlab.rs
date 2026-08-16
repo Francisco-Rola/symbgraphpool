@@ -1353,7 +1353,9 @@ impl PreparedBenchmark for PreparedConflictLab {
         let mut queries = Vec::with_capacity(self.canonical_queries.len());
         for (index, query) in self.canonical_queries.iter().enumerate() {
             let request = serde_json::from_slice::<serde_json::Value>(query.msg.as_slice())
-                .unwrap_or_else(|_| serde_json::json!({"raw_hex": bytes_to_hex(query.msg.as_slice())}));
+                .unwrap_or_else(
+                    |_| serde_json::json!({"raw_hex": bytes_to_hex(query.msg.as_slice())}),
+                );
             let present = self.engine.contract_metadata(&query.contract).is_some();
             let response = if present {
                 let outcome = self
@@ -2217,11 +2219,8 @@ mod v1_evaluation_tests {
 
     #[test]
     fn resource_granularity_compiles_to_whole_resource_predicates() {
-        let bytes = conflictlab_symbolic(
-            PredictionQuality::Exact,
-            SymbolicGranularity::Resource,
-        )
-        .unwrap();
+        let bytes =
+            conflictlab_symbolic(PredictionQuality::Exact, SymbolicGranularity::Resource).unwrap();
         let document = parse_slice(&bytes).unwrap();
         let context = IngestionContext::new(
             RuntimeId::new("cosmwasm").unwrap(),
@@ -2246,9 +2245,11 @@ mod v1_evaluation_tests {
         assert!(!graph.edges().is_empty());
         assert!(graph.edges().iter().all(|edge| {
             !edge.predicate.clauses.is_empty()
-                && edge.predicate.clauses.iter().all(|clause| {
-                    matches!(&clause.key_match, acg_core::KeyMatch::WholeResource)
-                })
+                && edge
+                    .predicate
+                    .clauses
+                    .iter()
+                    .all(|clause| matches!(&clause.key_match, acg_core::KeyMatch::WholeResource))
         }));
     }
 

@@ -253,12 +253,37 @@ impl BenchmarkHarness {
         );
         let mut pipeline = AdaptiveSerialPipeline::new(adapter, feedback, tuning.planning_config)
             .map_err(display_error)?;
+        let measured_compact_equivalence_groups =
+            pipeline.planning_config().compact_equivalence_groups;
+        if let Some(warmup_compact_equivalence_groups) = tuning.warmup_compact_equivalence_groups {
+            pipeline.set_compact_equivalence_groups(warmup_compact_equivalence_groups);
+        }
+        let measured_workers =
+            usize::try_from(run.workers).map_err(|_| HarnessError::NumericOverflow)?;
         let executor = SpeculativeParallelBlockExecutor::new(
             engine.clone(),
             ParallelExecutionConfig {
-                workers: usize::try_from(run.workers).map_err(|_| HarnessError::NumericOverflow)?,
+                workers: measured_workers,
             },
         );
+        let warmup_executor = if let Some(warmup_workers) = tuning.warmup_workers {
+            let physical_cores = usize::try_from(manifest.physical_core_limit)
+                .map_err(|_| HarnessError::NumericOverflow)?;
+            if warmup_workers > physical_cores {
+                return Err(HarnessError::WorkloadParameter(format!(
+                    "acg.warmup_workers={warmup_workers} exceeds physical_core_limit={physical_cores}"
+                )));
+            }
+            Some(SpeculativeParallelBlockExecutor::new(
+                engine.clone(),
+                ParallelExecutionConfig {
+                    workers: warmup_workers,
+                },
+            ))
+        } else {
+            None
+        };
+        let warmup_executor_ref = warmup_executor.as_ref().unwrap_or(&executor);
 
         if adaptive.warmup_blocks().len() != adaptive.warmup_decided_blocks().len() {
             return Err(HarnessError::NonDeterministicTransactions);
@@ -273,13 +298,17 @@ impl BenchmarkHarness {
                 AdaptiveExecutionContext {
                     mode,
                     graph,
-                    parallel_executor: &executor,
+                    parallel_executor: warmup_executor_ref,
                     predicted_block: predicted,
                     decided_block: decided,
                     consensus_cutoff: tuning.consensus_cutoff,
                     measured: false,
                 },
             )?;
+        }
+
+        if tuning.warmup_compact_equivalence_groups.is_some() {
+            pipeline.set_compact_equivalence_groups(measured_compact_equivalence_groups);
         }
 
         let measured = execute_adaptive_block(
@@ -414,6 +443,18 @@ pub struct HarnessOutcome {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HarnessTuningConfig {
     pub planning_config: AdaptivePlanningConfig,
+    /// Optional paired-reference override used only while executing warm-up blocks.
+    ///
+    /// Normal runs leave this unset. The compaction semantic-reference campaign sets it to
+    /// `Some(false)` so compact and dense measured blocks start from an identical dense-trained
+    /// posterior and canonical state.
+    pub warmup_compact_equivalence_groups: Option<bool>,
+    /// Optional worker-count override used only for warm-up blocks.
+    ///
+    /// Paired semantic-reference campaigns use a single warm-up worker so independently executed
+    /// runs follow the same speculative/reconciliation trajectory before the measured toggle.
+    /// The measured block still uses `run.workers`.
+    pub warmup_workers: Option<usize>,
     pub feedback_config: AdaptiveFeedbackConfig,
     pub trace_config: TraceConflictConfig,
     pub consensus_cutoff: Duration,
@@ -424,6 +465,8 @@ impl HarnessTuningConfig {
         const ACG_KEYS: &[&str] = &[
             "acg.edge_materialization_threshold",
             "acg.compact_equivalence_groups",
+            "acg.warmup_compact_equivalence_groups",
+            "acg.warmup_workers",
             "acg.soft_threshold",
             "acg.hard_threshold",
             "acg.risk_budget",
@@ -634,10 +677,21 @@ impl HarnessTuningConfig {
             ));
         }
 
+        let warmup_compact_equivalence_groups =
+            optional_parameter(parameters, "acg.warmup_compact_equivalence_groups")?;
+        let warmup_workers = optional_parameter::<usize>(parameters, "acg.warmup_workers")?;
+        if warmup_workers == Some(0) {
+            return Err(HarnessError::WorkloadParameter(
+                "acg.warmup_workers must be greater than zero when configured".to_owned(),
+            ));
+        }
+
         planning.validate().map_err(display_error)?;
         feedback.validate().map_err(display_error)?;
         Ok(Self {
             planning_config: planning,
+            warmup_compact_equivalence_groups,
+            warmup_workers,
             feedback_config: feedback,
             trace_config: trace,
             consensus_cutoff: Duration::from_millis(consensus_cutoff_ms),
@@ -975,7 +1029,10 @@ fn maybe_write_correctness_diagnostics(
         .iter()
         .zip(adaptive_state.iter())
         .position(|(serial_byte, adaptive_byte)| serial_byte != adaptive_byte)
-        .or_else(|| (serial_state.len() != adaptive_state.len()).then(|| serial_state.len().min(adaptive_state.len())));
+        .or_else(|| {
+            (serial_state.len() != adaptive_state.len())
+                .then(|| serial_state.len().min(adaptive_state.len()))
+        });
 
     let document = serde_json::json!({
         "schema_version": 1,
@@ -996,12 +1053,24 @@ fn maybe_write_correctness_diagnostics(
     let safe_experiment = manifest
         .experiment_id
         .chars()
-        .map(|character| if character.is_ascii_alphanumeric() || character == '-' { character } else { '_' })
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     let safe_mode = run
         .mode
         .chars()
-        .map(|character| if character.is_ascii_alphanumeric() || character == '-' { character } else { '_' })
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     let path = directory.join(format!(
         "{}-run{:04}-{}-seed{}.json",
@@ -1247,6 +1316,26 @@ where
             reason: error.to_string(),
         })
     })
+}
+
+fn optional_parameter<T>(
+    parameters: &BTreeMap<String, String>,
+    key: &'static str,
+) -> Result<Option<T>, HarnessError>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    parameters
+        .get(key)
+        .map(|value| {
+            value.parse::<T>().map_err(|error| HarnessError::Parameter {
+                key,
+                value: value.clone(),
+                reason: error.to_string(),
+            })
+        })
+        .transpose()
 }
 
 fn optional_usize_parameter(

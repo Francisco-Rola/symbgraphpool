@@ -641,6 +641,16 @@ class EvaluationToolTests(unittest.TestCase):
             {"5000"},
             "dense/compact semantic reference must use a non-binding consensus window",
         )
+        self.assertEqual(
+            {run["parameters"]["acg.warmup_compact_equivalence_groups"] for run in compaction},
+            {"false"},
+            "dense/compact measured pairs must use the same dense warm-up representation",
+        )
+        self.assertEqual(
+            {run["parameters"]["acg.warmup_workers"] for run in compaction},
+            {"1"},
+            "dense/compact reference warm-up must be deterministic across independent runs",
+        )
         self.assertEqual({int(run["parameters"]["sim.block_size"]) for run in compaction}, {32, 64, 128, 256, 512})
 
         scaling = manifests["v1-block-scaling.grid.json"]["runs"]

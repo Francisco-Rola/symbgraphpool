@@ -139,11 +139,24 @@ partially prepared block and one fully prepared block.
 ### Compaction reference and block scaling
 
 The dense-reference campaign toggles compact groups at B32/B64/B128/B256/B512 under exact/bucketed
-prediction. It uses a deliberately non-binding 5 s consensus window so compact and dense runs
-observe the complete block during all warm-up and measured feedback steps; this keeps the paired
-feedback/posterior comparison a semantic-equivalence test rather than allowing the planning-time
-improvement itself to change which observations arrive before cutoff. The validator requires the
-reference cutoff not to bind and requires every candidate transaction to produce a prepared receipt.
+prediction. Both halves deliberately train their four warm-up blocks with dense materialization and
+a single-worker speculative executor, then apply the compact/dense toggle only to the measured
+6-worker block. The normalized warm-up reduces adaptive-history variance, and a deliberately
+non-binding 5 s consensus window ensures every measured candidate finishes preexecution.
+
+The two measured halves are still independent six-worker executions. Concrete replay/access evidence
+can therefore differ slightly across legal speculative interleavings even when the representation is
+unchanged; repeated V1 diagnostics showed that raw positive/negative observation totals are not
+bitwise-repeatable across identical run identities. The submission validator consequently treats
+post-measured-block feedback totals and posterior means as reported path-variance diagnostics rather
+than semantic invariants. It continues to require identical logical candidate counts/classes,
+serial-equivalent identical canonical state, equal candidate-miss safety outcomes, complete
+preexecution, and non-increasing READY-DAG/materialized representation size. Static dense/compact
+pairs retain exact schedule equality. Deterministic Rust regressions separately require the compact
+and dense schedulers to produce the same schedule from one feedback checkpoint and require compact
+and dense feedback collectors to produce the same update from one identical execution report. This
+separates representation correctness from nondeterminism in independently executed parallel paths.
+
 The fixed-hardware block-scaling campaign extends the compact production path through B1024/B2048
 under the normal evaluation timing regime. Core count stays six throughout.
 

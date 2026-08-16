@@ -140,6 +140,90 @@ fn harness_runs_static_probability_and_cost_aware_with_same_correctness_boundary
 }
 
 #[test]
+fn compaction_reference_normalizes_adaptive_warmup_before_measured_toggle() {
+    let mut dense = run("probability-only", 1);
+    dense.seed = 101;
+    dense.parameters.extend(BTreeMap::from([
+        ("transactions".to_owned(), "64".to_owned()),
+        ("warmup_blocks".to_owned(), "4".to_owned()),
+        ("accounts".to_owned(), "64".to_owned()),
+        ("hot_account_probability_bps".to_owned(), "2500".to_owned()),
+        ("prediction_quality".to_owned(), "bucketed".to_owned()),
+        ("prediction_buckets".to_owned(), "8".to_owned()),
+        ("consensus_cutoff_ms".to_owned(), "5000".to_owned()),
+        (
+            "acg.compact_equivalence_groups".to_owned(),
+            "false".to_owned(),
+        ),
+        (
+            "acg.warmup_compact_equivalence_groups".to_owned(),
+            "false".to_owned(),
+        ),
+        ("acg.warmup_workers".to_owned(), "1".to_owned()),
+    ]));
+    let mut compact = dense.clone();
+    compact.run_index = 2;
+    compact.parameters.insert(
+        "acg.compact_equivalence_groups".to_owned(),
+        "true".to_owned(),
+    );
+
+    let manifest = smoke_manifest(vec![dense, compact]);
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness.run_manifest(&manifest).unwrap();
+    assert_eq!(outcome.records.len(), 2);
+    let dense = &outcome.records[0];
+    let compact = &outcome.records[1];
+
+    assert_eq!(dense.correctness.serial_equivalent, Some(true));
+    assert_eq!(compact.correctness.serial_equivalent, Some(true));
+    assert_eq!(
+        dense.correctness.canonical_state_digest,
+        compact.correctness.canonical_state_digest
+    );
+    assert_eq!(
+        dense.scheduling.candidate_edges,
+        compact.scheduling.candidate_edges
+    );
+    assert_eq!(dense.scheduling.low_edges, compact.scheduling.low_edges);
+    assert_eq!(dense.scheduling.soft_edges, compact.scheduling.soft_edges);
+    assert_eq!(dense.scheduling.hard_edges, compact.scheduling.hard_edges);
+    assert_eq!(dense.scheduling.wave_count, compact.scheduling.wave_count);
+    assert_eq!(
+        dense.scheduling.max_wave_width,
+        compact.scheduling.max_wave_width
+    );
+    assert_eq!(
+        dense.scheduling.scheduled_dependencies,
+        compact.scheduling.scheduled_dependencies
+    );
+    assert_eq!(
+        dense.feedback.positive_observations,
+        compact.feedback.positive_observations
+    );
+    assert_eq!(
+        dense.feedback.negative_observations,
+        compact.feedback.negative_observations
+    );
+    assert_eq!(
+        dense.feedback.candidate_misses,
+        compact.feedback.candidate_misses
+    );
+    assert_eq!(
+        dense.adaptive_state.mean_probability_q16,
+        compact.adaptive_state.mean_probability_q16
+    );
+    assert_eq!(
+        dense.adaptive_state.mean_confidence_q16,
+        compact.adaptive_state.mean_confidence_q16
+    );
+    assert!(
+        compact.scheduling.materialized_candidate_edges
+            < dense.scheduling.materialized_candidate_edges
+    );
+}
+
+#[test]
 fn manifest_runner_writes_stable_records_and_acceptance_files() {
     let manifest = smoke_manifest(vec![run("cost-aware", 1)]);
     let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
@@ -179,6 +263,11 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
         "acg.compact_equivalence_groups".to_owned(),
         "false".to_owned(),
     );
+    values.insert(
+        "acg.warmup_compact_equivalence_groups".to_owned(),
+        "true".to_owned(),
+    );
+    values.insert("acg.warmup_workers".to_owned(), "1".to_owned());
     values.insert("acg.soft_threshold".to_owned(), "0.33".to_owned());
     values.insert("acg.hard_threshold".to_owned(), "0.91".to_owned());
     values.insert("acg.risk_budget".to_owned(), "0.12".to_owned());
@@ -227,6 +316,8 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
     );
     let tuning = HarnessTuningConfig::from_parameters(&values).unwrap();
     assert!(!tuning.planning_config.compact_equivalence_groups);
+    assert_eq!(tuning.warmup_compact_equivalence_groups, Some(true));
+    assert_eq!(tuning.warmup_workers, Some(1));
     assert_eq!(tuning.planning_config.scheduler.soft_threshold, 0.33);
     assert_eq!(tuning.planning_config.scheduler.hard_threshold, 0.91);
     assert_eq!(tuning.planning_config.scheduler.risk_budget, 0.12);

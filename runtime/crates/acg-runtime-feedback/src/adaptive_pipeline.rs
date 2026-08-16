@@ -317,6 +317,16 @@ impl AdaptiveSerialPipeline {
         &self.planning_config
     }
 
+    /// Evaluation-only seam for paired representation experiments.
+    ///
+    /// The feedback store and execution state are intentionally retained while only the physical
+    /// equivalence-group representation is switched. This lets dense and compact measured blocks
+    /// start from the same learned posterior instead of allowing representation-dependent warm-up
+    /// trajectories to become a confounder.
+    pub fn set_compact_equivalence_groups(&mut self, enabled: bool) {
+        self.planning_config.compact_equivalence_groups = enabled;
+    }
+
     /// Apply concrete accesses observed during pre-consensus speculative execution.
     ///
     /// This is intentionally separate from planning so callers can decide when a completed
