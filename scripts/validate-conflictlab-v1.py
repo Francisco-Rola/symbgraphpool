@@ -8,6 +8,7 @@ from pathlib import Path
 from conflictlab_v1_miss_policy import (
     MISS_CLASS_LABELS,
     MISS_CLASS_ORDER,
+    has_recovery_evidence,
     validate_candidate_miss_policy,
 )
 
@@ -246,10 +247,24 @@ def main():
     if faults:
         hidden=[r for r in faults if p(r,"prediction_fault_mode")=="hidden-key"]
         spurious=[r for r in faults if p(r,"prediction_fault_mode")=="spurious-key"]
-        if sum(r["feedback"]["candidate_misses"] for r in hidden)==0: fail("hidden-key faults produced no candidate misses")
-        if max((r.get("adaptive_state",{}).get("runtime_fallback_relationships",0) for r in hidden),default=0)==0: fail("hidden-key faults produced no runtime fallback relationship")
+        hidden_miss_records=[r for r in hidden if r.get("feedback",{}).get("candidate_misses",0)>0]
+        if not hidden_miss_records: fail("hidden-key faults produced no candidate misses")
+        unrecovered=[r for r in hidden_miss_records if not has_recovery_evidence(r)]
+        if unrecovered:
+            fail(
+                "hidden-key faults produced candidate misses without durable recovery evidence; "
+                f"run_indices={[r.get('metadata',{}).get('run_index') for r in unrecovered[:5]]}"
+            )
         if sum(r["feedback"]["candidate_misses"] for r in spurious)!=0: fail("spurious-key false positives unexpectedly produced candidate misses")
-        print(f"fault_hidden_candidate_misses={sum(r['feedback']['candidate_misses'] for r in hidden)} fallback_max={max(r.get('adaptive_state',{}).get('runtime_fallback_relationships',0) for r in hidden)}")
+        miss_history_max=max((r.get("adaptive_state",{}).get("candidate_miss_history_relationships",0) for r in hidden),default=0)
+        fallback_max=max((r.get("adaptive_state",{}).get("runtime_fallback_relationships",0) for r in hidden),default=0)
+        fallback_edges_max=max((r.get("feedback",{}).get("fallback_edges_created",0) for r in hidden),default=0)
+        print(
+            f"fault_hidden_candidate_misses={sum(r['feedback']['candidate_misses'] for r in hidden)} "
+            f"recovered_records={len(hidden_miss_records)-len(unrecovered)}/{len(hidden_miss_records)} "
+            f"miss_history_max={miss_history_max} fallback_max={fallback_max} "
+            f"fallback_edges_max={fallback_edges_max}"
+        )
 
     # Runtime semantics counters prove each intentionally targeted state mechanism was actually hit.
     sem=[r for r in records if r["metadata"]["experiment_id"]=="conflictlab-v1-execution-semantics"]

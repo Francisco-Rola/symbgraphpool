@@ -142,6 +142,13 @@ if ((${#campaign_failures[@]} > 0 || ${#postprocess_failures[@]} > 0)); then
     printf '  postprocess: %s\n' "${postprocess_failures[@]}" >&2
   fi
   echo "Completed independent campaigns were retained and will be reused on the next run." >&2
+  if [[ -x "$ROOT/scripts/collect-conflictlab-v1-debug-bundle.sh" ]]; then
+    if debug_bundle=$("$ROOT/scripts/collect-conflictlab-v1-debug-bundle.sh" "$OUT" 2>/dev/null); then
+      echo "Debug bundle for upload: $debug_bundle" >&2
+    else
+      echo "Debug bundle collection failed; upload $OUT/validation.txt and $OUT/records.jsonl." >&2
+    fi
+  fi
   exit 1
 fi
 
@@ -153,3 +160,5 @@ echo "  $OUT/records.jsonl"
 echo "  $OUT/aggregate/summary-wide.csv"
 echo "  $OUT/aggregate/plot-long.csv"
 echo "  $OUT/suite-environment.txt"
+echo "or create one self-contained debug/analysis bundle:"
+echo "  ./scripts/collect-conflictlab-v1-debug-bundle.sh $OUT"

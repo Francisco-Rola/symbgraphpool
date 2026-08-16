@@ -207,8 +207,9 @@ be used before reporting high-percentile latency.
 - forced serial cutoff includes partial-prefix and complete-preexecution cases;
 - candidate misses remain fatal for input-resolved workloads, while deliberate hidden-key faults,
   runtime-only `bank-mixed` dependencies, and state-derived-key `stateful-mixed`/`full` relationships
-  are measured outcomes that must retain fallback or candidate-miss-history evidence; spurious-key
-  faults must not create false-negative misses;
+  are measured outcomes that must retain fallback or candidate-miss-history evidence; durable
+  candidate-miss history is a valid recovery path even when no persistent runtime-fallback
+  relationship is installed; spurious-key faults must not create false-negative misses;
 - the execution-semantics campaign actually records range scans/removes, bank writes, point and
   all-balances MVCC reads, host queries, contract creation, and stateful deletes;
 - adaptation depths and long-run history are present.
@@ -272,3 +273,18 @@ Do not collapse the suite to one headline speedup. The analysis should answer, i
 
 External workloads and competitor baselines belong in the next evaluation layer. ConflictLab 1.0 is
 intended to make the internal mechanisms independently defensible before those comparisons are made.
+
+### Debug bundle
+
+When V1 post-processing fails, `run-conflictlab-v1-evaluation.sh` writes `validation.txt` and attempts
+to create a self-contained upload bundle under `debug-bundles/`. It can also be generated manually:
+
+```bash
+./scripts/collect-conflictlab-v1-debug-bundle.sh benchmark-results/conflictlab-v1-core
+```
+
+The ZIP contains the combined `records.jsonl`, validation/summary output, campaign manifests and
+acceptance reports, compact aggregate CSVs, small correctness-diagnostic artifacts, git provenance,
+and snapshots of the V1 validator/policy plus the ConflictLab runtime files most often needed for
+triage. Uploading that one ZIP is preferred to pasting the terminal transcript because it lets the
+validator failure be reproduced offline without rerunning the benchmark.

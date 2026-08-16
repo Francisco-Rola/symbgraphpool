@@ -11,6 +11,7 @@ GENERATOR = ROOT / "scripts" / "generate-manifest-matrix.py"
 AGGREGATOR = ROOT / "scripts" / "aggregate-experiment.py"
 V1_CACHE_CHECK = ROOT / "scripts" / "check-conflictlab-v1-campaign-cache.py"
 V1_CORRECTNESS_DIAG = ROOT / "scripts" / "diagnose-conflictlab-v1-correctness.py"
+V1_VALIDATOR = ROOT / "scripts" / "validate-conflictlab-v1.py"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from conflictlab_v1_miss_policy import (  # noqa: E402
@@ -732,6 +733,62 @@ class EvaluationToolTests(unittest.TestCase):
         self.assertEqual(totals[COARSE_SYMBOLIC_GRANULARITY], 6)
         self.assertEqual(counts[COARSE_SYMBOLIC_GRANULARITY], 1)
         self.assertEqual(totals[UNEXPECTED_INPUT_RESOLVED], 0)
+
+    def test_v1_validator_accepts_hidden_key_recovery_via_miss_history(self):
+        max_gas = str((1 << 64) - 1)
+        record = {
+            "schema_version": 3,
+            "metadata": {
+                "experiment_id": "conflictlab-v1-prediction-fault-recovery",
+                "mode": "probability-only",
+                "seed": 11,
+                "run_index": 1,
+                "workers": 6,
+                "physical_cores": 6,
+                "parameters": {
+                    "operation_mix": "credit",
+                    "prediction_fault_mode": "hidden-key",
+                    "vm_instance_lifecycle": "reuse",
+                    "vm_gas_limit": max_gas,
+                },
+                "environment": {
+                    "conflictlab_backend": "wasm",
+                    "conflictlab_vm_instance_lifecycle": "reuse",
+                    "conflictlab_vm_gas_limit": max_gas,
+                    "conflictlab_retained_vm_scope": "benchmark-scoped-nonbinding-gas",
+                    "conflictlab_vm_instance_lifecycle_safe": "false",
+                },
+            },
+            "correctness": {
+                "serial_equivalent": True,
+                "canonical_state_digest": "same",
+            },
+            "parallelism": {
+                "perfect_conflict_parallel_lower_bound_nanos": 1,
+                "serial_equivalent_work_nanos": 2,
+            },
+            "consensus": {},
+            "feedback": {
+                "candidate_misses": 4,
+                "fallback_edges_created": 0,
+            },
+            "adaptive_state": {
+                "candidate_miss_history_relationships": 1,
+                "runtime_fallback_relationships": 0,
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            records = Path(temp) / "records.jsonl"
+            records.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(V1_VALIDATOR), str(records), "--allow-partial"],
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("recovered_records=1/1", result.stdout)
+        self.assertIn("miss_history_max=1", result.stdout)
+        self.assertIn("fallback_max=0", result.stdout)
 
     def test_v1_candidate_miss_policy_rejects_input_resolved_misses(self):
         record = {
