@@ -11,7 +11,7 @@ ablations of mechanisms already present in ACG.
 The current suite fixes execution to the local six-physical-core machine and uses six ACG workers.
 Core-count and memory-capacity scaling are deliberately deferred. Block-size scaling remains part of
 this suite because it tests candidate-graph/control-plane complexity rather than hardware scale.
-All measured ConflictLab campaigns use the real Wasm backend.
+All measured ConflictLab campaigns use the real Wasm backend. Canonical performance runs use **benchmark-scoped retained VM reuse** (`vm_instance_lifecycle=reuse`) because CosmWasm 2.0.9 exposes compiled-module caching but not a public API for restoring a dirty `Instance` to its post-instantiation state. Retained reuse is therefore not claimed as a generally safe CosmWasm execution mode. For ConflictLab V1 we make the retained instance's cumulative gas budget non-binding (`vm_gas_limit=u64::MAX`) and require targeted fresh-instance equivalence checks on the exact stress identities that previously diverged. The lifecycle sentinel retains `recycle` as a semantic/performance control.
 
 Paper-facing metrics use the following terminology:
 
@@ -75,9 +75,18 @@ logical relationships. The resulting path is intentionally expensive and exists 
 compact representation against a dense reference on block sizes where that is practical. It must
 not be interpreted as a second production scheduler.
 
+
+### VM lifecycle correctness gate
+
+The V1 development sweep exposed a specific retained-instance failure mode. `cosmwasm-vm` initializes an instance gas budget when the mutable `Instance` is created; rebinding the host storage/query backend does not create a new meter. ConflictLab's heavy deterministic compute therefore accumulated against one thread-local retained meter across many transactions. The three failure families crossed the same rough cumulative-work boundary: heavy-warmup adaptation (~3.22 billion loop iterations), B2048 block scaling (~3.14 billion expected loop iterations across four warmups plus the measured block), and the long soak (far beyond that boundary), while B1024 remained below it.
+
+V1 retained-mode records therefore set `vm_gas_limit=u64::MAX`. This is intentionally a **non-binding benchmark gas budget**, not a claim that normal chains should use an unbounded per-transaction gas limit. The ConflictLab experiments do not study out-of-gas behavior; gas is only metering overhead here. Retained reuse remains benchmark-scoped because VM-local memory/globals are still not reset in place. Before a retained-mode dataset is accepted, the exact previously failing stress identities must also be rerun under both retained/non-binding-gas and fresh/recycle semantics and produce identical canonical state.
+
+The standard V1 performance grids use retained reuse so VM acquisition does not dominate comparisons with execution engines that amortize runtime construction. `v1-vm-lifecycle` explicitly keeps both `reuse` and `recycle` as the control measuring the size of that lifecycle effect.
+
 ## Campaigns and reviewer questions
 
-The full profile contains 4,630 measured records across 15 campaigns. Several campaigns execute
+The corrected full profile contains 4,630 measured records across 15 campaigns. Several campaigns execute
 additional warm-up/history blocks; the long-run soak alone executes 1,000 prior blocks per measured
 record.
 
@@ -95,7 +104,7 @@ record.
 | `v1-policy-pareto` | 96 | What is the validation/replay versus phase-bottleneck Pareto frontier as scheduling risk changes? |
 | `v1-bucket-sensitivity` | 48 | Are conclusions robust to the controlled key-bucketing precision parameter? |
 | `v1-ordering-sensitivity` | 36 | Are results an artifact of FIFO block order? |
-| `v1-vm-lifecycle` | 24 | Does the established VM-reuse path preserve semantics and lifecycle savings? |
+| `v1-vm-lifecycle` | 24 | How large is the retained-vs-fresh VM lifecycle effect across the four execution-cost tiers, and do paired modes preserve canonical state? |
 | `v1-statistical-headlines` | 720 | Are headline results stable across enough independent seeds for distributions/confidence intervals? |
 | `v1-long-run-soak` | 4 | Does adaptive state remain correct after a long execution history? |
 
@@ -175,8 +184,10 @@ be used before reporting high-percentile latency.
 - short cutoff cases include a genuinely binding deadline and long cases include complete
   pre-execution;
 - forced serial cutoff includes partial-prefix and complete-preexecution cases;
-- hidden-key faults exercise candidate-miss/fallback machinery while spurious-key faults do not
-  create false-negative misses;
+- candidate misses remain fatal for input-resolved workloads, while deliberate hidden-key faults,
+  runtime-only `bank-mixed` dependencies, and state-derived-key `stateful-mixed`/`full` relationships
+  are measured outcomes that must retain fallback or candidate-miss-history evidence; spurious-key
+  faults must not create false-negative misses;
 - the execution-semantics campaign actually records range scans/removes, bank writes, point and
   all-balances MVCC reads, host queries, contract creation, and stateful deletes;
 - adaptation depths and long-run history are present.
@@ -218,7 +229,11 @@ reviewer-oriented `results-summary.txt`.
 Stateful/full execution-semantics runs also distinguish successful and failed speculative receipts.
 Failed top-level receipts are legitimate speculative outcomes and may still reconcile correctly;
 they are excluded from the successful-only feedback report, so per-transaction service-DAG metrics
-are treated as unavailable rather than fabricated when any such receipt is present.
+are treated as unavailable rather than fabricated when any such receipt is present. Candidate misses
+are also classified during V1.0 post-processing as injected prediction faults, runtime-only
+dependencies, state-derived symbolic keys, or unexpected input-resolved misses. Schema-3 records only
+retain block-level miss counts and adaptive relationship totals, so exact miss-producing profile-pair
+attribution is not claimed retroactively.
 
 ## Reading the results
 

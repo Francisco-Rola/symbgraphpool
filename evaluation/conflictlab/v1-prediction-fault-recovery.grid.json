@@ -8,6 +8,7 @@
     "parameters": {
       "execution_backend": "wasm",
       "vm_instance_lifecycle": "reuse",
+      "vm_gas_limit": "18446744073709551615",
       "prediction_buckets": "8",
       "warmup_blocks": "0",
       "postchange_warmup_blocks": "0",

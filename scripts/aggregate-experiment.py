@@ -11,6 +11,11 @@ import statistics
 from pathlib import Path
 
 from consensus_pipeline_metrics import consensus_pipeline_metrics
+from conflictlab_v1_miss_policy import (
+    candidate_misses,
+    classify_candidate_miss,
+    has_recovery_evidence,
+)
 
 METRICS = {
     "parallel_wall_ms": ("parallelism.actual_execution_wall_nanos", 1e-6),
@@ -247,6 +252,11 @@ def derived_flat(record, preconsensus_window_ms=None):
         if serialization_batches not in (None, 0) and serialization_observations is not None
         else None
     )
+    classification = classify_candidate_miss(record)
+    flat["derived.candidate_miss_class"] = classification or "none"
+    flat["derived.candidate_miss_recovery_evidence"] = (
+        has_recovery_evidence(record) if candidate_misses(record) > 0 else None
+    )
     params = record.get("metadata", {}).get("parameters", {})
     for key, value in params.items():
         flat[f"param.{key}"] = value
@@ -364,6 +374,45 @@ def main() -> int:
     plot_fields = ["experiment_id", "workload", "mode", "workers", *parameter_keys, "metric", "n", "mean", "median", "stdev", "min", "p05", "p95", "max", "ci95_low", "ci95_high"]
     write_csv(args.out_dir / "summary-wide.csv", summary_rows, summary_fields)
     write_csv(args.out_dir / "plot-long.csv", plot_rows, plot_fields)
+
+    miss_groups = {}
+    for record in records:
+        misses = candidate_misses(record)
+        if misses <= 0:
+            continue
+        metadata = record.get("metadata", {})
+        operation_mix = metadata.get("parameters", {}).get("operation_mix", "n/a")
+        key = (
+            classify_candidate_miss(record),
+            metadata.get("experiment_id"),
+            operation_mix,
+        )
+        row = miss_groups.setdefault(
+            key,
+            {
+                "classification": key[0],
+                "experiment_id": key[1],
+                "operation_mix": key[2],
+                "records_with_misses": 0,
+                "candidate_misses": 0,
+                "records_with_recovery_evidence": 0,
+            },
+        )
+        row["records_with_misses"] += 1
+        row["candidate_misses"] += misses
+        row["records_with_recovery_evidence"] += int(has_recovery_evidence(record))
+    write_csv(
+        args.out_dir / "candidate-miss-attribution.csv",
+        [miss_groups[key] for key in sorted(miss_groups, key=repr)],
+        [
+            "classification",
+            "experiment_id",
+            "operation_mix",
+            "records_with_misses",
+            "candidate_misses",
+            "records_with_recovery_evidence",
+        ],
+    )
     (args.out_dir / "summary.json").write_text(
         json.dumps({"records": len(records), "groups": len(grouped), "metrics": list(METRICS)}, indent=2) + "\n",
         encoding="utf-8",

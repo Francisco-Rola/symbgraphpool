@@ -5,6 +5,14 @@ import argparse,json,math,statistics
 from collections import defaultdict,Counter
 from pathlib import Path
 
+from conflictlab_v1_miss_policy import (
+    MISS_CLASS_LABELS,
+    MISS_CLASS_ORDER,
+    candidate_misses,
+    classify_candidate_miss,
+    has_recovery_evidence,
+)
+
 def load(p): return [json.loads(x) for x in p.read_text().splitlines() if x.strip()]
 def param(r,k,d=None): return r.get('metadata',{}).get('parameters',{}).get(k,d)
 def env(r,k,d=None): return r.get('metadata',{}).get('environment',{}).get(k,d)
@@ -31,10 +39,28 @@ def write(records):
     add('# ConflictLab 1.0 submission-suite summary'); add('')
     add(f"records={len(records)} serial_equivalent={sum(r['correctness'].get('serial_equivalent') is True for r in records)}/{len(records)} campaigns={len(counts)}")
     add(f"dirty_records={sum(env(r,'git_dirty')=='true' for r in records)}")
+    add('VM lifecycle: benchmark-scoped retained Instance reuse for canonical performance runs with vm_gas_limit=u64::MAX; fresh/recycle remains the semantic control in the lifecycle sentinel.')
     add('Primary names: post-consensus validation latency; phase-bottleneck speedup = serial/max(pre,post); sequential speedup = serial/actual non-overlapped adaptive block wall.')
     add('')
     add('## Campaign counts')
     for k,v in sorted(counts.items()): add(f'- {k}: {v}')
+
+    missed=[r for r in records if candidate_misses(r)>0]
+    if missed:
+        add('');add('## Candidate-miss attribution')
+        add('Schema-3 records aggregate misses per block, so V1.0 can classify the source capability from controlled workload/fault parameters but cannot retroactively name the exact profile pair without new telemetry.')
+        add('| class | records with misses | candidate misses | recovery evidence | serial-equivalent |')
+        add('|---|---:|---:|---:|---:|')
+        by_class=group(missed,classify_candidate_miss)
+        for classification in MISS_CLASS_ORDER:
+            xs=by_class.get(classification,[])
+            if not xs: continue
+            add(f"| {MISS_CLASS_LABELS[classification]} | {len(xs)} | {sum(candidate_misses(r) for r in xs)} | {sum(has_recovery_evidence(r) for r in xs)}/{len(xs)} | {sum(r['correctness'].get('serial_equivalent') is True for r in xs)}/{len(xs)} |")
+        add('');add('### Candidate misses by operation mix')
+        add('| operation mix | class | records with misses | candidate misses | miss-history rels median | fallback rels median |')
+        add('|---|---|---:|---:|---:|---:|')
+        for (mix,classification),xs in sorted(group(missed,lambda r:(param(r,'operation_mix','n/a'),classify_candidate_miss(r))).items()):
+            add(f"| {mix} | {MISS_CLASS_LABELS[classification]} | {len(xs)} | {sum(candidate_misses(r) for r in xs)} | {f(med([r.get('adaptive_state',{}).get('candidate_miss_history_relationships',0) for r in xs]),1)} | {f(med([r.get('adaptive_state',{}).get('runtime_fallback_relationships',0) for r in xs]),1)} |")
 
     core=[r for r in records if r['metadata']['experiment_id']=='conflictlab-v1-core-state']
     if core:

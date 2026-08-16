@@ -5,6 +5,12 @@ import argparse, json, math, statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from conflictlab_v1_miss_policy import (
+    MISS_CLASS_LABELS,
+    MISS_CLASS_ORDER,
+    validate_candidate_miss_policy,
+)
+
 EXPECTED = {
     "conflictlab-v1-core-state": 960,
     "conflictlab-v1-cutoff-divergence": 1440,
@@ -54,6 +60,33 @@ def main():
         md=r.get("metadata",{})
         if md.get("workers",0)>6 or md.get("physical_cores",0)>6: fail(f"record {i}: exceeds 6-core budget")
         if env(r,"conflictlab_backend") != "wasm": fail(f"record {i}: non-Wasm backend")
+        lifecycle=p(r,"vm_instance_lifecycle")
+        gas_limit=p(r,"vm_gas_limit")
+        max_gas=str((1 << 64) - 1)
+        experiment_id=md.get("experiment_id")
+        if experiment_id == "conflictlab-v1-vm-lifecycle":
+            if lifecycle not in {"reuse","recycle"}:
+                fail(f"record {i}: invalid VM lifecycle {lifecycle!r} in lifecycle sentinel")
+        elif lifecycle != "reuse":
+            fail(
+                f"record {i}: canonical V1 performance record must use benchmark-scoped retained "
+                f"VM reuse, got {lifecycle!r}"
+            )
+        if gas_limit != max_gas:
+            fail(
+                f"record {i}: vm_gas_limit must be non-binding ({max_gas}) for retained-VM V1, "
+                f"got {gas_limit!r}"
+            )
+        if env(r,"conflictlab_vm_instance_lifecycle") != lifecycle:
+            fail(f"record {i}: lifecycle environment metadata disagrees with run parameters")
+        if env(r,"conflictlab_vm_gas_limit") != max_gas:
+            fail(f"record {i}: gas-limit environment metadata is missing or not non-binding")
+        expected_scope = "benchmark-scoped-nonbinding-gas" if lifecycle == "reuse" else "fresh-instance"
+        if env(r,"conflictlab_retained_vm_scope") != expected_scope:
+            fail(f"record {i}: retained-VM scope metadata disagrees with lifecycle")
+        expected_safe = "false" if lifecycle == "reuse" else "true"
+        if env(r,"conflictlab_vm_instance_lifecycle_safe") != expected_safe:
+            fail(f"record {i}: lifecycle safety metadata disagrees with lifecycle")
         oracle=r.get("parallelism",{}).get("perfect_conflict_parallel_lower_bound_nanos")
         serial=r.get("parallelism",{}).get("serial_equivalent_work_nanos")
         if not isinstance(oracle,int) or oracle<=0: fail(f"record {i}: missing perfect-conflict oracle bound")
@@ -67,14 +100,37 @@ def main():
             fail(f"record {i}: pre-execution success/failure counts do not sum to prepared receipts")
     print(f"records={len(records)} correct={sum(r['correctness']['serial_equivalent'] is True for r in records)}/{len(records)}")
 
-    # Uncontrolled predictor paths should remain miss-free; bank-mixed and injected hidden faults are intentional exceptions.
-    unexpected=[]
-    for r in records:
-        if r.get("feedback",{}).get("candidate_misses",0)==0: continue
-        exp=r["metadata"]["experiment_id"]
-        intentional=(exp=="conflictlab-v1-prediction-fault-recovery" and p(r,"prediction_fault_mode")=="hidden-key") or (exp=="conflictlab-v1-execution-semantics" and p(r,"operation_mix")=="bank-mixed")
-        if not intentional: unexpected.append((exp,p(r,"operation_mix"),r["feedback"]["candidate_misses"]))
-    if unexpected: fail(f"unexpected candidate misses, first={unexpected[:5]}")
+    lifecycle_records=[r for r in records if r.get("metadata",{}).get("experiment_id")=="conflictlab-v1-vm-lifecycle"]
+    if lifecycle_records:
+        pairs=defaultdict(dict)
+        for r in lifecycle_records:
+            params=dict(r.get("metadata",{}).get("parameters",{}))
+            lifecycle=params.pop("vm_instance_lifecycle",None)
+            key=(r.get("metadata",{}).get("mode"),r.get("metadata",{}).get("seed"),tuple(sorted(params.items())))
+            pairs[key][lifecycle]=r
+        for key,pair in pairs.items():
+            if set(pair)!={"reuse","recycle"}:
+                fail(f"incomplete VM lifecycle control pair: {key}")
+            if pair["reuse"]["correctness"].get("canonical_state_digest") != pair["recycle"]["correctness"].get("canonical_state_digest"):
+                fail(f"retained/fresh lifecycle state mismatch: {key}")
+        print(f"vm_lifecycle_pairs={len(pairs)} retained_fresh_digest_matches={len(pairs)}")
+
+    # Candidate misses are a measured outcome for deliberately hidden keys, runtime-only bank
+    # dependencies, and state-derived symbolic keys. Input-resolved workloads must remain miss-free,
+    # and every accepted miss must leave fallback/miss-history evidence for future planning.
+    try:
+        miss_totals, miss_records = validate_candidate_miss_policy(records)
+    except ValueError as error:
+        fail(str(error))
+    if miss_totals:
+        parts=[]
+        for classification in MISS_CLASS_ORDER:
+            if miss_totals[classification]:
+                parts.append(
+                    f"{MISS_CLASS_LABELS[classification]}={miss_totals[classification]}"
+                    f"/{miss_records[classification]} records"
+                )
+        print("candidate_miss_classes: " + "; ".join(parts))
 
     # Dense/compact pairs: same logical relationship classification and state, compact representation never larger.
     comp=[r for r in records if r["metadata"]["experiment_id"]=="conflictlab-v1-compaction-reference"]

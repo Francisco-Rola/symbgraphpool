@@ -49,8 +49,11 @@ impl BenchmarkWorkload for ConflictLabWorkload {
 
     fn prepare(&self, run: &RunIdentity) -> Result<Box<dyn PreparedBenchmark>, HarnessError> {
         let config = ConflictLabConfig::from_run(run)?;
-        let (engine, code_id, mut environment) =
-            setup_engine(config.execution_backend, config.vm_instance_lifecycle)?;
+        let (engine, code_id, mut environment) = setup_engine(
+            config.execution_backend,
+            config.vm_instance_lifecycle,
+            config.vm_gas_limit,
+        )?;
         environment.insert(
             "conflictlab_prediction_quality".to_owned(),
             config.prediction_quality.as_str().to_owned(),
@@ -62,6 +65,23 @@ impl BenchmarkWorkload for ConflictLabWorkload {
         environment.insert(
             "conflictlab_vm_instance_lifecycle".to_owned(),
             vm_instance_lifecycle_name(config.vm_instance_lifecycle).to_owned(),
+        );
+        environment.insert(
+            "conflictlab_vm_instance_lifecycle_safe".to_owned(),
+            (config.vm_instance_lifecycle == WasmInstanceLifecycle::Recycle).to_string(),
+        );
+        environment.insert(
+            "conflictlab_vm_gas_limit".to_owned(),
+            config.vm_gas_limit.to_string(),
+        );
+        environment.insert(
+            "conflictlab_retained_vm_scope".to_owned(),
+            if config.vm_instance_lifecycle == WasmInstanceLifecycle::Reuse {
+                "benchmark-scoped-nonbinding-gas"
+            } else {
+                "fresh-instance"
+            }
+            .to_owned(),
         );
         environment.insert(
             "conflictlab_complexity_mix".to_owned(),
@@ -601,6 +621,7 @@ struct ConflictLabConfig {
     warmup_payload_bytes: usize,
     execution_backend: ExecutionBackend,
     vm_instance_lifecycle: WasmInstanceLifecycle,
+    vm_gas_limit: u64,
     prediction_quality: PredictionQuality,
     complexity_mix: ComplexityMix,
     prediction_buckets: u16,
@@ -631,6 +652,7 @@ impl ConflictLabConfig {
             "warmup_payload_bytes",
             "execution_backend",
             "vm_instance_lifecycle",
+            "vm_gas_limit",
             "prediction_quality",
             "complexity_mix",
             "prediction_buckets",
@@ -682,7 +704,12 @@ impl ConflictLabConfig {
             run.parameters
                 .get("vm_instance_lifecycle")
                 .map(String::as_str)
-                .unwrap_or("reuse"),
+                .unwrap_or("recycle"),
+        )?;
+        let vm_gas_limit = parameter(
+            &run.parameters,
+            "vm_gas_limit",
+            EngineConfig::default().gas_limit,
         )?;
         let complexity_mix = ComplexityMix::parse(
             run.parameters
@@ -806,6 +833,7 @@ impl ConflictLabConfig {
             warmup_payload_bytes,
             execution_backend,
             vm_instance_lifecycle,
+            vm_gas_limit,
             prediction_quality,
             complexity_mix,
             prediction_buckets,
@@ -964,7 +992,7 @@ fn parse_vm_instance_lifecycle(value: &str) -> Result<WasmInstanceLifecycle, Har
         "reuse" => Ok(WasmInstanceLifecycle::Reuse),
         "recycle" => Ok(WasmInstanceLifecycle::Recycle),
         other => Err(HarnessError::WorkloadParameter(format!(
-            "vm_instance_lifecycle must be reuse or recycle, got {other:?}"
+            "vm_instance_lifecycle must be recycle or benchmark-scoped retained reuse, got {other:?}"
         ))),
     }
 }
@@ -979,6 +1007,7 @@ fn vm_instance_lifecycle_name(value: WasmInstanceLifecycle) -> &'static str {
 fn setup_engine(
     backend: ExecutionBackend,
     vm_instance_lifecycle: WasmInstanceLifecycle,
+    vm_gas_limit: u64,
 ) -> Result<
     (
         CosmWasmEngine,
@@ -988,6 +1017,7 @@ fn setup_engine(
     HarnessError,
 > {
     let engine = CosmWasmEngine::new(EngineConfig {
+        gas_limit: vm_gas_limit,
         wasm_instance_lifecycle: vm_instance_lifecycle,
         ..EngineConfig::default()
     });
@@ -1311,6 +1341,56 @@ impl PreparedBenchmark for PreparedConflictLab {
             );
         }
         Ok(bytes)
+    }
+
+    fn canonical_state_diagnostics(&self) -> Result<Option<serde_json::Value>, HarnessError> {
+        let mut queries = Vec::with_capacity(self.canonical_queries.len());
+        for (index, query) in self.canonical_queries.iter().enumerate() {
+            let request = serde_json::from_slice::<serde_json::Value>(query.msg.as_slice())
+                .unwrap_or_else(|_| serde_json::json!({"raw_hex": bytes_to_hex(query.msg.as_slice())}));
+            let present = self.engine.contract_metadata(&query.contract).is_some();
+            let response = if present {
+                let outcome = self
+                    .engine
+                    .query(
+                        BlockContext::default(),
+                        query.contract.clone(),
+                        query.msg.clone(),
+                    )
+                    .map_err(|error| HarnessError::Runtime(error.to_string()))?;
+                serde_json::from_slice::<serde_json::Value>(outcome.data.as_slice()).unwrap_or_else(
+                    |_| serde_json::json!({"raw_hex": bytes_to_hex(outcome.data.as_slice())}),
+                )
+            } else {
+                serde_json::Value::Null
+            };
+            queries.push(serde_json::json!({
+                "index": index,
+                "contract": query.contract.as_str(),
+                "contract_present": present,
+                "request": request,
+                "response": response,
+            }));
+        }
+
+        let bank_balances = self
+            .bank_balance_addresses
+            .iter()
+            .map(|address| {
+                serde_json::json!({
+                    "address": address.as_str(),
+                    "denom": "uconflict",
+                    "amount": self.engine.balance(address.clone(), "uconflict").to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Some(serde_json::json!({
+            "contract": self.contract.as_str(),
+            "accounts": self.accounts,
+            "queries": queries,
+            "bank_balances": bank_balances,
+        })))
     }
 }
 
@@ -2108,6 +2188,16 @@ fn deterministic_work(iterations: u64, seed: u64, payload: &[u8]) -> u64 {
             ^ value.rotate_right(11);
     }
     black_box(value)
+}
+
+fn bytes_to_hex(value: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(value.len().saturating_mul(2));
+    for byte in value {
+        output.push(char::from(HEX[usize::from(*byte >> 4)]));
+        output.push(char::from(HEX[usize::from(*byte & 0x0f)]));
+    }
+    output
 }
 
 fn append_bytes(output: &mut Vec<u8>, value: &[u8]) {

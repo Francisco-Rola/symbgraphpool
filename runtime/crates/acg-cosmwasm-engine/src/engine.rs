@@ -51,13 +51,16 @@ static NEXT_REUSABLE_INSTANCE_POOL_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WasmInstanceLifecycle {
-    /// Research-prototype mode: retain one or more VM instances per worker thread and checksum,
-    /// rebind their external storage/query backend between transactions, and do not recycle the
-    /// instance after a successful VM call. This deliberately trades retained VM memory for lower
-    /// lifecycle overhead.
-    #[default]
+    /// Retain one mutable VM instance per thread/checksum and rebind only its host storage/query
+    /// backend between calls. This is not a generally fresh-transaction-equivalent CosmWasm mode:
+    /// VM-local memory/globals and the gas meter survive across calls. Benchmarks may opt into it
+    /// only when they make cumulative gas non-binding and separately validate the retained path
+    /// against fresh-instance semantics for the exact workload being reported.
     Reuse,
-    /// Compatibility mode matching the original engine behavior: acquire and recycle every call.
+    /// Correct/default lifecycle: acquire a fresh mutable VM instance for each call and recycle it
+    /// through CosmWasm after the call. Compiled-module caching remains enabled; executed mutable
+    /// Instance state is never carried into a later transaction.
+    #[default]
     Recycle,
 }
 
@@ -77,7 +80,7 @@ impl Default for EngineConfig {
             max_call_depth: 32,
             contract_address_prefix: "contract".to_owned(),
             wasm_cache: WasmCacheConfig::default(),
-            wasm_instance_lifecycle: WasmInstanceLifecycle::Reuse,
+            wasm_instance_lifecycle: WasmInstanceLifecycle::Recycle,
         }
     }
 }

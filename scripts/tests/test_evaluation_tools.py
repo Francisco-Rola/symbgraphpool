@@ -10,6 +10,16 @@ ROOT = Path(__file__).resolve().parents[2]
 GENERATOR = ROOT / "scripts" / "generate-manifest-matrix.py"
 AGGREGATOR = ROOT / "scripts" / "aggregate-experiment.py"
 V1_CACHE_CHECK = ROOT / "scripts" / "check-conflictlab-v1-campaign-cache.py"
+V1_CORRECTNESS_DIAG = ROOT / "scripts" / "diagnose-conflictlab-v1-correctness.py"
+
+sys.path.insert(0, str(ROOT / "scripts"))
+from conflictlab_v1_miss_policy import (  # noqa: E402
+    INJECTED_PREDICTION_FAULT,
+    RUNTIME_ONLY_DEPENDENCY,
+    STATE_DERIVED_SYMBOLIC_KEY,
+    UNEXPECTED_INPUT_RESOLVED,
+    validate_candidate_miss_policy,
+)
 
 
 class EvaluationToolTests(unittest.TestCase):
@@ -592,6 +602,17 @@ class EvaluationToolTests(unittest.TestCase):
             manifests[name] = manifest
             total += count
         self.assertEqual(total, 4630)
+        max_gas = str((1 << 64) - 1)
+        for name, manifest in manifests.items():
+            self.assertTrue(
+                all(run["parameters"].get("vm_gas_limit") == max_gas for run in manifest["runs"]),
+                f"{name} does not use the non-binding retained-VM gas budget",
+            )
+            lifecycles = {run["parameters"]["vm_instance_lifecycle"] for run in manifest["runs"]}
+            if name == "v1-vm-lifecycle.grid.json":
+                self.assertEqual(lifecycles, {"reuse", "recycle"})
+            else:
+                self.assertEqual(lifecycles, {"reuse"}, f"{name} is not retained-VM canonical")
 
         cutoff = manifests["v1-cutoff-divergence.grid.json"]["runs"]
         self.assertEqual(
@@ -637,6 +658,220 @@ class EvaluationToolTests(unittest.TestCase):
         self.assertEqual(len({run["seed"] for run in headlines}), 20)
         soak = manifests["v1-long-run-soak.grid.json"]["runs"]
         self.assertTrue(all(run["parameters"]["warmup_blocks"] == "1000" for run in soak))
+
+    def test_v1_candidate_miss_policy_accepts_measured_exception_classes_with_recovery(self):
+        def record(experiment_id, operation_mix, misses, *, fault="none", miss_history=1):
+            return {
+                "metadata": {
+                    "experiment_id": experiment_id,
+                    "mode": "probability-only",
+                    "seed": 7,
+                    "run_index": 1,
+                    "parameters": {
+                        "operation_mix": operation_mix,
+                        "prediction_fault_mode": fault,
+                    },
+                },
+                "feedback": {
+                    "candidate_misses": misses,
+                    "fallback_edges_created": 0,
+                },
+                "adaptive_state": {
+                    "candidate_miss_history_relationships": miss_history,
+                    "runtime_fallback_relationships": 0,
+                },
+            }
+
+        records = [
+            record("conflictlab-v1-execution-semantics", "stateful-mixed", 5),
+            record("conflictlab-v1-symbolic-granularity", "full", 2),
+            record("conflictlab-v1-execution-semantics", "bank-mixed", 3),
+            record(
+                "conflictlab-v1-prediction-fault-recovery",
+                "credit",
+                4,
+                fault="hidden-key",
+            ),
+        ]
+        totals, counts = validate_candidate_miss_policy(records)
+        self.assertEqual(totals[STATE_DERIVED_SYMBOLIC_KEY], 7)
+        self.assertEqual(counts[STATE_DERIVED_SYMBOLIC_KEY], 2)
+        self.assertEqual(totals[RUNTIME_ONLY_DEPENDENCY], 3)
+        self.assertEqual(totals[INJECTED_PREDICTION_FAULT], 4)
+        self.assertEqual(totals[UNEXPECTED_INPUT_RESOLVED], 0)
+
+    def test_v1_candidate_miss_policy_rejects_input_resolved_misses(self):
+        record = {
+            "metadata": {
+                "experiment_id": "conflictlab-v1-core-state",
+                "mode": "static",
+                "seed": 11,
+                "run_index": 1,
+                "parameters": {
+                    "operation_mix": "credit",
+                    "prediction_fault_mode": "none",
+                },
+            },
+            "feedback": {"candidate_misses": 1, "fallback_edges_created": 1},
+            "adaptive_state": {"candidate_miss_history_relationships": 1},
+        }
+        with self.assertRaisesRegex(ValueError, "unexpected input-resolved candidate misses"):
+            validate_candidate_miss_policy([record])
+
+    def test_v1_candidate_miss_policy_requires_recovery_evidence_for_state_derived_misses(self):
+        record = {
+            "metadata": {
+                "experiment_id": "conflictlab-v1-execution-semantics",
+                "mode": "cost-aware",
+                "seed": 23,
+                "run_index": 5,
+                "parameters": {
+                    "operation_mix": "stateful-mixed",
+                    "prediction_fault_mode": "none",
+                },
+            },
+            "feedback": {"candidate_misses": 2, "fallback_edges_created": 0},
+            "adaptive_state": {
+                "candidate_miss_history_relationships": 0,
+                "runtime_fallback_relationships": 0,
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "lacked fallback/miss-history recovery evidence"):
+            validate_candidate_miss_policy([record])
+
+
+    def test_v1_correctness_diagnostics_generate_filtered_manifests(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            adaptation = out / "adaptation-transitions"
+            execution = out / "execution-semantics"
+            adaptation.mkdir()
+            execution.mkdir()
+
+            bad_run = {
+                "workload": "conflictlab",
+                "mode": "probability-only",
+                "run_index": 1,
+                "seed": 47,
+                "workers": 6,
+                "parameters": {
+                    "operation_mix": "credit",
+                    "transactions": "512",
+                    "postchange_warmup_blocks": "8",
+                },
+            }
+            good_run = {
+                "workload": "conflictlab",
+                "mode": "probability-only",
+                "run_index": 2,
+                "seed": 101,
+                "workers": 6,
+                "parameters": {
+                    "operation_mix": "credit",
+                    "transactions": "512",
+                    "postchange_warmup_blocks": "0",
+                },
+            }
+            miss_run = {
+                "workload": "conflictlab",
+                "mode": "probability-only",
+                "run_index": 1,
+                "seed": 47,
+                "workers": 6,
+                "parameters": {
+                    "operation_mix": "point-mixed",
+                    "transactions": "128",
+                },
+            }
+            base_manifest = {
+                "schema_version": 1,
+                "record_schema_version": 3,
+                "physical_core_limit": 6,
+                "policy": {},
+            }
+            (adaptation / "manifest.json").write_text(
+                json.dumps({
+                    **base_manifest,
+                    "experiment_id": "conflictlab-v1-adaptation-transitions",
+                    "runs": [bad_run, good_run],
+                }),
+                encoding="utf-8",
+            )
+            (execution / "manifest.json").write_text(
+                json.dumps({
+                    **base_manifest,
+                    "experiment_id": "conflictlab-v1-execution-semantics",
+                    "runs": [miss_run],
+                }),
+                encoding="utf-8",
+            )
+            (adaptation / "acceptance.json").write_text(
+                json.dumps({
+                    "status": "correctness_failure",
+                    "accepted_runs": 1,
+                    "performance_regressions": 0,
+                    "incomplete_runs": 0,
+                    "configuration_errors": 0,
+                    "correctness_failures": 1,
+                }),
+                encoding="utf-8",
+            )
+            (execution / "acceptance.json").write_text(
+                json.dumps({
+                    "status": "accepted",
+                    "accepted_runs": 1,
+                    "performance_regressions": 0,
+                    "incomplete_runs": 0,
+                    "configuration_errors": 0,
+                    "correctness_failures": 0,
+                }),
+                encoding="utf-8",
+            )
+
+            def record(run, experiment_id, equivalent, misses=0):
+                return {
+                    "metadata": {"experiment_id": experiment_id, **run},
+                    "correctness": {
+                        "serial_equivalent": equivalent,
+                        "canonical_state_digest": "same" if equivalent else "adaptive",
+                        "serial_reference_digest": "same" if equivalent else "serial",
+                    },
+                    "feedback": {"candidate_misses": misses},
+                    "adaptive_state": {"candidate_miss_history_relationships": 1 if misses else 0},
+                }
+
+            records = [
+                record(bad_run, "conflictlab-v1-adaptation-transitions", False),
+                record(good_run, "conflictlab-v1-adaptation-transitions", True),
+                record(miss_run, "conflictlab-v1-execution-semantics", True, misses=4),
+            ]
+            (out / "records.jsonl").write_text(
+                "".join(json.dumps(item) + "\n" for item in records),
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [sys.executable, str(V1_CORRECTNESS_DIAG), str(out)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            diag = out / "correctness-diagnostics"
+            self.assertTrue((diag / "incorrect-records.csv").is_file())
+            self.assertTrue((diag / "failure-discrimination.csv").is_file())
+            plan = json.loads((diag / "rerun-plan.json").read_text(encoding="utf-8"))
+            self.assertEqual({item["reason"] for item in plan}, {
+                "serial-non-equivalent",
+                "unexpected-input-resolved-candidate-miss",
+            })
+            filtered = json.loads(
+                (diag / "manifests/adaptation-transitions-incorrect.manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual([run["run_index"] for run in filtered["runs"]], [1])
+            strict = json.loads(
+                (diag / "manifests/execution-semantics-unexpected-miss.manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual([run["run_index"] for run in strict["runs"]], [1])
+
 
 
 if __name__ == "__main__":

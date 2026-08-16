@@ -41,6 +41,7 @@ started_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 git_revision=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)
 git_status=$(git -C "$ROOT" status --porcelain=v1 2>/dev/null | wc -l | tr -d ' ')
 physical_core_limit=6
+vm_instance_lifecycle_policy=retained-reuse-with-nonbinding-gas; fresh-recycle-control-in-vm-lifecycle
 note=No core-count or memory-capacity scaling axis is used in ConflictLab 1.0.
 EOF
 

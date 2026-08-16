@@ -94,6 +94,12 @@ pub trait PreparedBenchmark: Send {
     }
     fn canonical_state_bytes(&self) -> Result<Vec<u8>, HarnessError>;
 
+    /// Optional human-readable state snapshot used only by opt-in correctness diagnostics.
+    /// Publication records continue to use the deterministic canonical-state digest above.
+    fn canonical_state_diagnostics(&self) -> Result<Option<serde_json::Value>, HarnessError> {
+        Ok(None)
+    }
+
     /// Extra workload-specific environment metadata copied into the stable experiment record.
     fn environment_metadata(&self) -> BTreeMap<String, String> {
         BTreeMap::new()
@@ -291,6 +297,17 @@ impl BenchmarkHarness {
         .ok_or(HarnessError::MissingMeasuredArtifacts)?;
         let adaptive_state = adaptive.canonical_state_bytes()?;
         let correctness = CorrectnessRecord::from_state_bytes(&adaptive_state, &serial_state);
+        if correctness.serial_equivalent == Some(false) {
+            maybe_write_correctness_diagnostics(
+                manifest,
+                run,
+                serial.as_ref(),
+                adaptive.as_ref(),
+                &serial_state,
+                &adaptive_state,
+                &correctness,
+            )?;
+        }
 
         let serial_services = serial_services(&serial_reference.report)?;
         let serial_equivalent_work_nanos = nanos(serial_reference.wall);
@@ -937,6 +954,61 @@ fn estimated_serial_service_nanos(
 struct SerialReference {
     report: BlockExecutionReport,
     wall: Duration,
+}
+
+fn maybe_write_correctness_diagnostics(
+    manifest: &ExperimentManifest,
+    run: &RunIdentity,
+    serial: &dyn PreparedBenchmark,
+    adaptive: &dyn PreparedBenchmark,
+    serial_state: &[u8],
+    adaptive_state: &[u8],
+    correctness: &CorrectnessRecord,
+) -> Result<(), HarnessError> {
+    let Some(directory) = std::env::var_os("ACG_CORRECTNESS_DIAGNOSTICS_DIR") else {
+        return Ok(());
+    };
+    let directory = PathBuf::from(directory);
+    fs::create_dir_all(&directory)?;
+
+    let first_mismatch_byte = serial_state
+        .iter()
+        .zip(adaptive_state.iter())
+        .position(|(serial_byte, adaptive_byte)| serial_byte != adaptive_byte)
+        .or_else(|| (serial_state.len() != adaptive_state.len()).then(|| serial_state.len().min(adaptive_state.len())));
+
+    let document = serde_json::json!({
+        "schema_version": 1,
+        "experiment_id": manifest.experiment_id.as_str(),
+        "run": run,
+        "correctness": {
+            "serial_equivalent": correctness.serial_equivalent,
+            "canonical_state_digest": correctness.canonical_state_digest.as_deref(),
+            "serial_reference_digest": correctness.serial_reference_digest.as_deref(),
+            "serial_state_bytes": serial_state.len(),
+            "adaptive_state_bytes": adaptive_state.len(),
+            "first_mismatch_byte": first_mismatch_byte,
+        },
+        "serial_state": serial.canonical_state_diagnostics()?,
+        "adaptive_state": adaptive.canonical_state_diagnostics()?,
+    });
+
+    let safe_experiment = manifest
+        .experiment_id
+        .chars()
+        .map(|character| if character.is_ascii_alphanumeric() || character == '-' { character } else { '_' })
+        .collect::<String>();
+    let safe_mode = run
+        .mode
+        .chars()
+        .map(|character| if character.is_ascii_alphanumeric() || character == '-' { character } else { '_' })
+        .collect::<String>();
+    let path = directory.join(format!(
+        "{}-run{:04}-{}-seed{}.json",
+        safe_experiment, run.run_index, safe_mode, run.seed
+    ));
+    fs::write(path, serde_json::to_vec_pretty(&document)?)?;
+    Ok(())
 }
 
 fn run_serial_reference(prepared: &dyn PreparedBenchmark) -> Result<SerialReference, HarnessError> {

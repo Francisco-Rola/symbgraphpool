@@ -107,9 +107,11 @@ fn reusable_and_recycled_vm_lifecycles_produce_identical_canonical_state() {
 
     assert_eq!(
         EngineConfig::default().wasm_instance_lifecycle,
-        WasmInstanceLifecycle::Reuse
+        WasmInstanceLifecycle::Recycle
     );
 
+    // `Reuse` is an explicit unsafe retained-instance negative control. This short smoke checks
+    // backend rebinding/metrics only; it is not evidence that dirty retained VM state is safe.
     let reused = run(WasmInstanceLifecycle::Reuse);
     let recycled = run(WasmInstanceLifecycle::Recycle);
     assert_eq!(reused.0, recycled.0);
