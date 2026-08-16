@@ -139,8 +139,13 @@ partially prepared block and one fully prepared block.
 ### Compaction reference and block scaling
 
 The dense-reference campaign toggles compact groups at B32/B64/B128/B256/B512 under exact/bucketed
-prediction. The fixed-hardware block-scaling campaign extends the compact production path through
-B1024/B2048. Core count stays six throughout.
+prediction. It uses a deliberately non-binding 5 s consensus window so compact and dense runs
+observe the complete block during all warm-up and measured feedback steps; this keeps the paired
+feedback/posterior comparison a semantic-equivalence test rather than allowing the planning-time
+improvement itself to change which observations arrive before cutoff. The validator requires the
+reference cutoff not to bind and requires every candidate transaction to produce a prepared receipt.
+The fixed-hardware block-scaling campaign extends the compact production path through B1024/B2048
+under the normal evaluation timing regime. Core count stays six throughout.
 
 ### Symbolic precision and faults
 

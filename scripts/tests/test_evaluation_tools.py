@@ -636,6 +636,11 @@ class EvaluationToolTests(unittest.TestCase):
             {run["parameters"]["acg.compact_equivalence_groups"] for run in compaction},
             {"true", "false"},
         )
+        self.assertEqual(
+            {run["parameters"]["consensus_cutoff_ms"] for run in compaction},
+            {"5000"},
+            "dense/compact semantic reference must use a non-binding consensus window",
+        )
         self.assertEqual({int(run["parameters"]["sim.block_size"]) for run in compaction}, {32, 64, 128, 256, 512})
 
         scaling = manifests["v1-block-scaling.grid.json"]["runs"]

@@ -145,6 +145,22 @@ def main():
         for key,v in pairs.items():
             if set(v)!={"true","false"}: fail(f"incomplete compaction pair {key}")
             c,d=v["true"],v["false"]
+            # This is a semantic reference, not a deadline experiment. A binding cutoff lets the
+            # physical planning-time improvement change the evidence population during warm-up,
+            # which can legitimately perturb adaptive feedback/posteriors before the measured block.
+            # Require both halves to finish preexecution so exact logical-feedback equality is a
+            # meaningful invariant.
+            for label,record in (("compact",c),("dense",d)):
+                consensus=record.get("consensus",{})
+                if consensus.get("cutoff_reached"):
+                    fail(f"compaction reference cutoff bound for {label}: {key}")
+                candidate=consensus.get("candidate_transactions")
+                prepared=consensus.get("prepared_receipts")
+                if candidate is None or prepared is None or prepared != candidate:
+                    fail(
+                        f"compaction reference did not prepare the complete block for {label}: "
+                        f"{key} prepared={prepared} candidate={candidate}"
+                    )
             for field in ("candidate_edges","low_edges","soft_edges","hard_edges"):
                 if c["scheduling"].get(field)!=d["scheduling"].get(field): fail(f"compaction changed logical {field}: {key}")
             for field in ("wave_count","max_wave_width"):

@@ -37,7 +37,7 @@
       "prediction_fault_rate_bps": "0",
       "operation_mix": "credit",
       "consensus_divergence": "identical",
-      "consensus_cutoff_ms": "250"
+      "consensus_cutoff_ms": "5000"
     }
   },
   "order_seed": 2026081704,
