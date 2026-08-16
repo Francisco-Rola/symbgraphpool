@@ -54,7 +54,7 @@ corresponds to one universal blockchain transaction latency.
 `symbolic_granularity` controls how much analyzer precision is retained:
 
 - `fine`: current field/logical-key analysis;
-- `resource`: collapse fields/logical keys to whole resource families;
+- `resource`: collapse fields/logical keys to conservative whole resource families; the transformed symbolic artifact uses whole-resource predicates rather than unresolved-key predicates, so this ablation removes key precision without introducing artificial false negatives;
 - `profile`: conservatively collapse state-touching profiles into one contract-state envelope, removing field/key distinctions.
 
 `prediction_fault_mode` provides controlled analyzer errors without weakening reconciliation:
@@ -146,7 +146,10 @@ B1024/B2048. Core count stays six throughout.
 
 Granularity uses `fine/resource/profile` over point-mixed and full stateful operations. Runtime
 positive/negative conflict observations plus candidate misses are reported as empirical predictor
-precision/recall. Fault recovery injects hidden/spurious key errors at 1%, 5%, and 10% and measures the first block after the change
+precision/recall. Coarse `resource/profile` point-mixed misses are measured rather than treated as
+input-resolved validator failures because the ablation intentionally removes key precision and
+`ConditionalCredit` retains a state-dependent access guard; `fine` point-mixed remains strictly
+miss-free. Fault recovery injects hidden/spurious key errors at 1%, 5%, and 10% and measures the first block after the change
 and states after 1/4/8 post-change warm-up blocks. Hidden-key faults must produce candidate misses or
 fallback evidence while every decided result remains serial-equivalent.
 

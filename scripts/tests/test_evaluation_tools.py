@@ -14,6 +14,7 @@ V1_CORRECTNESS_DIAG = ROOT / "scripts" / "diagnose-conflictlab-v1-correctness.py
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from conflictlab_v1_miss_policy import (  # noqa: E402
+    COARSE_SYMBOLIC_GRANULARITY,
     INJECTED_PREDICTION_FAULT,
     RUNTIME_ONLY_DEPENDENCY,
     STATE_DERIVED_SYMBOLIC_KEY,
@@ -660,7 +661,15 @@ class EvaluationToolTests(unittest.TestCase):
         self.assertTrue(all(run["parameters"]["warmup_blocks"] == "1000" for run in soak))
 
     def test_v1_candidate_miss_policy_accepts_measured_exception_classes_with_recovery(self):
-        def record(experiment_id, operation_mix, misses, *, fault="none", miss_history=1):
+        def record(
+            experiment_id,
+            operation_mix,
+            misses,
+            *,
+            fault="none",
+            miss_history=1,
+            granularity="fine",
+        ):
             return {
                 "metadata": {
                     "experiment_id": experiment_id,
@@ -670,6 +679,7 @@ class EvaluationToolTests(unittest.TestCase):
                     "parameters": {
                         "operation_mix": operation_mix,
                         "prediction_fault_mode": fault,
+                        "symbolic_granularity": granularity,
                     },
                 },
                 "feedback": {
@@ -687,6 +697,12 @@ class EvaluationToolTests(unittest.TestCase):
             record("conflictlab-v1-symbolic-granularity", "full", 2),
             record("conflictlab-v1-execution-semantics", "bank-mixed", 3),
             record(
+                "conflictlab-v1-symbolic-granularity",
+                "point-mixed",
+                6,
+                granularity="resource",
+            ),
+            record(
                 "conflictlab-v1-prediction-fault-recovery",
                 "credit",
                 4,
@@ -698,6 +714,8 @@ class EvaluationToolTests(unittest.TestCase):
         self.assertEqual(counts[STATE_DERIVED_SYMBOLIC_KEY], 2)
         self.assertEqual(totals[RUNTIME_ONLY_DEPENDENCY], 3)
         self.assertEqual(totals[INJECTED_PREDICTION_FAULT], 4)
+        self.assertEqual(totals[COARSE_SYMBOLIC_GRANULARITY], 6)
+        self.assertEqual(counts[COARSE_SYMBOLIC_GRANULARITY], 1)
         self.assertEqual(totals[UNEXPECTED_INPUT_RESOLVED], 0)
 
     def test_v1_candidate_miss_policy_rejects_input_resolved_misses(self):
@@ -710,6 +728,25 @@ class EvaluationToolTests(unittest.TestCase):
                 "parameters": {
                     "operation_mix": "credit",
                     "prediction_fault_mode": "none",
+                },
+            },
+            "feedback": {"candidate_misses": 1, "fallback_edges_created": 1},
+            "adaptive_state": {"candidate_miss_history_relationships": 1},
+        }
+        with self.assertRaisesRegex(ValueError, "unexpected input-resolved candidate misses"):
+            validate_candidate_miss_policy([record])
+
+    def test_v1_candidate_miss_policy_keeps_fine_point_mixed_strict(self):
+        record = {
+            "metadata": {
+                "experiment_id": "conflictlab-v1-symbolic-granularity",
+                "mode": "probability-only",
+                "seed": 11,
+                "run_index": 3,
+                "parameters": {
+                    "operation_mix": "point-mixed",
+                    "prediction_fault_mode": "none",
+                    "symbolic_granularity": "fine",
                 },
             },
             "feedback": {"candidate_misses": 1, "fallback_edges_created": 1},

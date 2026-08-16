@@ -918,9 +918,15 @@ fn conflictlab_symbolic(
                         .ok_or_else(|| {
                             HarnessError::Runtime("ConflictLab access key missing".to_owned())
                         })?;
+                    // Resource granularity is a conservative whole-resource collapse, not an
+                    // unresolved logical key. Raw semantic-name lists normalize to
+                    // SemanticKeyKind::FieldSet, which profile-edge derivation represents as
+                    // KeyMatch::WholeResource. Using a scalar here would instead create an
+                    // unresolved key and let adaptive probability thresholds prune relationships
+                    // that this ablation is supposed to retain conservatively.
                     key.insert(
                         "semantic_name".to_owned(),
-                        serde_json::Value::String("__whole_resource__".to_owned()),
+                        serde_json::json!(["__whole_resource__"]),
                     );
                     key.insert("depends_on".to_owned(), serde_json::Value::Null);
                 }
@@ -2208,6 +2214,43 @@ fn append_bytes(output: &mut Vec<u8>, value: &[u8]) {
 #[cfg(test)]
 mod v1_evaluation_tests {
     use super::*;
+
+    #[test]
+    fn resource_granularity_compiles_to_whole_resource_predicates() {
+        let bytes = conflictlab_symbolic(
+            PredictionQuality::Exact,
+            SymbolicGranularity::Resource,
+        )
+        .unwrap();
+        let document = parse_slice(&bytes).unwrap();
+        let context = IngestionContext::new(
+            RuntimeId::new("cosmwasm").unwrap(),
+            ContractCodeHash([9; 32]),
+            1,
+        );
+        let profiles = normalize_document(document, &context).unwrap();
+
+        let accesses = profiles
+            .iter()
+            .flat_map(|profile| profile.accesses.iter())
+            .collect::<Vec<_>>();
+        assert!(!accesses.is_empty());
+        assert!(accesses.iter().all(|access| {
+            access.semantic_key_kind == acg_core::SemanticKeyKind::FieldSet
+                && access.key_dependency.is_none()
+        }));
+
+        let artifact =
+            ProfileGraphArtifact::compile(profiles, &EdgeBuildConfig::default()).unwrap();
+        let graph = ProfileGraph::load(artifact, GraphLoadConfig::default()).unwrap();
+        assert!(!graph.edges().is_empty());
+        assert!(graph.edges().iter().all(|edge| {
+            !edge.predicate.clauses.is_empty()
+                && edge.predicate.clauses.iter().all(|clause| {
+                    matches!(&clause.key_match, acg_core::KeyMatch::WholeResource)
+                })
+        }));
+    }
 
     #[test]
     fn symbolic_granularity_ablation_keeps_documents_normalizable() {

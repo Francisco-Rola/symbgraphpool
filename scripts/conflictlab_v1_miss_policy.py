@@ -13,12 +13,14 @@ from collections import Counter
 INJECTED_PREDICTION_FAULT = "injected-prediction-fault"
 RUNTIME_ONLY_DEPENDENCY = "runtime-only-dependency"
 STATE_DERIVED_SYMBOLIC_KEY = "state-derived-symbolic-key"
+COARSE_SYMBOLIC_GRANULARITY = "coarse-symbolic-granularity"
 UNEXPECTED_INPUT_RESOLVED = "unexpected-input-resolved"
 
 MISS_CLASS_ORDER = (
     INJECTED_PREDICTION_FAULT,
     RUNTIME_ONLY_DEPENDENCY,
     STATE_DERIVED_SYMBOLIC_KEY,
+    COARSE_SYMBOLIC_GRANULARITY,
     UNEXPECTED_INPUT_RESOLVED,
 )
 
@@ -26,6 +28,7 @@ MISS_CLASS_LABELS = {
     INJECTED_PREDICTION_FAULT: "injected prediction fault",
     RUNTIME_ONLY_DEPENDENCY: "runtime-only dependency",
     STATE_DERIVED_SYMBOLIC_KEY: "state-derived symbolic key",
+    COARSE_SYMBOLIC_GRANULARITY: "coarse symbolic granularity",
     UNEXPECTED_INPUT_RESOLVED: "unexpected input-resolved miss",
 }
 
@@ -47,6 +50,7 @@ def classify_candidate_miss(record):
     experiment_id = record.get("metadata", {}).get("experiment_id")
     fault_mode = parameter(record, "prediction_fault_mode")
     operation_mix = parameter(record, "operation_mix")
+    symbolic_granularity = parameter(record, "symbolic_granularity")
 
     # Deliberate analyzer false negatives are a controlled fault-injection outcome.
     if (
@@ -58,6 +62,18 @@ def classify_candidate_miss(record):
     # bank-mixed deliberately crosses host/native-bank state that is only visible at runtime.
     if operation_mix == "bank-mixed":
         return RUNTIME_ONLY_DEPENDENCY
+
+    # The symbolic-granularity campaign deliberately removes fine key resolution. Resource/profile
+    # modes are controlled coarse abstractions, and point-mixed also contains ConditionalCredit,
+    # whose access guard depends on stored EPOCH state. Adaptive planning may therefore omit an
+    # unresolved coarse relationship and rediscover a rare concrete conflict at runtime. Fine
+    # point-mixed remains strict: its input-resolved keys must not be silently excused here.
+    if (
+        experiment_id == "conflictlab-v1-symbolic-granularity"
+        and operation_mix == "point-mixed"
+        and symbolic_granularity in {"resource", "profile"}
+    ):
+        return COARSE_SYMBOLIC_GRANULARITY
 
     # These mixes contain operations such as CancelOrder whose concrete BALANCES key comes from
     # contract state rather than transaction input. Unknown static relationships may therefore be
@@ -98,8 +114,9 @@ def record_identity(record):
 def validate_candidate_miss_policy(records):
     """Validate V1.0 miss semantics and return aggregate class counters.
 
-    Natural state-derived/runtime-only misses and deliberate hidden-key misses are accepted only
-    when the record also contains feedback/history evidence. Input-resolved misses remain fatal.
+    Natural state-derived/runtime-only misses, controlled coarse-granularity misses, and deliberate
+    hidden-key misses are accepted only when the record also contains feedback/history evidence.
+    Fine input-resolved misses remain fatal.
     """
     miss_totals = Counter()
     miss_records = Counter()

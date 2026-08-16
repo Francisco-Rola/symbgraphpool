@@ -116,8 +116,9 @@ def main():
         print(f"vm_lifecycle_pairs={len(pairs)} retained_fresh_digest_matches={len(pairs)}")
 
     # Candidate misses are a measured outcome for deliberately hidden keys, runtime-only bank
-    # dependencies, and state-derived symbolic keys. Input-resolved workloads must remain miss-free,
-    # and every accepted miss must leave fallback/miss-history evidence for future planning.
+    # dependencies, state-derived symbolic keys, and the controlled coarse symbolic-granularity
+    # ablation. Fine input-resolved relationships must remain miss-free, and every accepted miss
+    # must leave fallback/miss-history evidence for future planning.
     try:
         miss_totals, miss_records = validate_candidate_miss_policy(records)
     except ValueError as error:
