@@ -23,7 +23,7 @@ use std::{
 use acg_candidate_graph::{CostAwareEdgePolicyConfig, RiskBoundedSchedulerConfig};
 use acg_core::RuntimeId;
 use acg_cosmwasm_adapter::{CosmWasmAdapterConfig, CosmWasmCandidateAdapter};
-use acg_cosmwasm_engine::{CosmWasmEngine, ParallelExecutionConfig};
+use acg_cosmwasm_engine::{ContractExecutionDiagnostics, CosmWasmEngine, ParallelExecutionConfig};
 use acg_evaluation::{
     AcceptanceError, AdaptiveStateRecord, ConsensusExecutionRecord, CorrectnessRecord,
     ExperimentAcceptanceReport, ExperimentManifest, ExperimentMetadata, ExperimentRecord,
@@ -34,11 +34,11 @@ use acg_feedback::{AdaptiveFeedbackConfig, ApplySummary};
 use acg_profile_graph::ProfileGraph;
 use acg_runtime_feedback::{
     AccessConflictDetector, AdaptiveBlockPlan, AdaptivePlanningConfig, AdaptiveSerialPipeline,
-    ObservedConflict, RuntimeFeedbackEngine, RuntimeFeedbackWeights, SerialBypassConfig,
-    TraceConflictConfig,
+    BlockEconomicsObservation, ObservedConflict, RegimeChangeConfig, RuntimeFeedbackEngine,
+    RuntimeFeedbackWeights, SerialBypassConfig, TraceConflictConfig,
 };
 use acg_validator_sim::{
-    BlockExecutionReport, ExecutionPlan, ExecutionWave, ProducedBlock,
+    BlockExecutionReport, ExecutionPlan, ExecutionWave, ProducedBlock, SerialBlockExecutor,
     SpeculativeParallelBlockExecutor,
 };
 use serde::{Deserialize, Serialize};
@@ -408,29 +408,44 @@ impl BenchmarkHarness {
         let consensus = measured
             .consensus
             .with_serial_reference(serial_reference.wall);
-        let execution = &measured.execution;
         let adaptive_state = adaptive_state_record(
             &pipeline,
             graph,
             adaptive.measured_decided_block().context.height,
             &tuning.feedback_config,
         )?;
-        let record = ExperimentRecord::from_runtime(
-            metadata,
-            measured.planning_metrics,
-            pipeline.planning_config(),
-            &measured.plan,
-            &execution.preexecution_report,
-            &execution.preexecution_metrics,
-            &execution.reconciliation,
-            parallelism_reference,
-            measured.feedback_summary,
-            measured.feedback_timing,
-            adaptive_state,
-            pipeline_timing,
-            consensus,
-            correctness,
-        );
+        let record = match &measured.execution {
+            MeasuredExecution::Speculative(execution) => ExperimentRecord::from_runtime(
+                metadata,
+                measured.planning_metrics,
+                pipeline.planning_config(),
+                &measured.plan,
+                &execution.preexecution_report,
+                &execution.preexecution_metrics,
+                &execution.reconciliation,
+                parallelism_reference,
+                measured.feedback_summary,
+                measured.feedback_timing,
+                adaptive_state,
+                pipeline_timing,
+                consensus,
+                correctness,
+            ),
+            MeasuredExecution::SerialBypass(execution) => ExperimentRecord::from_serial_bypass(
+                metadata,
+                measured.planning_metrics,
+                pipeline.planning_config(),
+                &measured.plan,
+                &execution.report,
+                execution.wall,
+                &execution.contract_diagnostics,
+                parallelism_reference,
+                adaptive_state,
+                pipeline_timing,
+                consensus,
+                correctness,
+            ),
+        };
         Ok(record)
     }
 }
@@ -476,6 +491,7 @@ impl HarnessTuningConfig {
             "acg.exploration_min_uncertainty",
             "acg.exploration_max_transactions_per_block",
             "acg.independent_observations_before_softening",
+            "acg.softening_min_confidence",
             "acg.serial_bypass_enabled",
             "acg.serial_bypass_min_transactions",
             "acg.serial_bypass_min_projected_speedup",
@@ -484,6 +500,15 @@ impl HarnessTuningConfig {
             "acg.serial_bypass_min_economics_observations",
             "acg.serial_bypass_projected_speedup_hysteresis",
             "acg.serial_bypass_max_consecutive_bypasses",
+            "acg.serial_bypass_immediate_speedup_floor",
+            "acg.serial_bypass_buffered_preexecution",
+            "acg.regime_change_enabled",
+            "acg.regime_service_cost_drop_ratio",
+            "acg.regime_contention_increase_ratio",
+            "acg.regime_contention_increase_absolute",
+            "acg.regime_retained_evidence",
+            "acg.regime_probation_bypass_blocks",
+            "acg.regime_probation_min_projected_speedup",
             "acg.serialization_cost_reference_nanos",
             "acg.invalidation_fanout_weight",
             "acg.pre_consensus_serialization_weight",
@@ -493,6 +518,7 @@ impl HarnessTuningConfig {
             "acg.fallback_prior_probability",
             "acg.fallback_prior_strength",
             "acg.feedback_epsilon",
+            "acg.candidate_miss_verification_weight_threshold",
             "acg.include_reverted_accesses",
         ];
         for key in parameters.keys().filter(|key| key.starts_with("acg.")) {
@@ -565,6 +591,11 @@ impl HarnessTuningConfig {
                         .scheduler
                         .independent_observations_before_softening,
                 )?,
+                softening_min_confidence: parameter(
+                    parameters,
+                    "acg.softening_min_confidence",
+                    planning_default.scheduler.softening_min_confidence,
+                )?,
             },
             cost_policy: CostAwareEdgePolicyConfig {
                 serialization_cost_reference_nanos: parameter(
@@ -635,6 +666,55 @@ impl HarnessTuningConfig {
                     "acg.serial_bypass_max_consecutive_bypasses",
                     planning_default.serial_bypass.max_consecutive_bypasses,
                 )?,
+                immediate_speedup_floor: parameter(
+                    parameters,
+                    "acg.serial_bypass_immediate_speedup_floor",
+                    planning_default.serial_bypass.immediate_speedup_floor,
+                )?,
+                buffered_preexecution: parameter(
+                    parameters,
+                    "acg.serial_bypass_buffered_preexecution",
+                    planning_default.serial_bypass.buffered_preexecution,
+                )?,
+            },
+            regime_change: RegimeChangeConfig {
+                enabled: parameter(
+                    parameters,
+                    "acg.regime_change_enabled",
+                    planning_default.regime_change.enabled,
+                )?,
+                service_cost_drop_ratio: parameter(
+                    parameters,
+                    "acg.regime_service_cost_drop_ratio",
+                    planning_default.regime_change.service_cost_drop_ratio,
+                )?,
+                contention_increase_ratio: parameter(
+                    parameters,
+                    "acg.regime_contention_increase_ratio",
+                    planning_default.regime_change.contention_increase_ratio,
+                )?,
+                contention_increase_absolute: parameter(
+                    parameters,
+                    "acg.regime_contention_increase_absolute",
+                    planning_default.regime_change.contention_increase_absolute,
+                )?,
+                retained_evidence: parameter(
+                    parameters,
+                    "acg.regime_retained_evidence",
+                    planning_default.regime_change.retained_evidence,
+                )?,
+                probation_bypass_blocks: parameter(
+                    parameters,
+                    "acg.regime_probation_bypass_blocks",
+                    planning_default.regime_change.probation_bypass_blocks,
+                )?,
+                probation_min_projected_speedup: parameter(
+                    parameters,
+                    "acg.regime_probation_min_projected_speedup",
+                    planning_default
+                        .regime_change
+                        .probation_min_projected_speedup,
+                )?,
             },
         };
 
@@ -661,6 +741,11 @@ impl HarnessTuningConfig {
                 feedback_default.fallback_prior_strength,
             )?,
             epsilon: parameter(parameters, "acg.feedback_epsilon", feedback_default.epsilon)?,
+            candidate_miss_verification_weight_threshold: parameter(
+                parameters,
+                "acg.candidate_miss_verification_weight_threshold",
+                feedback_default.candidate_miss_verification_weight_threshold,
+            )?,
         };
         let trace = TraceConflictConfig {
             include_reverted_accesses: parameter(
@@ -705,10 +790,21 @@ struct MeasuredSplitExecution {
     reconciliation: acg_validator_sim::SplitPhaseSpeculativeExecutionReport,
 }
 
+struct MeasuredSerialBypassExecution {
+    report: BlockExecutionReport,
+    wall: Duration,
+    contract_diagnostics: ContractExecutionDiagnostics,
+}
+
+enum MeasuredExecution {
+    Speculative(Box<MeasuredSplitExecution>),
+    SerialBypass(Box<MeasuredSerialBypassExecution>),
+}
+
 struct MeasuredAdaptiveBlock {
     plan: AdaptiveBlockPlan,
     planning_metrics: acg_runtime_feedback::AdaptivePlanningMetrics,
-    execution: MeasuredSplitExecution,
+    execution: MeasuredExecution,
     feedback_summary: ApplySummary,
     feedback_timing: FeedbackTimingRecord,
     pipeline_timing: PipelineTimingRecord,
@@ -746,20 +842,100 @@ fn execute_adaptive_block(
         .map_err(display_error)?;
     let planning_wall = planning_started.elapsed();
 
-    // A serial bypass is still ordinary detached pre-execution. It uses one worker and the
-    // canonical dependency chain, producing receipts against a private snapshot and committing
-    // nothing until the decided block is reconciled after consensus.
-    let serial_executor;
+    // Admission bypass is a real fail-safe: once selected, do no speculative execution at all.
+    // Wait for the decided block and execute it directly through the canonical serial executor.
+    // This makes a bypass cost approximately the serial reference instead of paying detached
+    // snapshot/receipt/reconciliation overhead just to serialize the speculative path.
+    if plan.serial_bypassed
+        && !pipeline
+            .planning_config()
+            .serial_bypass
+            .buffered_preexecution
+    {
+        let pre_consensus = planning_wall.min(consensus_cutoff);
+        let cutoff_overrun = planning_wall.saturating_sub(consensus_cutoff);
+        let serial_started = Instant::now();
+        let (report, contract_diagnostics) =
+            SerialBlockExecutor::new(parallel_executor.engine().clone())
+                .execute_with_diagnostics(
+                    decided_block,
+                    &canonical_serial_plan(decided_block.transactions.len()),
+                )
+                .map_err(display_error)?;
+        let serial_wall = serial_started.elapsed();
+        let post_consensus = cutoff_overrun + serial_wall;
+        let total_adaptive_block_wall = total_started.elapsed();
+        let serial_service_nanos = serial_service_nanos_from_report(&report);
+        pipeline
+            .observe_block_economics(BlockEconomicsObservation {
+                epoch: decided_block.context.height,
+                serial_service_nanos,
+                transaction_count: decided_block.transactions.len(),
+                pre_consensus,
+                post_consensus,
+                feedback_summary: ApplySummary::default(),
+                serial_bypassed: true,
+            })
+            .map_err(display_error)?;
+
+        if !measured {
+            return Ok(None);
+        }
+
+        let divergence = block_divergence_stats(predicted_block, decided_block);
+        let consensus = ConsensusExecutionRecord {
+            cutoff_nanos: nanos(consensus_cutoff),
+            candidate_transactions: u64::try_from(predicted_block.transactions.len())
+                .unwrap_or(u64::MAX),
+            decided_transactions: u64::try_from(decided_block.transactions.len())
+                .unwrap_or(u64::MAX),
+            shared_transactions: divergence.shared_transactions,
+            same_position_transactions: divergence.same_position_transactions,
+            common_prefix_transactions: divergence.common_prefix_transactions,
+            prepared_receipts: 0,
+            successful_preexecution_receipts: Some(0),
+            failed_preexecution_receipts: Some(0),
+            receipts_ready_by_cutoff: 0,
+            receipts_completed_after_cutoff: 0,
+            cutoff_reached: !cutoff_overrun.is_zero(),
+            pre_consensus_nanos: nanos(pre_consensus),
+            pre_consensus_overrun_nanos: nanos(cutoff_overrun),
+            post_consensus_nanos: nanos(post_consensus),
+            bottleneck_nanos: nanos(pre_consensus.max(post_consensus)),
+            ..ConsensusExecutionRecord::default()
+        };
+        return Ok(Some(MeasuredAdaptiveBlock {
+            plan,
+            planning_metrics,
+            execution: MeasuredExecution::SerialBypass(Box::new(MeasuredSerialBypassExecution {
+                report,
+                wall: serial_wall,
+                contract_diagnostics,
+            })),
+            feedback_summary: ApplySummary::default(),
+            feedback_timing: FeedbackTimingRecord::default(),
+            pipeline_timing: PipelineTimingRecord::from_durations(
+                planning_wall,
+                Duration::ZERO,
+                Duration::ZERO,
+                serial_wall,
+                Duration::ZERO,
+                total_adaptive_block_wall,
+            ),
+            consensus,
+        }));
+    }
+
+    let buffered_serial_executor;
     let executor = if plan.serial_bypassed {
-        serial_executor = SpeculativeParallelBlockExecutor::new(
+        buffered_serial_executor = SpeculativeParallelBlockExecutor::new(
             parallel_executor.engine().clone(),
             ParallelExecutionConfig { workers: 1 },
         );
-        &serial_executor
+        &buffered_serial_executor
     } else {
         parallel_executor
     };
-
     let remaining_budget = consensus_cutoff.saturating_sub(planning_wall);
     let preexecution_started = Instant::now();
     let prepared = executor
@@ -862,16 +1038,21 @@ fn execute_adaptive_block(
     };
     let post_consensus = cutoff_overrun + reconciliation_wall + post_feedback_duration;
     let total_adaptive_block_wall = total_started.elapsed();
+    let feedback_summary = merge_apply_summaries(pre_summary, post_summary);
 
     let estimated_serial_service_nanos =
         estimated_serial_service_nanos(&preexecution_report, &reconciliation);
-    pipeline.observe_block_economics(
-        estimated_serial_service_nanos,
-        decided_block.transactions.len(),
-        pre_consensus,
-        post_consensus,
-        plan.serial_bypassed,
-    );
+    pipeline
+        .observe_block_economics(BlockEconomicsObservation {
+            epoch: decided_block.context.height,
+            serial_service_nanos: estimated_serial_service_nanos,
+            transaction_count: decided_block.transactions.len(),
+            pre_consensus,
+            post_consensus,
+            feedback_summary,
+            serial_bypassed: plan.serial_bypassed,
+        })
+        .map_err(display_error)?;
 
     if !measured {
         return Ok(None);
@@ -903,12 +1084,12 @@ fn execute_adaptive_block(
     Ok(Some(MeasuredAdaptiveBlock {
         plan,
         planning_metrics,
-        execution: MeasuredSplitExecution {
+        execution: MeasuredExecution::Speculative(Box::new(MeasuredSplitExecution {
             preexecution_report,
             preexecution_metrics,
             reconciliation,
-        },
-        feedback_summary: merge_apply_summaries(pre_summary, post_summary),
+        })),
+        feedback_summary,
         feedback_timing: FeedbackTimingRecord::from_durations(
             pre_feedback_duration,
             post_feedback_duration,
@@ -971,6 +1152,12 @@ fn block_divergence_stats(
         same_position_transactions,
         common_prefix_transactions,
     }
+}
+
+fn serial_service_nanos_from_report(report: &BlockExecutionReport) -> u64 {
+    report.transactions.iter().fold(0_u64, |total, execution| {
+        total.saturating_add(nanos(execution.timing.service_duration))
+    })
 }
 
 fn estimated_serial_service_nanos(

@@ -66,6 +66,10 @@ pub struct RiskBoundedSchedulerConfig {
     /// independence observations, the edge remains hard only while its cost-adjusted scheduling
     /// risk is at least `hard_threshold`; otherwise it becomes soft.
     pub independent_observations_before_softening: u32,
+    /// Minimum current posterior confidence required before a previously-hard relationship may
+    /// soften. Regime-change evidence decay therefore makes stale relationships conservative
+    /// again even though cumulative diagnostic observation counters are preserved.
+    pub softening_min_confidence: f64,
 }
 
 impl Default for RiskBoundedSchedulerConfig {
@@ -80,6 +84,11 @@ impl Default for RiskBoundedSchedulerConfig {
             exploration_min_uncertainty: 0.35,
             exploration_max_transactions_per_block: 8,
             independent_observations_before_softening: 8,
+            // Four ordinary warm-up blocks in the canonical bucketed predictor reach roughly
+            // 0.20 confidence, while a regime reset capped at 20% retained evidence is below
+            // that (~0.18). Keep the floor between those two levels so normal maturity is not
+            // accidentally disabled while stale post-regime evidence is still re-hardened.
+            softening_min_confidence: 0.20,
         }
     }
 }
@@ -95,6 +104,7 @@ impl RiskBoundedSchedulerConfig {
             "exploration_min_uncertainty",
             self.exploration_min_uncertainty,
         )?;
+        validate_probability("softening_min_confidence", self.softening_min_confidence)?;
         if self.soft_threshold > self.hard_threshold {
             return Err(SchedulingError::ThresholdOrder {
                 soft_threshold: self.soft_threshold,
@@ -121,7 +131,8 @@ impl RiskBoundedSchedulerConfig {
         if initially_hard {
             let evidence_mature = self.independent_observations_before_softening != 0
                 && edge.concrete_independent_observations
-                    >= self.independent_observations_before_softening;
+                    >= self.independent_observations_before_softening
+                && edge.confidence() >= self.softening_min_confidence;
             if !evidence_mature || edge.scheduling_risk() >= self.hard_threshold {
                 EdgeClass::Hard
             } else {
@@ -936,7 +947,7 @@ mod tests {
             predicate_result,
             conflict_kinds: ConflictKinds::WRITE_WRITE,
             probability_q16: quantize_q16(probability),
-            confidence_q16: 0,
+            confidence_q16: if observations == 0 { 0 } else { u16::MAX },
             concrete_conflict_observations: 0,
             concrete_independent_observations: observations,
             scheduling_risk_q16: quantize_q16(probability),
@@ -971,7 +982,7 @@ mod tests {
             predicate_result: PredicateResult::Unknown,
             conflict_kinds: ConflictKinds::WRITE_WRITE,
             probability_q16: quantize_q16(probability),
-            confidence_q16: 0,
+            confidence_q16: if observations == 0 { 0 } else { u16::MAX },
             concrete_conflict_observations: 0,
             concrete_independent_observations: observations,
             scheduling_risk_q16: quantize_q16(probability),
@@ -1001,6 +1012,7 @@ mod tests {
             exploration_min_uncertainty: 0.35,
             exploration_max_transactions_per_block: 0,
             independent_observations_before_softening: 8,
+            softening_min_confidence: 0.25,
         }
     }
 
@@ -1027,6 +1039,30 @@ mod tests {
 
         let still_hard = edge_with(0, 1, 0.85, PredicateResult::True, 8);
         assert_eq!(cfg.classify(&still_hard), EdgeClass::Hard);
+    }
+
+    #[test]
+    fn low_current_confidence_rehardens_previously_mature_relationship() {
+        let cfg = config(0.2, 0.8, 0.2);
+        let mut edge = edge_with(0, 1, 0.25, PredicateResult::True, 100);
+        assert_eq!(cfg.classify(&edge), EdgeClass::Soft);
+
+        edge.confidence_q16 = quantize_q16(0.05);
+        assert_eq!(cfg.classify(&edge), EdgeClass::Hard);
+    }
+
+    #[test]
+    fn default_confidence_floor_preserves_normal_maturity_but_rehardens_regime_decay() {
+        let cfg = RiskBoundedSchedulerConfig::default();
+        let mut edge = edge_with(0, 1, 0.25, PredicateResult::True, 8);
+
+        // Canonical four-block bucketed warm-up is just above 0.20 confidence.
+        edge.confidence_q16 = quantize_q16(0.204);
+        assert_eq!(cfg.classify(&edge), EdgeClass::Soft);
+
+        // A regime reset retaining 20% of one confidence scale is capped near 0.181.
+        edge.confidence_q16 = quantize_q16(0.181);
+        assert_eq!(cfg.classify(&edge), EdgeClass::Hard);
     }
 
     #[test]

@@ -110,6 +110,7 @@ fn phase5d_closed_loop_hardens_after_expensive_replay_then_relaxes_after_phase_c
         exploration_min_uncertainty: 0.35,
         exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
+        softening_min_confidence: 0.25,
     };
     let mut feedback = RuntimeFeedbackEngine::new(
         &graph,

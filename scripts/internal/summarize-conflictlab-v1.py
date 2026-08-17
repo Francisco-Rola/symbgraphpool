@@ -60,7 +60,7 @@ def write(records):
         add('| operation mix | class | records with misses | candidate misses | miss-history rels median | fallback rels median |')
         add('|---|---|---:|---:|---:|---:|')
         for (mix,classification),xs in sorted(group(missed,lambda r:(param(r,'operation_mix','n/a'),classify_candidate_miss(r))).items()):
-            add(f"| {mix} | {MISS_CLASS_LABELS[classification]} | {len(xs)} | {sum(candidate_misses(r) for r in xs)} | {f(med([r.get('adaptive_state',{}).get('candidate_miss_history_relationships',0) for r in xs]),1)} | {f(med([r.get('adaptive_state',{}).get('runtime_fallback_relationships',0) for r in xs]),1)} |")
+            add(f"| {mix} | {MISS_CLASS_LABELS[classification]} | {len(xs)} | {sum(candidate_misses(r) for r in xs)} | {f(med([r.get('adaptive_state',{}).get('candidate_miss_history_relationships',0) for r in xs]),1)} | {f(med([r.get('adaptive_state',{}).get('candidate_miss_history_relationships',0) for r in xs]),1)} |")
 
     core=[r for r in records if r['metadata']['experiment_id']=='conflictlab-v1-core-state']
     if core:
@@ -126,7 +126,7 @@ def write(records):
     faults=[r for r in records if r['metadata']['experiment_id']=='conflictlab-v1-prediction-fault-recovery']
     if faults:
         add('');add('## Predictor fault recovery')
-        add('| mode | fault | rate bps | prior fault blocks | candidate misses | predictor precision | predictor recall | fallback rels | mean posterior | phase bottleneck |')
+        add('| mode | fault | rate bps | regime depth | candidate misses | predictor precision | predictor recall | miss-history rels | mean posterior | phase bottleneck |')
         add('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|')
         for (mode,m,rate,depth),xs in sorted(group(faults,lambda r:(r['metadata']['mode'],param(r,'prediction_fault_mode'),int(param(r,'prediction_fault_rate_bps')),int(param(r,'postchange_warmup_blocks')))).items()):
             prob=[r.get('adaptive_state',{}).get('mean_probability_q16',0)/65535 for r in xs]
@@ -140,15 +140,23 @@ def write(records):
     trans=[r for r in records if r['metadata']['experiment_id']=='conflictlab-v1-adaptation-transitions']
     if trans:
         add('');add('## Non-stationary adaptation by blocks since regime change')
-        add('| mode | transition | depth | admission | bypass % | posterior | confidence | replay | phase bottleneck |')
-        add('|---|---|---:|---|---:|---:|---:|---:|---:|')
+        add('| mode | transition | depth | admission | bypass % | posterior | confidence | replay | projected | phase bottleneck | projection error |')
+        add('|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|')
         def transition_name(r):
             old_hot=int(param(r,'warmup_hot_account_probability_bps',param(r,'hot_account_probability_bps'))); new_hot=int(param(r,'hot_account_probability_bps'))
             old_work=int(param(r,'warmup_work_iterations',param(r,'work_iterations'))); new_work=int(param(r,'work_iterations'))
             if old_hot!=new_hot: return f'hot {old_hot}->{new_hot}'
             return f'work {old_work}->{new_work}'
         for (mode,t,d,adm),xs in sorted(group(trans,lambda r:(r['metadata']['mode'],transition_name(r),int(param(r,'postchange_warmup_blocks')),param(r,'acg.serial_bypass_enabled'))).items()):
-            add(f"| {mode} | {t} | {d} | {adm} | {100*sum(r['planning']['serial_bypassed'] for r in xs)/len(xs):.1f} | {f(med([r.get('adaptive_state',{}).get('mean_probability_q16',0)/65535 for r in xs]),3)} | {f(med([r.get('adaptive_state',{}).get('mean_confidence_q16',0)/65535 for r in xs]),3)} | {f(med([r['execution']['replayed_transactions'] for r in xs]),1)} | {f(med([ratio_milli(r,'consensus.throughput_speedup_milli') for r in xs]))}x |")
+            phase=[ratio_milli(r,'consensus.throughput_speedup_milli') for r in xs]
+            projected=[r['planning'].get('serial_bypass_projected_speedup_milli')/1000 for r in xs if isinstance(r['planning'].get('serial_bypass_projected_speedup_milli'),(int,float))]
+            paired_error=[
+                r['planning']['serial_bypass_projected_speedup_milli']/1000-ratio_milli(r,'consensus.throughput_speedup_milli')
+                for r in xs
+                if isinstance(r['planning'].get('serial_bypass_projected_speedup_milli'),(int,float))
+                and math.isfinite(ratio_milli(r,'consensus.throughput_speedup_milli'))
+            ]
+            add(f"| {mode} | {t} | {d} | {adm} | {100*sum(r['planning']['serial_bypassed'] for r in xs)/len(xs):.1f} | {f(med([r.get('adaptive_state',{}).get('mean_probability_q16',0)/65535 for r in xs]),3)} | {f(med([r.get('adaptive_state',{}).get('mean_confidence_q16',0)/65535 for r in xs]),3)} | {f(med([r['execution']['replayed_transactions'] for r in xs]),1)} | {f(med(projected))}x | {f(med(phase))}x | {f(med(paired_error))}x |")
 
     sem=[r for r in records if r['metadata']['experiment_id']=='conflictlab-v1-execution-semantics']
     if sem:

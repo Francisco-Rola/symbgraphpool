@@ -22,16 +22,27 @@ of the exact Phase-5F run identity.
 | `acg.exploration_rate` | `0.0` | deterministic fraction of transactions permitted to use the exploration risk budget |
 | `acg.exploration_risk_budget` | `0.90` | same-wave risk budget for controlled-exploration transactions |
 | `acg.independent_observations_before_softening` | `8` | independence samples before initially-hard edges may soften |
+| `acg.softening_min_confidence` | `0.20` | confidence required before a previously hard relationship may soften; calibrated below ordinary 4-block bucketed maturity but above the post-regime retained-evidence cap |
 | `acg.serialization_cost_reference_nanos` | `250000` | cold-start serialization-cost fallback before Phase 5E learns an edge cost |
 | `acg.invalidation_fanout_weight` | `0.50` | replay penalty added per expected invalidated descendant; replay/fan-out evidence is marginally split across simultaneous causal edges |
-| `acg.serial_bypass_enabled` | `false` | skip candidate-graph/scheduler/feedback work when prior full-pipeline economics project a loss |
+| `acg.serial_bypass_enabled` | `false` | skip speculation entirely and execute the decided block directly on the canonical serial path when prior full-pipeline economics project a loss |
 | `acg.serial_bypass_min_transactions` | `32` | minimum block size eligible for the economics bypass |
 | `acg.serial_bypass_min_projected_speedup` | `1.05` | prior-block full-pipeline projected speedup below which bypass is admitted |
+| `acg.serial_bypass_immediate_speedup_floor` | `1.0` | fail-safe: after one adaptive observation, bypass immediately below this phase-speedup floor |
+| `acg.serial_bypass_buffered_preexecution` | `false` | evaluation-only: preserve one-worker detached serial pre-execution for the serial-prefix cutoff control; normal admission uses direct post-consensus serial execution |
+| `acg.regime_change_enabled` | `true` | detect sharp contention increases and heavy-to-light service-cost changes |
+| `acg.regime_service_cost_drop_ratio` | `0.60` | heavy-to-light trigger relative to previous mean service cost |
+| `acg.regime_contention_increase_ratio` | `1.50` | multiplicative contention-increase trigger |
+| `acg.regime_contention_increase_absolute` | `0.10` | absolute contention-rate increase also required for the trigger |
+| `acg.regime_retained_evidence` | `0.20` | maximum stale evidence retained after a regime change; also caps confidence so old topology re-hardens |
+| `acg.regime_probation_bypass_blocks` | `2` | direct-serial blocks after an adverse regime change before one adaptive counterfactual probe |
+| `acg.regime_probation_min_projected_speedup` | `1.10` | safety margin required for a detected regime/probe to avoid or exit probation |
 | `acg.feedback_retention_factor` | `0.99` | epoch-to-epoch evidence retention; lower forgets faster |
 | `acg.feedback_confidence_scale` | `20.0` | evidence weight needed to approach full confidence |
 | `acg.fallback_prior_probability` | `0.50` | prior conflict probability for runtime-discovered topology |
 | `acg.fallback_prior_strength` | `2.0` | strength of that fallback prior |
 | `acg.feedback_epsilon` | `0.25` | numerical/evidence floor used by adaptive feedback |
+| `acg.candidate_miss_verification_weight_threshold` | `32.0` | clean targeted evidence required to retire a broad candidate-miss safety override |
 | `acg.include_reverted_accesses` | `false` | include reverted accesses when deriving concrete conflicts |
 
 Do not tune these before establishing the default-policy baseline. The release suite keeps policy
@@ -77,6 +88,7 @@ These are the knobs needed to study how imperfect block prediction affects 5C.5 
 | `execution_backend` | `native` | `native` for fast harness tests; **`wasm` for performance evaluation** |
 | `prediction_quality` | `exact` | `exact`, `bucketed`, `coarse`, or `opaque`; controls how much of the actual key is visible to candidate construction |
 | `prediction_buckets` | `8` | deterministic visible key buckets for `prediction_quality=bucketed` (2..=64) |
+| `prediction_fault_duration_blocks` | persistent when omitted | number of blocks for which an injected prediction fault remains active; recovery benchmarks use `1` |
 | `transactions` | `200` | transactions offered during one workload window |
 | `warmup_blocks` | `0` | deterministic adaptive-history blocks before the measured block |
 | `accounts` | `16` | account-key cardinality |

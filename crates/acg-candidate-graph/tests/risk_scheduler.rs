@@ -131,6 +131,7 @@ fn weighted_candidate_edges_drive_hard_wave_dependencies_through_the_public_api(
         exploration_min_uncertainty: 0.35,
         exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
+        softening_min_confidence: 0.25,
     })
     .unwrap();
     assert_eq!(scheduler.classify_edge(credit_edge), EdgeClass::Hard);
@@ -197,6 +198,7 @@ fn learned_negative_evidence_can_change_a_future_pair_from_hard_to_soft() {
         exploration_min_uncertainty: 0.35,
         exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
+        softening_min_confidence: 0.25,
     })
     .unwrap();
 
@@ -333,6 +335,7 @@ fn compact_and_dense_soft_equivalence_cliques_schedule_identically_from_one_chec
         exploration_min_uncertainty: 0.35,
         exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
+        softening_min_confidence: 0.25,
     })
     .unwrap();
     assert_eq!(

@@ -849,13 +849,64 @@ fn multiple_invalid_receipts_are_selectively_replayed() {
 }
 
 #[test]
-fn exact_request_and_block_context_are_bound_to_receipt() {
+fn transaction_position_change_does_not_invalidate_a_state_valid_receipt() {
     let engine = CosmWasmEngine::default();
     let code_id = register_fixture(&engine);
     let contract = instantiate_fixture(&engine, code_id);
     let req = request(10, &contract, json!({"action":"noop"}));
     let receipt = speculate(&engine, &engine.snapshot(), 0, req.clone());
-    let mismatched = canonical(1, req);
+    let moved = canonical(7, req);
+
+    let outcome = engine
+        .execute_canonical_with_speculation(vec![moved], vec![receipt])
+        .unwrap();
+    assert_eq!(outcome.metrics.reused_results, 1);
+    assert_eq!(outcome.metrics.replayed_transactions, 0);
+    assert_eq!(
+        outcome.transactions[0].disposition,
+        CanonicalTxDisposition::ReusedSpeculative
+    );
+}
+
+#[test]
+fn moved_receipt_with_stale_read_set_is_replayed_not_discarded() {
+    let engine = CosmWasmEngine::default();
+    let code_id = register_fixture(&engine);
+    let contract = instantiate_fixture(&engine, code_id);
+    let snapshot = engine.snapshot();
+    let req = request(
+        11,
+        &contract,
+        json!({"action":"read_then_write","key":"count"}),
+    );
+    let receipt = speculate(&engine, &snapshot, 1, req.clone());
+
+    let outcome = engine
+        .execute_canonical_with_speculation(
+            vec![
+                canonical(0, request(10, &contract, json!({"action":"increment"}))),
+                canonical(7, req),
+            ],
+            vec![receipt],
+        )
+        .unwrap();
+    assert_eq!(outcome.metrics.invalidated_results, 1);
+    assert_eq!(outcome.metrics.replayed_transactions, 1);
+    assert_eq!(
+        outcome.transactions[1].disposition,
+        CanonicalTxDisposition::Replayed
+    );
+}
+
+#[test]
+fn semantic_block_context_change_is_still_bound_to_receipt() {
+    let engine = CosmWasmEngine::default();
+    let code_id = register_fixture(&engine);
+    let contract = instantiate_fixture(&engine, code_id);
+    let req = request(10, &contract, json!({"action":"noop"}));
+    let receipt = speculate(&engine, &engine.snapshot(), 0, req.clone());
+    let mut mismatched = canonical(1, req);
+    mismatched.block.height += 1;
 
     let error = engine
         .execute_canonical_with_speculation(vec![mismatched], vec![receipt])
@@ -873,6 +924,8 @@ fn malformed_receipt_is_rejected_before_any_canonical_state_is_mutated() {
     let second = request(11, &contract, json!({"action":"noop"}));
     let receipt = speculate(&engine, &engine.snapshot(), 1, second.clone());
 
+    let mut changed_context = canonical(2, second);
+    changed_context.block.height += 1;
     let error = engine
         .execute_canonical_with_speculation(
             vec![
@@ -884,7 +937,7 @@ fn malformed_receipt_is_rejected_before_any_canonical_state_is_mutated() {
                         json!({"action":"set","key":"must_not_commit","value":"x"}),
                     ),
                 ),
-                canonical(2, second),
+                changed_context,
             ],
             vec![receipt],
         )

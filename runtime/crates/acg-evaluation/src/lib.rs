@@ -420,16 +420,17 @@ impl ExecutionRecord {
         diagnostics: &ContractExecutionDiagnostics,
     ) -> Self {
         let transactions = u64::try_from(report.transactions.len()).unwrap_or(u64::MAX);
+        let serial_dependencies = transactions.saturating_sub(1);
         Self {
             transactions,
             workers: 1,
-            dependency_count: 0,
-            hard_dependency_count: 0,
-            preexecution_executor_total_nanos: nanos(execution_wall),
-            preexecution_worker_wall_nanos: nanos(execution_wall),
+            dependency_count: serial_dependencies,
+            hard_dependency_count: serial_dependencies,
             aggregate_contract_execution_nanos: nanos(diagnostics.aggregate_request_execution),
             max_in_flight: u64::from(!report.transactions.is_empty()),
             canonical_transactions: transactions,
+            post_consensus_total_nanos: nanos(execution_wall),
+            replay_or_missing_execution_nanos: nanos(execution_wall),
             decided_transactions: transactions,
             contract: diagnostics.into(),
             ..Self::default()
@@ -844,7 +845,9 @@ impl ExperimentRecord {
         serial_execution_wall: Duration,
         serial_contract_diagnostics: &ContractExecutionDiagnostics,
         parallelism_reference: ParallelismReference,
+        adaptive_state: AdaptiveStateRecord,
         pipeline_timing: PipelineTimingRecord,
+        consensus: ConsensusExecutionRecord,
         correctness: CorrectnessRecord,
     ) -> Self {
         Self {
@@ -865,9 +868,9 @@ impl ExperimentRecord {
             ),
             feedback: FeedbackRecord::default(),
             feedback_timing: FeedbackTimingRecord::default(),
-            adaptive_state: AdaptiveStateRecord::default(),
+            adaptive_state,
             pipeline_timing,
-            consensus: ConsensusExecutionRecord::default(),
+            consensus,
             correctness,
         }
     }

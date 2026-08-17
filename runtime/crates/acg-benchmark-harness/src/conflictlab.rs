@@ -225,6 +225,8 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             let height = u64::try_from(block_offset)
                 .map_err(|_| HarnessError::NumericOverflow)?
                 .saturating_add(1);
+            let (prediction_fault_mode, prediction_fault_rate_bps) =
+                config.measured_regime_fault(transition_offset);
             let generation = GenerateBlockConfig {
                 offered_transactions: config.transactions,
                 first_transaction_id: next_transaction_id,
@@ -233,8 +235,8 @@ impl BenchmarkWorkload for ConflictLabWorkload {
                 code_id,
                 prediction_quality: config.prediction_quality,
                 prediction_buckets: config.prediction_buckets,
-                prediction_fault_mode: config.prediction_fault_mode,
-                prediction_fault_rate_bps: config.prediction_fault_rate_bps,
+                prediction_fault_mode,
+                prediction_fault_rate_bps,
                 operation_mix: config.operation_mix,
                 parallelism_lanes: config.parallelism_lanes,
                 work: WorkShape {
@@ -267,6 +269,8 @@ impl BenchmarkWorkload for ConflictLabWorkload {
         let measured_height = u64::try_from(total_warmups)
             .map_err(|_| HarnessError::NumericOverflow)?
             .saturating_add(1);
+        let (prediction_fault_mode, prediction_fault_rate_bps) =
+            config.measured_regime_fault(config.postchange_warmup_blocks);
         let generation = GenerateBlockConfig {
             offered_transactions: config.transactions,
             first_transaction_id: next_transaction_id,
@@ -275,8 +279,8 @@ impl BenchmarkWorkload for ConflictLabWorkload {
             code_id,
             prediction_quality: config.prediction_quality,
             prediction_buckets: config.prediction_buckets,
-            prediction_fault_mode: config.prediction_fault_mode,
-            prediction_fault_rate_bps: config.prediction_fault_rate_bps,
+            prediction_fault_mode,
+            prediction_fault_rate_bps,
             operation_mix: config.operation_mix,
             parallelism_lanes: config.parallelism_lanes,
             work: WorkShape {
@@ -635,6 +639,10 @@ struct ConflictLabConfig {
     symbolic_granularity: SymbolicGranularity,
     prediction_fault_mode: PredictionFaultMode,
     prediction_fault_rate_bps: u16,
+    /// Number of measured-regime blocks for which the configured prediction fault remains active.
+    /// `usize::MAX` preserves the historical persistent-fault behavior; `1` models a transient
+    /// one-block fault followed by clean recovery blocks.
+    prediction_fault_duration_blocks: usize,
     operation_mix: OperationMix,
     /// Zero keeps the normal random/hot-account generator. A positive value assigns transaction
     /// `i` to `account-(i % parallelism_lanes)`, creating exactly that many balanced conflict
@@ -645,7 +653,29 @@ struct ConflictLabConfig {
     simulation: SimulationConfig,
 }
 
+fn measured_regime_fault(
+    mode: PredictionFaultMode,
+    rate_bps: u16,
+    duration_blocks: usize,
+    regime_block_offset: usize,
+) -> (PredictionFaultMode, u16) {
+    if regime_block_offset < duration_blocks {
+        (mode, rate_bps)
+    } else {
+        (PredictionFaultMode::None, 0)
+    }
+}
+
 impl ConflictLabConfig {
+    fn measured_regime_fault(self, regime_block_offset: usize) -> (PredictionFaultMode, u16) {
+        measured_regime_fault(
+            self.prediction_fault_mode,
+            self.prediction_fault_rate_bps,
+            self.prediction_fault_duration_blocks,
+            regime_block_offset,
+        )
+    }
+
     fn from_run(run: &RunIdentity) -> Result<Self, HarnessError> {
         const WORKLOAD_KEYS: &[&str] = &[
             "transactions",
@@ -670,6 +700,7 @@ impl ConflictLabConfig {
             "symbolic_granularity",
             "prediction_fault_mode",
             "prediction_fault_rate_bps",
+            "prediction_fault_duration_blocks",
             "operation_mix",
             "parallelism_lanes",
             "postchange_warmup_blocks",
@@ -750,6 +781,11 @@ impl ConflictLabConfig {
         )?;
         let prediction_fault_rate_bps =
             parameter(&run.parameters, "prediction_fault_rate_bps", 0_u16)?;
+        let prediction_fault_duration_blocks = parameter(
+            &run.parameters,
+            "prediction_fault_duration_blocks",
+            usize::MAX,
+        )?;
         let operation_mix = OperationMix::parse(
             run.parameters
                 .get("operation_mix")
@@ -878,6 +914,7 @@ impl ConflictLabConfig {
             symbolic_granularity,
             prediction_fault_mode,
             prediction_fault_rate_bps,
+            prediction_fault_duration_blocks,
             operation_mix,
             parallelism_lanes,
             postchange_warmup_blocks,
@@ -2412,6 +2449,22 @@ mod v1_evaluation_tests {
         assert_eq!(
             opaque_account_from_payload(&second.1),
             Some(selected.as_str())
+        );
+    }
+
+    #[test]
+    fn transient_prediction_fault_applies_only_to_configured_regime_blocks() {
+        assert_eq!(
+            measured_regime_fault(PredictionFaultMode::HiddenKey, 1_000, 1, 0),
+            (PredictionFaultMode::HiddenKey, 1_000)
+        );
+        assert_eq!(
+            measured_regime_fault(PredictionFaultMode::HiddenKey, 1_000, 1, 1),
+            (PredictionFaultMode::None, 0)
+        );
+        assert_eq!(
+            measured_regime_fault(PredictionFaultMode::SpuriousKey, 500, 3, 2),
+            (PredictionFaultMode::SpuriousKey, 500)
         );
     }
 

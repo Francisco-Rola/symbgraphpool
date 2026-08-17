@@ -513,6 +513,12 @@ pub fn evaluate_record(
             ),
         ));
     }
+    let buffered_serial_bypass = record.planning.serial_bypassed
+        && record
+            .metadata
+            .parameters
+            .get("acg.serial_bypass_buffered_preexecution")
+            .is_some_and(|value| value == "true");
     if record.planning.serial_bypassed {
         if record.execution.workers != 1 {
             issues.push(AcceptanceIssue::new(
@@ -644,11 +650,22 @@ pub fn evaluate_record(
         if record.planning.serial_bypassed && record.execution.max_in_flight > 1 {
             issues.push(AcceptanceIssue::new(
                 AcceptanceIssueCategory::ConfigurationError,
-                "serial_bypass_parallel_preexecution",
+                "serial_bypass_parallel_execution",
                 format!(
-                    "serial bypass pre-execution must have max_in_flight <= 1, got {}",
+                    "serial bypass direct execution must have max_in_flight <= 1, got {}",
                     record.execution.max_in_flight
                 ),
+            ));
+        }
+        if record.planning.serial_bypassed
+            && !buffered_serial_bypass
+            && (record.execution.speculative_results != 0
+                || record.execution.preexecution_worker_wall_nanos != 0)
+        {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "serial_bypass_speculative_work",
+                "direct serial bypass must not produce speculative receipts or worker pre-execution",
             ));
         }
     }

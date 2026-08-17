@@ -374,16 +374,16 @@ impl CandidateGraph {
     }
 }
 
-/// Phase 5D conversion from conflict probability + measured replay impact into scheduling risk.
+/// Conversion from conflict probability + measured execution costs into scheduling risk.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CostAwareEdgePolicyConfig {
     /// Fallback pre-consensus serialization delay used until confident learned evidence exists.
     pub serialization_cost_reference_nanos: u64,
     /// Additional penalty per expected transitive invalidation descendant.
     pub invalidation_fanout_weight: f64,
-    /// Relative value of one nanosecond of pre-consensus serialization delay.
+    /// Relative value of one nanosecond of serialization delay in the combined execution wall.
     pub pre_consensus_serialization_weight: f64,
-    /// Relative value of one nanosecond of post-consensus replay/validation debt.
+    /// Relative value of one nanosecond of replay/validation work in the combined execution wall.
     pub post_consensus_replay_weight: f64,
 }
 
@@ -1123,22 +1123,28 @@ fn cost_adjusted_scheduling_risk(
     }
     let fanout_multiplier =
         1.0 + cost_policy.invalidation_fanout_weight * replay_cost.expected_invalidated_descendants;
-    let expected_post_consensus_debt = conflict_probability
+    let expected_replay_work = conflict_probability
         * replay_cost.expected_replay_cost_nanos
         * fanout_multiplier
         * cost_policy.post_consensus_replay_weight;
-    let expected_pre_consensus_delay = effective_serialization_cost_nanos(
+    let expected_serialization_work = effective_serialization_cost_nanos(
         serialization_cost,
         cost_policy.serialization_cost_reference_nanos,
     ) * cost_policy.pre_consensus_serialization_weight;
-    // The scheduler is trying to minimize the slower side of the pre/post-consensus split. A
-    // normalized debt share is therefore a better risk signal than the old clamped ratio, which
-    // treated equal pre/post costs as maximally risky and over-serialized the pre-consensus path.
-    let phase_total = expected_post_consensus_debt + expected_pre_consensus_delay;
-    let cost_risk = if phase_total <= 0.0 {
-        conflict_probability
+
+    // Throughput objective: minimize expected *combined* pipeline execution work. Enforcing the
+    // edge pays serialization work; relaxing it pays expected replay work. Keep the calibrated
+    // conflict probability unchanged at the break-even point and move it smoothly toward 0 or 1
+    // as one action becomes cheaper than the other. This avoids the old 0.5-at-break-even mapping,
+    // which could move a well-calibrated probability across scheduler thresholds for no net
+    // execution-time benefit.
+    let cost_risk = if expected_serialization_work <= 0.0 {
+        1.0
+    } else if expected_replay_work <= expected_serialization_work {
+        conflict_probability * (expected_replay_work / expected_serialization_work)
     } else {
-        (expected_post_consensus_debt / phase_total).clamp(0.0, 1.0)
+        let ratio = expected_serialization_work / expected_replay_work;
+        1.0 - (1.0 - conflict_probability) * ratio
     };
     (conflict_probability + replay_cost.confidence * (cost_risk - conflict_probability))
         .clamp(0.0, 1.0)

@@ -7,7 +7,8 @@ use acg_profile_graph::ProfileGraph;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const FEEDBACK_CHECKPOINT_VERSION: u16 = 3;
+pub const FEEDBACK_CHECKPOINT_VERSION: u16 = 4;
+const SERIALIZATION_COST_CHECKPOINT_VERSION: u16 = 3;
 const REPLAY_COST_CHECKPOINT_VERSION: u16 = 2;
 const LEGACY_FEEDBACK_CHECKPOINT_VERSION: u16 = 1;
 
@@ -58,6 +59,11 @@ pub struct ConflictObservation {
     pub epoch: u64,
     /// False for a concrete overlap that the candidate graph failed to materialize.
     pub candidate_edge_present: bool,
+    /// True when this observation directly verifies a predicate-False pair materialized only
+    /// because of candidate-miss history. Clean observations retire the broad override; a
+    /// conflicting observation resets that verification progress.
+    #[serde(default)]
+    pub candidate_miss_verification: bool,
     /// Phase 5D replay-cost attribution. Zero for ordinary access/validation observations.
     #[serde(default)]
     pub replay_cost_nanos: u64,
@@ -150,6 +156,7 @@ impl ConflictObservation {
             weight,
             epoch,
             candidate_edge_present,
+            candidate_miss_verification: false,
             replay_cost_nanos: 0,
             invalidated_descendants: 0,
         })
@@ -171,6 +178,12 @@ impl ConflictObservation {
 
     pub fn has_replay_impact(&self) -> bool {
         self.replay_cost_nanos != 0 || self.invalidated_descendants != 0
+    }
+
+    /// Mark this observation as direct verification of a broad candidate-miss override.
+    pub fn with_candidate_miss_verification(mut self) -> Self {
+        self.candidate_miss_verification = true;
+        self
     }
 }
 
@@ -217,11 +230,23 @@ pub struct BetaStatistics {
     /// Concrete conflicts that were absent from the candidate graph when observed.
     ///
     /// For static edges this records predicate/materialization misses. For runtime-discovered
-    /// edges it records topology misses. The counter is intentionally not decayed: once runtime
-    /// execution has disproved absolute symbolic pruning, later graph construction must be able
-    /// to consult adaptive history instead of treating the symbolic result as a proof.
+    /// edges it records topology misses. The cumulative counter is intentionally not decayed for
+    /// diagnostics. Whether it still broadens candidate construction is tracked separately by the
+    /// targeted verification state below.
     #[serde(default)]
     pub candidate_miss_observations: u64,
+    /// Epoch of the most recent concrete candidate miss for this relationship.
+    ///
+    /// Miss history is a safety override, not a permanent topology proof. The epoch is retained
+    /// for diagnostics/migration while targeted clean verification decides when the broad override
+    /// can safely retire after a transient predictor fault.
+    #[serde(default)]
+    pub last_candidate_miss_epoch: Option<u64>,
+    /// Independent evidence collected after the last candidate miss while the historical
+    /// override was materialized. Enough clean evidence retires the override; a directly verified
+    /// conflict resets this progress.
+    #[serde(default)]
+    pub candidate_miss_verification_weight: f64,
 }
 
 impl BetaStatistics {
@@ -239,6 +264,8 @@ impl BetaStatistics {
             positive_observations: 0,
             negative_observations: 0,
             candidate_miss_observations: 0,
+            last_candidate_miss_epoch: None,
+            candidate_miss_verification_weight: 0.0,
         })
     }
 
@@ -295,6 +322,9 @@ impl BetaStatistics {
             positive_observations: projected.positive_observations,
             negative_observations: projected.negative_observations,
             candidate_miss_observations: projected.candidate_miss_observations,
+            candidate_miss_override_active: projected.candidate_miss_override_active(epoch, config),
+            last_candidate_miss_epoch: projected.last_candidate_miss_epoch,
+            candidate_miss_verification_weight: projected.candidate_miss_verification_weight,
             epoch,
         })
     }
@@ -334,6 +364,56 @@ impl BetaStatistics {
         self.candidate_miss_observations = self
             .candidate_miss_observations
             .saturating_add(u64::try_from(aggregate.candidate_misses).unwrap_or(u64::MAX));
+        if aggregate.candidate_misses != 0 {
+            self.last_candidate_miss_epoch = Some(epoch);
+            self.candidate_miss_verification_weight = 0.0;
+        } else if self.last_candidate_miss_epoch.is_some() {
+            if aggregate.candidate_miss_verification_conflicts != 0 {
+                // A predicate-False pair still conflicted while the override was active: the
+                // broad safety override is still needed, so restart the clean verification.
+                self.candidate_miss_verification_weight = 0.0;
+            } else {
+                self.candidate_miss_verification_weight +=
+                    aggregate.candidate_miss_verification_weight;
+            }
+        }
+        Ok(())
+    }
+
+    fn candidate_miss_override_active(&self, _epoch: u64, config: &AdaptiveFeedbackConfig) -> bool {
+        if self.candidate_miss_observations == 0 {
+            return false;
+        }
+        if self.last_candidate_miss_epoch.is_none() {
+            // Legacy checkpoints did not record a miss epoch. Preserve safety until restore has
+            // had a chance to migrate the timestamp from last_update_epoch.
+            return true;
+        }
+        self.candidate_miss_verification_weight
+            < config.candidate_miss_verification_weight_threshold
+    }
+
+    fn decay_for_regime_change(
+        &mut self,
+        epoch: u64,
+        retained_evidence: f64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<(), FeedbackError> {
+        self.decay_to(epoch, config.retention_factor)?;
+        if retained_evidence == 0.0 {
+            // Explicit full reset: return to the symmetric cold-start prior.
+            self.alpha = config.epsilon;
+            self.beta = config.epsilon;
+        } else {
+            // Preserve the learned mean but make confidence *provably immature* even when the old
+            // regime accumulated thousands of observations. Retaining only a fraction is not
+            // enough in that case, so also cap mass to the same fraction of one confidence scale.
+            let current_mass = self.posterior_mass();
+            let cap = config.confidence_scale * retained_evidence;
+            let scale = retained_evidence.min(cap / current_mass.max(f64::MIN_POSITIVE));
+            self.alpha = (self.alpha * scale).max(f64::MIN_POSITIVE);
+            self.beta = (self.beta * scale).max(f64::MIN_POSITIVE);
+        }
         Ok(())
     }
 }
@@ -348,6 +428,9 @@ pub struct EdgeEstimate {
     pub positive_observations: u64,
     pub negative_observations: u64,
     pub candidate_miss_observations: u64,
+    pub candidate_miss_override_active: bool,
+    pub last_candidate_miss_epoch: Option<u64>,
+    pub candidate_miss_verification_weight: f64,
     pub epoch: u64,
 }
 
@@ -357,7 +440,7 @@ impl EdgeEstimate {
     /// Phase 4 uses this as the gate that allows learned history to override an otherwise-false
     /// symbolic predicate. A symbolic prior by itself is not enough to bypass concrete pruning.
     pub fn has_candidate_miss_history(&self) -> bool {
-        self.candidate_miss_observations > 0
+        self.candidate_miss_override_active
     }
 }
 
@@ -446,6 +529,26 @@ impl ReplayCostStatistics {
         Ok(())
     }
 
+    fn decay_for_regime_change(
+        &mut self,
+        epoch: u64,
+        retained_evidence: f64,
+        retention_factor: f64,
+        confidence_scale: f64,
+    ) -> Result<(), FeedbackError> {
+        self.decay_to(epoch, retention_factor)?;
+        let cap = confidence_scale * retained_evidence;
+        let scale = if self.observation_weight > 0.0 {
+            retained_evidence.min(cap / self.observation_weight)
+        } else {
+            0.0
+        };
+        self.weighted_replay_cost_nanos *= scale;
+        self.weighted_invalidated_descendants *= scale;
+        self.observation_weight *= scale;
+        Ok(())
+    }
+
     fn apply_aggregate(
         &mut self,
         batch: ReplayCostBatch,
@@ -499,6 +602,10 @@ pub struct AdaptiveFeedbackConfig {
     pub fallback_prior_probability: f64,
     pub fallback_prior_strength: f64,
     pub epsilon: f64,
+    /// Clean evidence from predicate-False pairs materialized specifically by miss history.
+    /// Once this much direct verification accumulates without another such conflict, the broad
+    /// profile-level override retires while the cumulative miss diagnostic remains preserved.
+    pub candidate_miss_verification_weight_threshold: f64,
 }
 
 impl Default for AdaptiveFeedbackConfig {
@@ -509,6 +616,7 @@ impl Default for AdaptiveFeedbackConfig {
             fallback_prior_probability: 0.5,
             fallback_prior_strength: 2.0,
             epsilon: 0.25,
+            candidate_miss_verification_weight_threshold: 32.0,
         }
     }
 }
@@ -532,6 +640,15 @@ impl AdaptiveFeedbackConfig {
         }
         if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
             return Err(FeedbackError::InvalidEpsilon(self.epsilon));
+        }
+        if !self
+            .candidate_miss_verification_weight_threshold
+            .is_finite()
+            || self.candidate_miss_verification_weight_threshold <= 0.0
+        {
+            return Err(FeedbackError::InvalidCandidateMissVerificationWeight(
+                self.candidate_miss_verification_weight_threshold,
+            ));
         }
         Ok(())
     }
@@ -620,6 +737,25 @@ impl SerializationCostStatistics {
         Ok(())
     }
 
+    fn decay_for_regime_change(
+        &mut self,
+        epoch: u64,
+        retained_evidence: f64,
+        retention_factor: f64,
+        confidence_scale: f64,
+    ) -> Result<(), FeedbackError> {
+        self.decay_to(epoch, retention_factor)?;
+        let cap = confidence_scale * retained_evidence;
+        let scale = if self.observation_weight > 0.0 {
+            retained_evidence.min(cap / self.observation_weight)
+        } else {
+            0.0
+        };
+        self.weighted_serialization_cost_nanos *= scale;
+        self.observation_weight *= scale;
+        Ok(())
+    }
+
     fn apply(
         &mut self,
         serialization_cost_nanos: u64,
@@ -696,6 +832,8 @@ struct ObservationAggregate {
     positive_observations: usize,
     negative_observations: usize,
     candidate_misses: usize,
+    candidate_miss_verification_weight: f64,
+    candidate_miss_verification_conflicts: usize,
     conflict_kinds: ConflictKinds,
     replay_impact: ReplayCostBatch,
 }
@@ -712,6 +850,8 @@ impl ObservationAggregate {
             positive_observations: 0,
             negative_observations: 0,
             candidate_misses: 0,
+            candidate_miss_verification_weight: 0.0,
+            candidate_miss_verification_conflicts: 0,
             conflict_kinds: ConflictKinds::empty(),
             replay_impact: ReplayCostBatch::default(),
         }
@@ -724,18 +864,30 @@ impl ObservationAggregate {
             return Err(FeedbackError::ReplayImpactRequiresConflict);
         }
         match observation.outcome {
-            ObservationOutcome::Conflict { conflict_kinds } => self.add_conflicts(
-                conflict_kinds,
-                observation.weight,
-                1,
-                usize::from(!observation.candidate_edge_present),
-                observation.has_replay_impact().then_some((
-                    observation.replay_cost_nanos,
-                    observation.invalidated_descendants,
-                )),
-            ),
-            ObservationOutcome::Independent => self.add_independent(observation.weight, 1),
+            ObservationOutcome::Conflict { conflict_kinds } => {
+                self.add_conflicts(
+                    conflict_kinds,
+                    observation.weight,
+                    1,
+                    usize::from(!observation.candidate_edge_present),
+                    observation.has_replay_impact().then_some((
+                        observation.replay_cost_nanos,
+                        observation.invalidated_descendants,
+                    )),
+                )?;
+                if observation.candidate_miss_verification {
+                    self.candidate_miss_verification_conflicts =
+                        self.candidate_miss_verification_conflicts.saturating_add(1);
+                }
+            }
+            ObservationOutcome::Independent => {
+                self.add_independent(observation.weight, 1)?;
+                if observation.candidate_miss_verification {
+                    self.candidate_miss_verification_weight += observation.weight;
+                }
+            }
         }
+        Ok(())
     }
 
     fn add_conflicts(
@@ -922,6 +1074,34 @@ impl AggregatedObservationBuffer {
             .entry((epoch, batch_target))
             .or_insert_with(|| ObservationAggregate::new(source_profile, target_profile));
         aggregate.add_independent(weight, count)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_candidate_miss_verification(
+        &mut self,
+        source_profile: ProfileId,
+        target_profile: ProfileId,
+        target: ObservationTarget,
+        independent_weight: f64,
+        epoch: u64,
+        independent_count: usize,
+        conflict_count: usize,
+    ) -> Result<(), FeedbackError> {
+        if independent_count == 0 && conflict_count == 0 {
+            return Ok(());
+        }
+        validate_weight(independent_weight)?;
+        let batch_target = observation_batch_target(source_profile, target_profile, target);
+        let aggregate = self
+            .aggregates
+            .entry((epoch, batch_target))
+            .or_insert_with(|| ObservationAggregate::new(source_profile, target_profile));
+        aggregate.candidate_miss_verification_weight +=
+            weighted_count(independent_weight, independent_count)?;
+        aggregate.candidate_miss_verification_conflicts = aggregate
+            .candidate_miss_verification_conflicts
+            .saturating_add(conflict_count);
+        Ok(())
     }
 
     pub fn relationship_batches(&self) -> usize {
@@ -1375,6 +1555,61 @@ impl AdaptiveFeedbackStore {
         Ok(summary)
     }
 
+    /// Rapidly reduce stale adaptive evidence after a detected workload-regime change.
+    ///
+    /// Cumulative diagnostic counters are preserved. Only the decayed probability/cost state used
+    /// for future scheduling is weakened so the next few blocks can move the model quickly.
+    pub fn decay_for_regime_change(
+        &mut self,
+        epoch: u64,
+        retained_evidence: f64,
+        config: &AdaptiveFeedbackConfig,
+    ) -> Result<(), FeedbackError> {
+        config.validate()?;
+        if !retained_evidence.is_finite() || !(0.0..=1.0).contains(&retained_evidence) {
+            return Err(FeedbackError::InvalidRegimeEvidenceRetention(
+                retained_evidence,
+            ));
+        }
+
+        for statistics in &mut self.static_statistics {
+            statistics.decay_for_regime_change(epoch, retained_evidence, config)?;
+        }
+        for statistics in &mut self.static_replay_costs {
+            statistics.decay_for_regime_change(
+                epoch,
+                retained_evidence,
+                config.retention_factor,
+                config.confidence_scale,
+            )?;
+        }
+        for statistics in &mut self.static_serialization_costs {
+            statistics.decay_for_regime_change(
+                epoch,
+                retained_evidence,
+                config.retention_factor,
+                config.confidence_scale,
+            )?;
+        }
+        for edge in &mut self.fallback_edges {
+            edge.statistics
+                .decay_for_regime_change(epoch, retained_evidence, config)?;
+            edge.replay_cost_statistics.decay_for_regime_change(
+                epoch,
+                retained_evidence,
+                config.retention_factor,
+                config.confidence_scale,
+            )?;
+            edge.serialization_cost_statistics.decay_for_regime_change(
+                epoch,
+                retained_evidence,
+                config.retention_factor,
+                config.confidence_scale,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn checkpoint(&self, graph: &ProfileGraph) -> Result<FeedbackCheckpoint, FeedbackError> {
         if self.static_statistics.len() != graph.edges().len() {
             return Err(FeedbackError::StaticStatisticsLengthMismatch {
@@ -1436,6 +1671,7 @@ impl AdaptiveFeedbackStore {
         initial_epoch: u64,
     ) -> Result<Self, FeedbackError> {
         if checkpoint.format_version != FEEDBACK_CHECKPOINT_VERSION
+            && checkpoint.format_version != SERIALIZATION_COST_CHECKPOINT_VERSION
             && checkpoint.format_version != REPLAY_COST_CHECKPOINT_VERSION
             && checkpoint.format_version != LEGACY_FEEDBACK_CHECKPOINT_VERSION
         {
@@ -1463,22 +1699,22 @@ impl AdaptiveFeedbackStore {
             if !restored_static.insert(edge_index) {
                 return Err(FeedbackError::DuplicateStaticCheckpoint(edge_index));
             }
-            validate_statistics(saved.statistics)?;
+            let statistics = migrate_statistics(saved.statistics, checkpoint_version)?;
             let replay_cost_statistics = if checkpoint_version == LEGACY_FEEDBACK_CHECKPOINT_VERSION
             {
-                ReplayCostStatistics::new(saved.statistics.last_update_epoch)
+                ReplayCostStatistics::new(statistics.last_update_epoch)
             } else {
                 validate_replay_cost_statistics(saved.replay_cost_statistics)?;
                 saved.replay_cost_statistics
             };
-            let serialization_cost_statistics = if checkpoint_version < FEEDBACK_CHECKPOINT_VERSION
-            {
-                SerializationCostStatistics::new(saved.statistics.last_update_epoch)
-            } else {
-                validate_serialization_cost_statistics(saved.serialization_cost_statistics)?;
-                saved.serialization_cost_statistics
-            };
-            store.static_statistics[edge_index.0 as usize] = saved.statistics;
+            let serialization_cost_statistics =
+                if checkpoint_version < SERIALIZATION_COST_CHECKPOINT_VERSION {
+                    SerializationCostStatistics::new(statistics.last_update_epoch)
+                } else {
+                    validate_serialization_cost_statistics(saved.serialization_cost_statistics)?;
+                    saved.serialization_cost_statistics
+                };
+            store.static_statistics[edge_index.0 as usize] = statistics;
             store.static_replay_costs[edge_index.0 as usize] = replay_cost_statistics;
             store.static_serialization_costs[edge_index.0 as usize] = serialization_cost_statistics;
         }
@@ -1497,21 +1733,21 @@ impl AdaptiveFeedbackStore {
                     target_profile: pair.1,
                 });
             }
-            validate_statistics(saved.statistics)?;
+            let statistics = migrate_statistics(saved.statistics, checkpoint_version)?;
             let replay_cost_statistics = if checkpoint_version == LEGACY_FEEDBACK_CHECKPOINT_VERSION
             {
-                ReplayCostStatistics::new(saved.statistics.last_update_epoch)
+                ReplayCostStatistics::new(statistics.last_update_epoch)
             } else {
                 validate_replay_cost_statistics(saved.replay_cost_statistics)?;
                 saved.replay_cost_statistics
             };
-            let serialization_cost_statistics = if checkpoint_version < FEEDBACK_CHECKPOINT_VERSION
-            {
-                SerializationCostStatistics::new(saved.statistics.last_update_epoch)
-            } else {
-                validate_serialization_cost_statistics(saved.serialization_cost_statistics)?;
-                saved.serialization_cost_statistics
-            };
+            let serialization_cost_statistics =
+                if checkpoint_version < SERIALIZATION_COST_CHECKPOINT_VERSION {
+                    SerializationCostStatistics::new(statistics.last_update_epoch)
+                } else {
+                    validate_serialization_cost_statistics(saved.serialization_cost_statistics)?;
+                    saved.serialization_cost_statistics
+                };
             if saved.conflict_kinds.is_empty() {
                 return Err(FeedbackError::EmptyFallbackConflictKinds);
             }
@@ -1528,7 +1764,7 @@ impl AdaptiveFeedbackStore {
                 conflict_kinds: saved.conflict_kinds,
                 discovered_epoch: saved.discovered_epoch,
                 review_required: saved.review_required,
-                statistics: saved.statistics,
+                statistics,
                 replay_cost_statistics,
                 serialization_cost_statistics,
             };
@@ -1569,6 +1805,7 @@ impl FeedbackCheckpoint {
     pub fn from_json(bytes: &[u8]) -> Result<Self, FeedbackError> {
         let checkpoint: Self = serde_json::from_slice(bytes)?;
         if checkpoint.format_version != FEEDBACK_CHECKPOINT_VERSION
+            && checkpoint.format_version != SERIALIZATION_COST_CHECKPOINT_VERSION
             && checkpoint.format_version != REPLAY_COST_CHECKPOINT_VERSION
             && checkpoint.format_version != LEGACY_FEEDBACK_CHECKPOINT_VERSION
         {
@@ -1706,7 +1943,28 @@ fn validate_statistics(statistics: BetaStatistics) -> Result<(), FeedbackError> 
     if !statistics.beta.is_finite() || statistics.beta <= 0.0 {
         return Err(FeedbackError::InvalidBeta(statistics.beta));
     }
+    if !statistics.candidate_miss_verification_weight.is_finite()
+        || statistics.candidate_miss_verification_weight < 0.0
+    {
+        return Err(FeedbackError::InvalidCandidateMissVerificationWeight(
+            statistics.candidate_miss_verification_weight,
+        ));
+    }
     Ok(())
+}
+
+fn migrate_statistics(
+    mut statistics: BetaStatistics,
+    checkpoint_version: u16,
+) -> Result<BetaStatistics, FeedbackError> {
+    if checkpoint_version < FEEDBACK_CHECKPOINT_VERSION
+        && statistics.candidate_miss_observations != 0
+        && statistics.last_candidate_miss_epoch.is_none()
+    {
+        statistics.last_candidate_miss_epoch = Some(statistics.last_update_epoch);
+    }
+    validate_statistics(statistics)?;
+    Ok(statistics)
 }
 
 fn canonical_profile_pair(left: ProfileId, right: ProfileId) -> (ProfileId, ProfileId) {
@@ -1747,6 +2005,10 @@ pub enum FeedbackError {
     InvalidPriorStrength(f64),
     #[error("epsilon must be finite and positive, got {0}")]
     InvalidEpsilon(f64),
+    #[error("candidate-miss verification weight must be finite and positive, got {0}")]
+    InvalidCandidateMissVerificationWeight(f64),
+    #[error("regime-change retained evidence must be finite and within [0, 1], got {0}")]
+    InvalidRegimeEvidenceRetention(f64),
     #[error("retention factor must be finite and in (0, 1], got {0}")]
     InvalidRetentionFactor(f64),
     #[error("confidence scale must be finite and positive, got {0}")]

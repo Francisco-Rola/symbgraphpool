@@ -478,7 +478,9 @@ impl CosmWasmEngine {
                     result.transaction_id.0
                 )));
             };
-            if &result.block != expected_block || &result.request != expected_request {
+            if !result.block.receipt_reuse_compatible_with(expected_block)
+                || &result.request != expected_request
+            {
                 return Err(EngineError::InvalidConfiguration(format!(
                     "speculative receipt for transaction ID {} was produced from a different block context or request",
                     result.transaction_id.0
@@ -1008,7 +1010,11 @@ impl CosmWasmEngine {
             let transaction_id = transaction.transaction_id();
             let started = Instant::now();
             let matching_receipt = receipts.remove(&transaction_id).and_then(|receipt| {
-                if receipt.block == transaction.block && receipt.request == transaction.request {
+                if receipt
+                    .block
+                    .receipt_reuse_compatible_with(&transaction.block)
+                    && receipt.request == transaction.request
+                {
                     Some(receipt)
                 } else {
                     prediction.discarded_predictions += 1;

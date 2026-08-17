@@ -1,5 +1,6 @@
 import csv
 import json
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ V1_CACHE_CHECK = ROOT / "scripts" / "internal" / "check-conflictlab-v1-campaign-
 V1_CORRECTNESS_DIAG = ROOT / "scripts" / "internal" / "diagnose-conflictlab-v1-correctness.py"
 V1_VALIDATOR = ROOT / "scripts" / "internal" / "validate-conflictlab-v1.py"
 PARALLELISM_SUMMARY = ROOT / "scripts" / "internal" / "summarize-conflictlab-parallelism.py"
+FOUR_FIX_SUMMARY = ROOT / "scripts" / "internal" / "summarize-conflictlab-fixes.py"
 
 sys.path.insert(0, str(ROOT / "scripts" / "internal"))
 from conflictlab_v1_miss_policy import (  # noqa: E402
@@ -471,6 +473,15 @@ class EvaluationToolTests(unittest.TestCase):
             manifests[name] = manifest
             total += count
         self.assertEqual(total, 4630)
+        for manifest in manifests.values():
+            for run in manifest["runs"]:
+                self.assertEqual(run["parameters"]["acg.softening_min_confidence"], "0.20")
+                self.assertEqual(run["parameters"]["acg.serial_bypass_immediate_speedup_floor"], "1.0")
+                self.assertEqual(run["parameters"]["acg.regime_change_enabled"], "true")
+                self.assertEqual(run["parameters"]["acg.regime_retained_evidence"], "0.20")
+                self.assertEqual(run["parameters"]["acg.regime_probation_bypass_blocks"], "2")
+                self.assertEqual(run["parameters"]["acg.regime_probation_min_projected_speedup"], "1.10")
+                self.assertEqual(run["parameters"]["acg.candidate_miss_verification_weight_threshold"], "32.0")
         max_gas = str((1 << 64) - 1)
         for name, manifest in manifests.items():
             self.assertTrue(
@@ -482,6 +493,11 @@ class EvaluationToolTests(unittest.TestCase):
                 self.assertEqual(lifecycles, {"reuse", "recycle"})
             else:
                 self.assertEqual(lifecycles, {"reuse"}, f"{name} is not retained-VM canonical")
+            buffered = {run["parameters"]["acg.serial_bypass_buffered_preexecution"] for run in manifest["runs"]}
+            if name == "v1-serial-cutoff.grid.json":
+                self.assertEqual(buffered, {"true"})
+            else:
+                self.assertEqual(buffered, {"false"})
 
         cutoff = manifests["v1-cutoff-divergence.grid.json"]["runs"]
         self.assertEqual(
@@ -537,11 +553,120 @@ class EvaluationToolTests(unittest.TestCase):
             {run["parameters"]["postchange_warmup_blocks"] for run in faults},
             {"0", "1", "4", "8"},
         )
+        hidden = [run for run in faults if run["parameters"]["prediction_fault_mode"] == "hidden-key"]
+        spurious = [run for run in faults if run["parameters"]["prediction_fault_mode"] == "spurious-key"]
+        self.assertEqual({run["parameters"]["prediction_fault_duration_blocks"] for run in hidden}, {"1"})
+        self.assertNotEqual({run["parameters"]["prediction_fault_duration_blocks"] for run in spurious}, {"1"})
 
         headlines = manifests["v1-statistical-headlines.grid.json"]["runs"]
         self.assertEqual(len({run["seed"] for run in headlines}), 20)
         soak = manifests["v1-long-run-soak.grid.json"]["runs"]
         self.assertTrue(all(run["parameters"]["warmup_blocks"] == "1000" for run in soak))
+
+    def test_four_fix_focused_matrices_are_small_and_target_the_new_mechanisms(self):
+        expected = {
+            "fix-reorder-readset.grid.json": 6,
+            "fix-regime-failsafe.grid.json": 100,
+            "fix-miss-recovery.grid.json": 16,
+            "fix-cost-throughput.grid.json": 24,
+        }
+        manifests = {}
+        for name, count in expected.items():
+            source = ROOT / "evaluation/conflictlab" / name
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "manifest.json"
+                subprocess.run([sys.executable, str(GENERATOR), str(source), str(output)], check=True)
+                manifest = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(len(manifest["runs"]), count)
+            self.assertEqual({run["workers"] for run in manifest["runs"]}, {6})
+            self.assertTrue(all(run["parameters"]["consensus_cutoff_ms"] == "5000" for run in manifest["runs"]))
+            self.assertEqual(
+                {run["parameters"]["acg.serial_bypass_buffered_preexecution"] for run in manifest["runs"]},
+                {"false"},
+            )
+            manifests[name] = manifest
+        self.assertEqual(sum(expected.values()), 146)
+
+        reorder = manifests["fix-reorder-readset.grid.json"]["runs"]
+        self.assertEqual({run["parameters"]["consensus_divergence"] for run in reorder}, {"reorder-20pct"})
+
+        regime = manifests["fix-regime-failsafe.grid.json"]["runs"]
+        self.assertEqual({run["parameters"]["acg.serial_bypass_enabled"] for run in regime}, {"true"})
+        self.assertEqual({run["seed"] for run in regime}, {11, 47, 101, 211, 307})
+        self.assertEqual(
+            {run["parameters"]["postchange_warmup_blocks"] for run in regime},
+            {"0", "1", "2", "3", "4"},
+        )
+        self.assertEqual({run["parameters"]["acg.regime_probation_bypass_blocks"] for run in regime}, {"2"})
+        self.assertEqual(
+            {run["parameters"]["acg.regime_probation_min_projected_speedup"] for run in regime},
+            {"1.10"},
+        )
+
+        miss = manifests["fix-miss-recovery.grid.json"]["runs"]
+        self.assertEqual({run["parameters"]["prediction_fault_mode"] for run in miss}, {"hidden-key"})
+        self.assertEqual({run["parameters"]["prediction_fault_duration_blocks"] for run in miss}, {"1"})
+
+        cost = manifests["fix-cost-throughput.grid.json"]["runs"]
+        self.assertEqual({run["mode"] for run in cost}, {"probability-only", "cost-aware"})
+        self.assertEqual({run["parameters"]["acg.serial_bypass_enabled"] for run in cost}, {"false"})
+
+    def test_four_fix_summarizer_direct_bypass_is_structural_not_timing_gated(self):
+        namespace = runpy.run_path(str(FOUR_FIX_SUMMARY), run_name="four_fix_summary_test")
+        violations = namespace["direct_bypass_violations"](
+            {
+                "metadata": {
+                    "parameters": {"acg.serial_bypass_buffered_preexecution": "false"}
+                },
+                "planning": {"serial_bypassed": True},
+                "execution": {
+                    "transactions": 256,
+                    "workers": 1,
+                    "speculative_results": 0,
+                    "predicted_transactions": 0,
+                    "preexecution_executor_total_nanos": 0,
+                    "preexecution_worker_wall_nanos": 0,
+                    "reused_results": 0,
+                    "invalidated_results": 0,
+                    "replayed_transactions": 0,
+                    "canonical_transactions": 256,
+                },
+                "consensus": {
+                    "prepared_receipts": 0,
+                    "successful_preexecution_receipts": 0,
+                    "failed_preexecution_receipts": 0,
+                },
+                "pipeline_timing": {
+                    "preexecution_nanos": 0,
+                    "serial_reference_execution_nanos": 10,
+                    "total_adaptive_block_nanos": 20,
+                },
+                "feedback_timing": {"total_nanos": 0},
+            }
+        )
+        self.assertEqual(violations, [])
+
+    def test_four_fix_summarizer_writes_report_even_when_validation_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            for name in ("reorder", "regime", "miss", "cost"):
+                directory = temp / name
+                directory.mkdir(parents=True)
+                (directory / "records.jsonl").write_text("", encoding="utf-8")
+            report = temp / "fix-validation-report.txt"
+            result = subprocess.run(
+                [sys.executable, str(FOUR_FIX_SUMMARY), str(temp), "--output", str(report)],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(report.exists())
+            text = report.read_text(encoding="utf-8")
+            self.assertIn("1) Reordered receipt reuse", text)
+            self.assertIn("2) Regime-change fail-safe", text)
+            self.assertIn("3) Transient hidden-key miss recovery", text)
+            self.assertIn("4) Cost-aware combined-pipeline-wall objective", text)
+            self.assertIn("FAIL: focused validation completed", text)
 
     def test_parallelism_ceiling_matrix_has_balanced_lane_and_amortization_cases(self):
         source = ROOT / "evaluation/conflictlab/parallelism-ceiling.grid.json"

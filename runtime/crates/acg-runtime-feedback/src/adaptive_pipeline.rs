@@ -43,10 +43,18 @@ pub struct SerialBypassConfig {
     pub min_economics_observations: u32,
     /// Entry/exit margin around `min_projected_speedup` used to prevent mode flapping.
     pub projected_speedup_hysteresis: f64,
-    /// Bound on consecutive serial pre-execution decisions before one adaptive block is forced
+    /// Bound on consecutive serial bypass decisions before one adaptive block is forced
     /// to refresh the counterfactual parallel economics. This is an admission re-probe, not
     /// scheduler exploration: the probe still uses the normal symbolic graph and selected policy.
     pub max_consecutive_bypasses: u32,
+    /// Fail-safe floor: after even one measured adaptive block, bypass immediately when the
+    /// observed/projected phase speedup falls below this value. This intentionally bypasses the
+    /// normal EMA warm-up and hysteresis so a regime change cannot keep speculating below serial.
+    pub immediate_speedup_floor: f64,
+    /// Evaluation-only control that keeps the historical detached one-worker serial pre-execution
+    /// behavior. Production/fail-safe admission keeps this false and executes the decided block
+    /// directly after consensus. ConflictLab's serial-prefix cutoff control is the only V1 user.
+    pub buffered_preexecution: bool,
 }
 
 impl Default for SerialBypassConfig {
@@ -60,6 +68,8 @@ impl Default for SerialBypassConfig {
             min_economics_observations: 4,
             projected_speedup_hysteresis: 0.10,
             max_consecutive_bypasses: 4,
+            immediate_speedup_floor: 1.0,
+            buffered_preexecution: false,
         }
     }
 }
@@ -97,6 +107,94 @@ impl SerialBypassConfig {
         if self.max_consecutive_bypasses == 0 {
             return Err(AdaptivePipelineError::InvalidSerialBypassMaxConsecutive);
         }
+        if !self.immediate_speedup_floor.is_finite() || self.immediate_speedup_floor <= 0.0 {
+            return Err(
+                AdaptivePipelineError::InvalidSerialBypassImmediateSpeedupFloor(
+                    self.immediate_speedup_floor,
+                ),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Fast fail-safe response to non-stationary workload changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RegimeChangeConfig {
+    pub enabled: bool,
+    /// A block whose mean serial service cost falls below this fraction of the previous EMA is a
+    /// heavy-to-light transition. The current sample replaces the stale economics estimate.
+    pub service_cost_drop_ratio: f64,
+    /// Contention must increase by both this multiplicative ratio and the absolute delta below.
+    pub contention_increase_ratio: f64,
+    pub contention_increase_absolute: f64,
+    /// Maximum fraction of probability/replay/serialization evidence retained after a detected
+    /// change. Evidence is also capped relative to one confidence scale so very old regimes become
+    /// immediately immature; cumulative diagnostic counters are not modified.
+    pub retained_evidence: f64,
+    /// Number of whole blocks that take the direct serial path after an adverse detected regime
+    /// change before one adaptive counterfactual probe is allowed. This bounds exposure to stale
+    /// optimistic economics while still guaranteeing that bypass can eventually re-evaluate the
+    /// new regime.
+    pub probation_bypass_blocks: u32,
+    /// Minimum measured phase speedup required for a detected regime change (or its subsequent
+    /// counterfactual probe) to be considered safe enough to continue adaptive speculation.
+    pub probation_min_projected_speedup: f64,
+}
+
+impl Default for RegimeChangeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            service_cost_drop_ratio: 0.60,
+            contention_increase_ratio: 1.50,
+            contention_increase_absolute: 0.10,
+            retained_evidence: 0.20,
+            probation_bypass_blocks: 2,
+            probation_min_projected_speedup: 1.10,
+        }
+    }
+}
+
+impl RegimeChangeConfig {
+    fn validate(&self) -> Result<(), AdaptivePipelineError> {
+        if !self.service_cost_drop_ratio.is_finite()
+            || self.service_cost_drop_ratio <= 0.0
+            || self.service_cost_drop_ratio >= 1.0
+        {
+            return Err(AdaptivePipelineError::InvalidRegimeServiceDropRatio(
+                self.service_cost_drop_ratio,
+            ));
+        }
+        if !self.contention_increase_ratio.is_finite() || self.contention_increase_ratio <= 1.0 {
+            return Err(AdaptivePipelineError::InvalidRegimeContentionIncreaseRatio(
+                self.contention_increase_ratio,
+            ));
+        }
+        if !self.contention_increase_absolute.is_finite()
+            || !(0.0..=1.0).contains(&self.contention_increase_absolute)
+        {
+            return Err(
+                AdaptivePipelineError::InvalidRegimeContentionIncreaseAbsolute(
+                    self.contention_increase_absolute,
+                ),
+            );
+        }
+        if !self.retained_evidence.is_finite() || !(0.0..=1.0).contains(&self.retained_evidence) {
+            return Err(AdaptivePipelineError::InvalidRegimeEvidenceRetention(
+                self.retained_evidence,
+            ));
+        }
+        if self.probation_bypass_blocks == 0 {
+            return Err(AdaptivePipelineError::InvalidRegimeProbationBypassBlocks);
+        }
+        if !self.probation_min_projected_speedup.is_finite()
+            || self.probation_min_projected_speedup <= 1.0
+        {
+            return Err(AdaptivePipelineError::InvalidRegimeProbationSpeedup(
+                self.probation_min_projected_speedup,
+            ));
+        }
         Ok(())
     }
 }
@@ -118,6 +216,8 @@ pub struct AdaptivePlanningConfig {
     /// Optional economics gate evaluated from prior whole-block observations before request
     /// adaptation, candidate-graph construction or scheduling.
     pub serial_bypass: SerialBypassConfig,
+    /// Non-stationary fail-safe that weakens stale learning after contention/cost regime changes.
+    pub regime_change: RegimeChangeConfig,
 }
 
 impl Default for AdaptivePlanningConfig {
@@ -128,6 +228,7 @@ impl Default for AdaptivePlanningConfig {
             scheduler: RiskBoundedSchedulerConfig::default(),
             cost_policy: CostAwareEdgePolicyConfig::default(),
             serial_bypass: SerialBypassConfig::default(),
+            regime_change: Default::default(),
         }
     }
 }
@@ -146,6 +247,7 @@ impl AdaptivePlanningConfig {
         .validate()?;
         self.scheduler.validate()?;
         self.serial_bypass.validate()?;
+        self.regime_change.validate()?;
         Ok(())
     }
 }
@@ -206,12 +308,94 @@ struct RecentBlockEconomics {
     observations: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RegimeChangeObservation {
+    pub service_cost_drop: bool,
+    pub contention_increase: bool,
+    pub projected_speedup_below_one: bool,
+    pub evidence_decayed: bool,
+    /// The observed adverse change was slow enough to enter direct-serial probation.
+    pub probation_armed: bool,
+    /// This observation came from a forced adaptive re-probe and failed the probation threshold,
+    /// so another bounded direct-serial probation window was armed.
+    pub probation_rearmed_after_probe: bool,
+}
+
+/// Measured economics from one completed adaptive block.
+///
+/// Bundling the sample keeps the public pipeline API explicit without a long positional
+/// argument list, and makes it harder to accidentally swap timing/count fields at call sites.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BlockEconomicsObservation {
+    pub epoch: u64,
+    pub serial_service_nanos: u64,
+    pub transaction_count: usize,
+    pub pre_consensus: Duration,
+    pub post_consensus: Duration,
+    pub feedback_summary: ApplySummary,
+    pub serial_bypassed: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SerialBypassProjection {
     projected_speedup: f64,
     mean_service_nanos_per_transaction: u64,
     admission_score: f64,
     observations: u32,
+}
+
+fn detect_service_cost_drop(
+    config: RegimeChangeConfig,
+    previous_mean_service_nanos: Option<f64>,
+    current_mean_service_nanos: f64,
+    serial_bypassed: bool,
+) -> bool {
+    config.enabled
+        && !serial_bypassed
+        && previous_mean_service_nanos.is_some_and(|previous| {
+            current_mean_service_nanos < previous * config.service_cost_drop_ratio
+        })
+}
+
+fn detect_contention_increase(
+    config: RegimeChangeConfig,
+    previous_conflict_rate: Option<f64>,
+    current_conflict_rate: Option<f64>,
+) -> bool {
+    config.enabled
+        && current_conflict_rate
+            .zip(previous_conflict_rate)
+            .is_some_and(|(current, previous)| {
+                current >= previous + config.contention_increase_absolute
+                    && current >= previous.max(f64::MIN_POSITIVE) * config.contention_increase_ratio
+            })
+}
+
+fn should_arm_regime_probation(
+    config: RegimeChangeConfig,
+    evidence_decayed: bool,
+    serial_bypassed: bool,
+    sample_speedup: f64,
+) -> bool {
+    config.enabled
+        && evidence_decayed
+        && !serial_bypassed
+        && sample_speedup < config.probation_min_projected_speedup
+}
+
+fn should_rearm_regime_probation_after_probe(
+    config: RegimeChangeConfig,
+    probe_in_flight: bool,
+    sample_speedup: f64,
+) -> bool {
+    config.enabled && probe_in_flight && sample_speedup < config.probation_min_projected_speedup
+}
+
+fn should_immediately_serial_bypass(
+    config: SerialBypassConfig,
+    projection: SerialBypassProjection,
+) -> bool {
+    projection.observations != 0 && projection.admission_score < config.immediate_speedup_floor
 }
 
 fn serial_bypass_threshold(config: SerialBypassConfig, active: bool) -> f64 {
@@ -288,8 +472,12 @@ pub struct AdaptiveSerialPipeline {
     feedback: RuntimeFeedbackEngine,
     planning_config: AdaptivePlanningConfig,
     recent_economics: Option<RecentBlockEconomics>,
+    recent_conflict_rate: Option<f64>,
     serial_bypass_active: AtomicBool,
     consecutive_serial_bypasses: AtomicU32,
+    regime_probation_bypasses_remaining: AtomicU32,
+    regime_probe_pending: AtomicBool,
+    regime_probe_in_flight: AtomicBool,
 }
 
 impl AdaptiveSerialPipeline {
@@ -304,8 +492,12 @@ impl AdaptiveSerialPipeline {
             feedback,
             planning_config,
             recent_economics: None,
+            recent_conflict_rate: None,
             serial_bypass_active: AtomicBool::new(false),
             consecutive_serial_bypasses: AtomicU32::new(0),
+            regime_probation_bypasses_remaining: AtomicU32::new(0),
+            regime_probe_pending: AtomicBool::new(false),
+            regime_probe_in_flight: AtomicBool::new(false),
         })
     }
 
@@ -619,33 +811,93 @@ impl AdaptiveSerialPipeline {
     /// cost by an order of magnitude.
     pub fn observe_block_economics(
         &mut self,
-        serial_service_nanos: u64,
-        transaction_count: usize,
-        pre_consensus: Duration,
-        post_consensus: Duration,
-        serial_bypassed: bool,
-    ) {
+        observation: BlockEconomicsObservation,
+    ) -> Result<RegimeChangeObservation, AdaptivePipelineError> {
+        let BlockEconomicsObservation {
+            epoch,
+            serial_service_nanos,
+            transaction_count,
+            pre_consensus,
+            post_consensus,
+            feedback_summary,
+            serial_bypassed,
+        } = observation;
         if transaction_count == 0 || serial_service_nanos == 0 {
-            return;
+            return Ok(RegimeChangeObservation::default());
         }
         let denominator = duration_to_u64_nanos(pre_consensus.max(post_consensus)).max(1);
         let transaction_count = u64::try_from(transaction_count).unwrap_or(u64::MAX).max(1);
         let sample_speedup = serial_service_nanos as f64 / denominator as f64;
         let sample_service = serial_service_nanos as f64 / transaction_count as f64;
         let alpha = self.planning_config.serial_bypass.economics_ema_alpha;
+        let regime = self.planning_config.regime_change;
+        let previous = self.recent_economics;
 
-        self.recent_economics = match self.recent_economics {
+        let service_cost_drop = detect_service_cost_drop(
+            regime,
+            previous.map(|previous| previous.mean_service_nanos_per_transaction),
+            sample_service,
+            serial_bypassed,
+        );
+
+        let observation_count = feedback_summary
+            .positive_observations
+            .saturating_add(feedback_summary.negative_observations);
+        let sample_conflict_rate = if !serial_bypassed && observation_count != 0 {
+            Some(feedback_summary.positive_observations as f64 / observation_count as f64)
+        } else {
+            None
+        };
+        let contention_increase =
+            detect_contention_increase(regime, self.recent_conflict_rate, sample_conflict_rate);
+        let projected_speedup_below_one = !serial_bypassed
+            && sample_speedup < self.planning_config.serial_bypass.immediate_speedup_floor;
+        let evidence_decayed = service_cost_drop || contention_increase;
+        if evidence_decayed {
+            self.feedback
+                .decay_for_regime_change(epoch, regime.retained_evidence)?;
+        }
+
+        let probe_in_flight = !serial_bypassed
+            && self
+                .regime_probe_in_flight
+                .swap(false, AtomicOrdering::Relaxed);
+        let adverse_regime =
+            should_arm_regime_probation(regime, evidence_decayed, serial_bypassed, sample_speedup);
+        let probation_rearmed_after_probe =
+            should_rearm_regime_probation_after_probe(regime, probe_in_flight, sample_speedup);
+        let probation_armed = adverse_regime || probation_rearmed_after_probe;
+        if probation_armed {
+            self.arm_regime_probation();
+        } else if probe_in_flight {
+            // A successful fresh counterfactual is the only path that clears a pending regime
+            // probe without waiting for another detector event.
+            self.regime_probation_bypasses_remaining
+                .store(0, AtomicOrdering::Relaxed);
+            self.regime_probe_pending
+                .store(false, AtomicOrdering::Relaxed);
+        }
+
+        self.recent_economics = match previous {
             Some(previous) => Some(RecentBlockEconomics {
                 // A serial bypass measures serial execution, not the counterfactual adaptive
                 // speedup. Keep the last adaptive speedup estimate so bypass cannot become
                 // self-confirming; service complexity still adapts and can release hysteresis.
                 projected_speedup: if serial_bypassed {
                     previous.projected_speedup
+                } else if evidence_decayed || projected_speedup_below_one || probe_in_flight {
+                    // Regime changes and sub-serial samples are fail-safe signals. Do not allow a
+                    // slow EMA to keep stale optimistic economics alive for several more blocks.
+                    sample_speedup
                 } else {
                     alpha * sample_speedup + (1.0 - alpha) * previous.projected_speedup
                 },
-                mean_service_nanos_per_transaction: alpha * sample_service
-                    + (1.0 - alpha) * previous.mean_service_nanos_per_transaction,
+                mean_service_nanos_per_transaction: if service_cost_drop {
+                    sample_service
+                } else {
+                    alpha * sample_service
+                        + (1.0 - alpha) * previous.mean_service_nanos_per_transaction
+                },
                 observations: if serial_bypassed {
                     previous.observations
                 } else {
@@ -659,6 +911,24 @@ impl AdaptiveSerialPipeline {
                 observations: 1,
             }),
         };
+        if let Some(current) = sample_conflict_rate {
+            self.recent_conflict_rate = Some(if contention_increase {
+                current
+            } else if let Some(previous) = self.recent_conflict_rate {
+                alpha * current + (1.0 - alpha) * previous
+            } else {
+                current
+            });
+        }
+
+        Ok(RegimeChangeObservation {
+            service_cost_drop,
+            contention_increase,
+            projected_speedup_below_one,
+            evidence_decayed,
+            probation_armed,
+            probation_rearmed_after_probe,
+        })
     }
 
     pub fn recent_projected_speedup(&self) -> Option<f64> {
@@ -687,16 +957,60 @@ impl AdaptiveSerialPipeline {
         })
     }
 
-    fn serial_bypass_decision(&self, projection: SerialBypassProjection) -> bool {
-        let config = self.planning_config.serial_bypass;
-        if projection.observations < config.min_economics_observations {
-            self.serial_bypass_active
-                .store(false, AtomicOrdering::Relaxed);
-            self.consecutive_serial_bypasses
-                .store(0, AtomicOrdering::Relaxed);
+    fn arm_regime_probation(&self) {
+        let config = self.planning_config.regime_change;
+        self.regime_probation_bypasses_remaining
+            .store(config.probation_bypass_blocks, AtomicOrdering::Relaxed);
+        self.regime_probe_pending
+            .store(true, AtomicOrdering::Relaxed);
+        self.regime_probe_in_flight
+            .store(false, AtomicOrdering::Relaxed);
+    }
+
+    fn serial_bypass_for_regime_probation(&self) -> bool {
+        let remaining = self
+            .regime_probation_bypasses_remaining
+            .load(AtomicOrdering::Relaxed);
+        if remaining == 0 {
             return false;
         }
+        self.regime_probation_bypasses_remaining
+            .fetch_sub(1, AtomicOrdering::Relaxed);
+        self.serial_bypass_active
+            .store(true, AtomicOrdering::Relaxed);
+        self.consecutive_serial_bypasses
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        true
+    }
 
+    fn force_regime_counterfactual_probe(&self) -> bool {
+        if self
+            .regime_probation_bypasses_remaining
+            .load(AtomicOrdering::Relaxed)
+            != 0
+            || !self
+                .regime_probe_pending
+                .swap(false, AtomicOrdering::Relaxed)
+        {
+            return false;
+        }
+        self.regime_probe_in_flight
+            .store(true, AtomicOrdering::Relaxed);
+        self.serial_bypass_active
+            .store(false, AtomicOrdering::Relaxed);
+        self.consecutive_serial_bypasses
+            .store(0, AtomicOrdering::Relaxed);
+        true
+    }
+
+    fn serial_bypass_decision(&self, projection: SerialBypassProjection) -> bool {
+        let config = self.planning_config.serial_bypass;
+        if self.serial_bypass_for_regime_probation() {
+            return true;
+        }
+        if self.force_regime_counterfactual_probe() {
+            return false;
+        }
         let active = self.serial_bypass_active.load(AtomicOrdering::Relaxed);
         if should_force_adaptive_probe(
             config,
@@ -708,6 +1022,22 @@ impl AdaptiveSerialPipeline {
             // ordinary adaptive block periodically so the EMA can observe whether the regime has
             // changed and release the bypass state. No candidate edge is explored beyond what the
             // selected scheduling policy would normally admit.
+            self.serial_bypass_active
+                .store(false, AtomicOrdering::Relaxed);
+            self.consecutive_serial_bypasses
+                .store(0, AtomicOrdering::Relaxed);
+            return false;
+        }
+
+        if should_immediately_serial_bypass(config, projection) {
+            self.serial_bypass_active
+                .store(true, AtomicOrdering::Relaxed);
+            self.consecutive_serial_bypasses
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            return true;
+        }
+
+        if projection.observations < config.min_economics_observations {
             self.serial_bypass_active
                 .store(false, AtomicOrdering::Relaxed);
             self.consecutive_serial_bypasses
@@ -1206,6 +1536,22 @@ pub enum AdaptivePipelineError {
     InvalidSerialBypassHysteresis(f64),
     #[error("serial bypass maximum consecutive bypass count must be at least one")]
     InvalidSerialBypassMaxConsecutive,
+    #[error("serial bypass immediate speedup floor must be finite and positive, got {0}")]
+    InvalidSerialBypassImmediateSpeedupFloor(f64),
+    #[error("regime service-cost drop ratio must be finite and within (0, 1), got {0}")]
+    InvalidRegimeServiceDropRatio(f64),
+    #[error("regime contention-increase ratio must be finite and greater than one, got {0}")]
+    InvalidRegimeContentionIncreaseRatio(f64),
+    #[error("regime contention-increase absolute delta must be finite and within [0, 1], got {0}")]
+    InvalidRegimeContentionIncreaseAbsolute(f64),
+    #[error("regime retained evidence must be finite and within [0, 1], got {0}")]
+    InvalidRegimeEvidenceRetention(f64),
+    #[error("regime probation bypass blocks must be at least one")]
+    InvalidRegimeProbationBypassBlocks,
+    #[error(
+        "regime probation minimum projected speedup must be finite and greater than one, got {0}"
+    )]
+    InvalidRegimeProbationSpeedup(f64),
     #[error(
         "scheduled dependency {predecessor:?} -> {transaction:?} completed at {predecessor_completed_nanos}ns after successor started at {successor_started_nanos}ns"
     )]
@@ -1334,6 +1680,95 @@ mod tests {
         assert!(!should_force_adaptive_probe(config, true, 3));
         assert!(should_force_adaptive_probe(config, true, 4));
         assert!(should_force_adaptive_probe(config, true, 9));
+    }
+
+    #[test]
+    fn immediate_serial_bypass_does_not_wait_for_ema_maturity_below_one() {
+        let config = SerialBypassConfig {
+            enabled: true,
+            min_economics_observations: 4,
+            immediate_speedup_floor: 1.0,
+            ..SerialBypassConfig::default()
+        };
+        let projection = SerialBypassProjection {
+            projected_speedup: 0.82,
+            mean_service_nanos_per_transaction: 10_000,
+            admission_score: 0.82,
+            observations: 1,
+        };
+        assert!(should_immediately_serial_bypass(config, projection));
+    }
+
+    #[test]
+    fn regime_detector_flags_heavy_to_light_and_contention_jump() {
+        let config = RegimeChangeConfig::default();
+        assert!(detect_service_cost_drop(
+            config,
+            Some(1_000.0),
+            500.0,
+            false
+        ));
+        assert!(!detect_service_cost_drop(
+            config,
+            Some(1_000.0),
+            800.0,
+            false
+        ));
+        assert!(!detect_service_cost_drop(
+            config,
+            Some(1_000.0),
+            500.0,
+            true
+        ));
+
+        assert!(detect_contention_increase(config, Some(0.20), Some(0.45)));
+        assert!(!detect_contention_increase(config, Some(0.20), Some(0.27)));
+    }
+
+    #[test]
+    fn adverse_regime_probation_arms_only_below_the_safety_margin() {
+        let config = RegimeChangeConfig::default();
+        assert!(should_arm_regime_probation(config, true, false, 1.02));
+        assert!(!should_arm_regime_probation(config, true, false, 1.20));
+        assert!(!should_arm_regime_probation(config, false, false, 0.80));
+        assert!(!should_arm_regime_probation(config, true, true, 0.80));
+
+        assert!(should_rearm_regime_probation_after_probe(
+            config, true, 0.95
+        ));
+        assert!(!should_rearm_regime_probation_after_probe(
+            config, true, 1.15
+        ));
+        assert!(!should_rearm_regime_probation_after_probe(
+            config, false, 0.80
+        ));
+    }
+
+    #[test]
+    fn regime_probation_parameters_validate() {
+        let invalid_blocks = AdaptivePlanningConfig {
+            regime_change: RegimeChangeConfig {
+                probation_bypass_blocks: 0,
+                ..RegimeChangeConfig::default()
+            },
+            ..AdaptivePlanningConfig::default()
+        };
+        assert!(matches!(
+            invalid_blocks.validate().unwrap_err(),
+            AdaptivePipelineError::InvalidRegimeProbationBypassBlocks
+        ));
+
+        let invalid_speedup = AdaptivePlanningConfig {
+            regime_change: RegimeChangeConfig {
+                probation_min_projected_speedup: 1.0,
+                ..RegimeChangeConfig::default()
+            },
+            ..AdaptivePlanningConfig::default()
+        };
+        assert!(matches!(
+            invalid_speedup.validate().unwrap_err(),
+            AdaptivePipelineError::InvalidRegimeProbationSpeedup(_)
+        ));
     }
 
     #[test]

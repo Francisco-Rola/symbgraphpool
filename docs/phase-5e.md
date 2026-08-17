@@ -38,9 +38,9 @@ effective_serialization_cost =
     lerp(configured_fallback, learned_serialization_cost, serialization_cost_confidence)
 ```
 
-The Phase 5D replay-risk equation then compares expected replay penalty against this learned value.
-When no serialization evidence exists, behavior is identical to Phase 5D because the configured
-fallback is used unchanged.
+The cost-aware policy compares expected replay work against this learned serialization work using
+the combined-pipeline objective documented in `phase-5d.md`. The configured fallback is used while
+serialization evidence is immature; break-even cost preserves the calibrated conflict probability.
 
 ## 5E.2 — feedback persistence
 
@@ -53,11 +53,12 @@ and replay-cost/fan-out state for every static and runtime-discovered relationsh
 - raw observation count;
 - cumulative serialization nanoseconds.
 
-Feedback checkpoint format is now **version 3**:
+Feedback checkpoint format is now **version 4**:
 
-- v1 restores conflict statistics and initializes replay/serialization cost state empty;
-- v2 restores conflict + replay-cost state and initializes serialization cost state empty;
-- v3 restores all three models.
+- v1 restores conflict statistics and initializes later cost/recovery state empty;
+- v2 adds replay-cost state;
+- v3 adds serialization-cost state;
+- v4 adds targeted candidate-miss verification state used to retire temporary broad safety overrides.
 
 Stable profile keys remain the persistence identity.
 
@@ -101,7 +102,7 @@ These checks are part of the canonical repository gate:
 
 The regression coverage checks:
 
-1. serialization-cost decay/checkpoint behavior and v1/v2 -> v3 compatibility;
+1. serialization-cost decay/checkpoint behavior and legacy -> v4 compatibility;
 2. candidate risk changes when replay evidence is identical but serialization cost differs;
 3. deterministic experiment-record JSON/JSONL schema round trips and schema-version rejection;
 4. a two-worker runtime integration where a deliberately slow hard dependency produces a measured

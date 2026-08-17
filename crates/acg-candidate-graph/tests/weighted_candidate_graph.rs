@@ -551,9 +551,84 @@ fn replay_cost_changes_scheduling_risk_without_rewriting_raw_conflict_probabilit
         exploration_min_uncertainty: 0.35,
         exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
+        softening_min_confidence: 0.25,
     };
     assert_eq!(scheduler.classify(cheap_edge), EdgeClass::Soft);
     assert_eq!(scheduler.classify(expensive_edge), EdgeClass::Hard);
+}
+
+#[test]
+fn cost_aware_combined_wall_objective_preserves_probability_at_break_even() {
+    let graph = graph();
+    let credit = profile_id(&graph, "execute::Credit");
+    let edge_index = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let feedback_config = AdaptiveFeedbackConfig {
+        retention_factor: 1.0,
+        confidence_scale: 1.0,
+        ..AdaptiveFeedbackConfig::default()
+    };
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let replay_cost_nanos = 1_000_000_u64;
+    let mut observations = ObservationBuffer::default();
+    observations.push(
+        ConflictObservation::conflict(
+            credit,
+            credit,
+            TxId(900),
+            TxId(901),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::Replay,
+            ObservationTarget::Static { edge_index },
+            1.0,
+            1,
+            true,
+        )
+        .unwrap()
+        .with_replay_impact(replay_cost_nanos, 0),
+    );
+    store
+        .apply_batch(&graph, observations, &feedback_config)
+        .unwrap();
+    let probability = store
+        .estimate_static_edge(edge_index, 1, &feedback_config)
+        .unwrap()
+        .probability;
+    let break_even_serialization = (probability * replay_cost_nanos as f64).round() as u64;
+    store
+        .record_static_serialization_cost(
+            edge_index,
+            break_even_serialization,
+            1.0,
+            1,
+            &feedback_config,
+        )
+        .unwrap();
+
+    let transactions = vec![
+        tx(&graph, 1, "execute::Credit", 1, json!({"account":"alice"})),
+        tx(&graph, 2, "execute::Credit", 1, json!({"account":"alice"})),
+    ];
+    let candidate = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            transactions,
+            &store,
+            &feedback_config,
+            WeightedCandidateGraphConfig {
+                epoch: 1,
+                edge_materialization_threshold: 0.0,
+                cost_policy: CostAwareEdgePolicyConfig {
+                    serialization_cost_reference_nanos: break_even_serialization,
+                    invalidation_fanout_weight: 0.0,
+                    pre_consensus_serialization_weight: 1.0,
+                    post_consensus_replay_weight: 1.0,
+                },
+                compact_immature_equivalence_edges: false,
+                independent_observations_before_softening: 8,
+            },
+        )
+        .unwrap();
+    let edge = candidate.edge_between(TxIndex(0), TxIndex(1)).unwrap();
+    assert!((edge.scheduling_risk() - edge.probability()).abs() < 2.0 / f64::from(u16::MAX));
 }
 
 #[test]
@@ -792,6 +867,7 @@ fn mature_soft_equivalence_clique_stays_compact_with_pairwise_schedule_semantics
         exploration_min_uncertainty: 0.35,
         exploration_max_transactions_per_block: 0,
         independent_observations_before_softening: 8,
+        softening_min_confidence: 0.25,
     };
     let scheduler = acg_candidate_graph::RiskBoundedScheduler::new(scheduler_config).unwrap();
     assert_eq!(

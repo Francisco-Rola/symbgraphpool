@@ -110,6 +110,22 @@ impl Default for BlockContext {
     }
 }
 
+impl BlockContext {
+    /// Whether a speculative receipt produced under `self` can be reused under `other` when its
+    /// concrete read dependencies still validate.
+    ///
+    /// Canonical transaction position is intentionally excluded. ConflictLab treats contracts
+    /// whose semantics depend on `Env.transaction.index` as outside the reusable-receipt model;
+    /// for ordinary state-driven contracts, block reordering must not invalidate an otherwise
+    /// valid receipt. Height, time, and chain identity remain part of the semantic environment and
+    /// therefore must match exactly.
+    pub fn receipt_reuse_compatible_with(&self, other: &Self) -> bool {
+        self.height == other.height
+            && self.time_nanos == other.time_nanos
+            && self.chain_id == other.chain_id
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractMetadata {
     pub address: Address,

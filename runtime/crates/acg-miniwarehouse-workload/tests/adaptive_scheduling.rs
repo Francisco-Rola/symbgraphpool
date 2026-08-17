@@ -168,9 +168,11 @@ fn setup() -> (
                 exploration_min_uncertainty: 0.35,
                 exploration_max_transactions_per_block: 0,
                 independent_observations_before_softening: 1,
+                softening_min_confidence: 0.25,
             },
             cost_policy: Default::default(),
             serial_bypass: Default::default(),
+            regime_change: Default::default(),
         },
     )
     .unwrap();

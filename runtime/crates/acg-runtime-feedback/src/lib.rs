@@ -4,8 +4,8 @@ mod adaptive_pipeline;
 
 pub use adaptive_pipeline::{
     AdaptiveBlockPlan, AdaptiveBlockRun, AdaptivePipelineError, AdaptivePlanningConfig,
-    AdaptivePlanningMetrics, AdaptiveSerialPipeline, ReplayAttribution, SerialBypassConfig,
-    SerializationAttribution,
+    AdaptivePlanningMetrics, AdaptiveSerialPipeline, BlockEconomicsObservation, RegimeChangeConfig,
+    RegimeChangeObservation, ReplayAttribution, SerialBypassConfig, SerializationAttribution,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -939,6 +939,12 @@ impl BlockFeedbackCollector {
         let mut observed_conflicts_by_profile = BTreeMap::<(ProfileId, ProfileId), usize>::new();
         let mut observed_candidate_conflicts_by_profile =
             BTreeMap::<(ProfileId, ProfileId), usize>::new();
+        // Direct verification of predicate-False pairs that exist only because a prior candidate
+        // miss broadened this static profile relationship. Once enough of these pairs are clean,
+        // the feedback store can retire the broad override without forgetting the miss itself.
+        let mut miss_verification_totals =
+            BTreeMap::<ProfileEdgeIndex, (ProfileId, ProfileId, usize)>::new();
+        let mut miss_verification_conflicts = BTreeMap::<ProfileEdgeIndex, usize>::new();
 
         for edge in candidate_graph.edges() {
             if candidate_graph.provenance_is_compact(edge.provenance) {
@@ -957,6 +963,14 @@ impl BlockFeedbackCollector {
             let relationship = collector_relationship_for_edge(edge, profile_pair);
             *candidate_totals.entry(relationship).or_default() += 1;
             *candidate_totals_by_profile.entry(profile_pair).or_default() += 1;
+            if edge.is_historical_override() {
+                if let EdgeProvenance::Static { profile_edge_index } = edge.provenance {
+                    let entry = miss_verification_totals
+                        .entry(profile_edge_index)
+                        .or_insert((left.profile_id, right.profile_id, 0));
+                    entry.2 = entry.2.saturating_add(1);
+                }
+            }
         }
 
         for group in candidate_graph.compact_groups() {
@@ -1022,6 +1036,15 @@ impl BlockFeedbackCollector {
             let candidate_relationship = candidate_graph
                 .candidate_provenance_between(pair.0, pair.1)
                 .map(|provenance| collector_relationship_for_provenance(provenance, profile_pair));
+            if let Some(edge) = candidate_graph.edge_between(pair.0, pair.1) {
+                if edge.is_historical_override() {
+                    if let EdgeProvenance::Static { profile_edge_index } = edge.provenance {
+                        *miss_verification_conflicts
+                            .entry(profile_edge_index)
+                            .or_default() += 1;
+                    }
+                }
+            }
             buffer.record_conflict(
                 left.profile_id,
                 right.profile_id,
@@ -1057,6 +1080,22 @@ impl BlockFeedbackCollector {
                 independent_weight,
                 epoch,
                 independent,
+            )?;
+        }
+
+        for (edge_index, (source_profile, target_profile, total)) in miss_verification_totals {
+            let conflicts = miss_verification_conflicts
+                .get(&edge_index)
+                .copied()
+                .unwrap_or(0);
+            buffer.record_candidate_miss_verification(
+                source_profile,
+                target_profile,
+                ObservationTarget::Static { edge_index },
+                independent_weight,
+                epoch,
+                total.saturating_sub(conflicts),
+                conflicts,
             )?;
         }
 
@@ -1134,7 +1173,7 @@ impl BlockFeedbackCollector {
             let candidate_present =
                 candidate_graph.contains_candidate_pair(conflict.left, conflict.right);
             let target = static_or_runtime_target(profile_graph, left.profile_id, right.profile_id);
-            buffer.push(ConflictObservation::conflict(
+            let mut observation = ConflictObservation::conflict(
                 left.profile_id,
                 right.profile_id,
                 left.tx_id,
@@ -1145,7 +1184,14 @@ impl BlockFeedbackCollector {
                 conflict_weight,
                 epoch,
                 candidate_present,
-            )?);
+            )?;
+            if candidate_graph
+                .edge_between(conflict.left, conflict.right)
+                .is_some_and(|edge| edge.is_historical_override())
+            {
+                observation = observation.with_candidate_miss_verification();
+            }
+            buffer.push(observation);
             compared_pairs.insert(canonical_tx_pair(conflict.left, conflict.right));
         }
 
@@ -1170,7 +1216,7 @@ impl BlockFeedbackCollector {
                 },
                 EdgeProvenance::RuntimeDiscovered { .. } => ObservationTarget::RuntimeDiscovered,
             };
-            buffer.push(ConflictObservation::independent(
+            let mut observation = ConflictObservation::independent(
                 left.profile_id,
                 right.profile_id,
                 left.tx_id,
@@ -1180,7 +1226,11 @@ impl BlockFeedbackCollector {
                 independent_weight,
                 epoch,
                 true,
-            )?);
+            )?;
+            if edge.is_historical_override() {
+                observation = observation.with_candidate_miss_verification();
+            }
+            buffer.push(observation);
         }
 
         for group in candidate_graph.compact_groups() {
@@ -1675,6 +1725,18 @@ impl RuntimeFeedbackEngine {
 
     pub fn adaptive_config(&self) -> &AdaptiveFeedbackConfig {
         &self.adaptive_config
+    }
+
+    /// Rapidly weaken stale probability/replay/serialization evidence after a detected workload
+    /// regime change while preserving cumulative diagnostics.
+    pub fn decay_for_regime_change(
+        &mut self,
+        epoch: u64,
+        retained_evidence: f64,
+    ) -> Result<(), RuntimeFeedbackError> {
+        self.store
+            .decay_for_regime_change(epoch, retained_evidence, &self.adaptive_config)?;
+        Ok(())
     }
 
     pub fn process_pre_execution(

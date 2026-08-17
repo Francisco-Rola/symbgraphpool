@@ -494,6 +494,134 @@ fn static_candidate_miss_is_persisted_for_future_materialization() {
 }
 
 #[test]
+fn targeted_clean_verification_retires_broad_candidate_miss_override() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let config = AdaptiveFeedbackConfig {
+        candidate_miss_verification_weight_threshold: 4.0,
+        ..AdaptiveFeedbackConfig::default()
+    };
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+
+    let mut miss = ObservationBuffer::default();
+    miss.push(
+        ConflictObservation::conflict(
+            credit,
+            credit,
+            TxId(1),
+            TxId(2),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::CanonicalExecution,
+            ObservationTarget::Static { edge_index: edge },
+            1.0,
+            1,
+            false,
+        )
+        .unwrap(),
+    );
+    store.apply_batch(&graph, miss, &config).unwrap();
+    assert!(store
+        .estimate_static_edge(edge, 1, &config)
+        .unwrap()
+        .has_candidate_miss_history());
+
+    let mut verification = ObservationBuffer::default();
+    for offset in 0..4_u64 {
+        verification.push(
+            ConflictObservation::independent(
+                credit,
+                credit,
+                TxId(10 + offset * 2),
+                TxId(11 + offset * 2),
+                ObservationSource::CanonicalExecution,
+                ObservationTarget::Static { edge_index: edge },
+                1.0,
+                2,
+                true,
+            )
+            .unwrap()
+            .with_candidate_miss_verification(),
+        );
+    }
+    store.apply_batch(&graph, verification, &config).unwrap();
+    let estimate = store.estimate_static_edge(edge, 2, &config).unwrap();
+    assert_eq!(estimate.candidate_miss_observations, 1);
+    assert!(estimate.candidate_miss_verification_weight >= 4.0);
+    assert!(!estimate.has_candidate_miss_history());
+}
+
+#[test]
+fn conflicting_targeted_verification_keeps_candidate_miss_override_active() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let config = AdaptiveFeedbackConfig {
+        candidate_miss_verification_weight_threshold: 2.0,
+        ..AdaptiveFeedbackConfig::default()
+    };
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+
+    let mut miss = ObservationBuffer::default();
+    miss.push(
+        ConflictObservation::conflict(
+            credit,
+            credit,
+            TxId(1),
+            TxId(2),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::CanonicalExecution,
+            ObservationTarget::Static { edge_index: edge },
+            1.0,
+            1,
+            false,
+        )
+        .unwrap(),
+    );
+    store.apply_batch(&graph, miss, &config).unwrap();
+
+    let mut clean = ObservationBuffer::default();
+    clean.push(
+        ConflictObservation::independent(
+            credit,
+            credit,
+            TxId(3),
+            TxId(4),
+            ObservationSource::CanonicalExecution,
+            ObservationTarget::Static { edge_index: edge },
+            1.0,
+            2,
+            true,
+        )
+        .unwrap()
+        .with_candidate_miss_verification(),
+    );
+    store.apply_batch(&graph, clean, &config).unwrap();
+
+    let mut conflict = ObservationBuffer::default();
+    conflict.push(
+        ConflictObservation::conflict(
+            credit,
+            credit,
+            TxId(5),
+            TxId(6),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::CanonicalExecution,
+            ObservationTarget::Static { edge_index: edge },
+            1.0,
+            3,
+            true,
+        )
+        .unwrap()
+        .with_candidate_miss_verification(),
+    );
+    store.apply_batch(&graph, conflict, &config).unwrap();
+    let estimate = store.estimate_static_edge(edge, 3, &config).unwrap();
+    assert_eq!(estimate.candidate_miss_verification_weight, 0.0);
+    assert!(estimate.has_candidate_miss_history());
+}
+
+#[test]
 fn store_exposes_non_mutating_current_epoch_estimates_for_static_and_fallback_edges() {
     let graph = graph();
     let credit = profile_id(&graph, "execute::Credit");
@@ -714,6 +842,67 @@ fn replay_cost_statistics_track_cost_fanout_decay_and_checkpoint() {
 }
 
 #[test]
+fn regime_change_decay_preserves_probability_but_reduces_adaptive_confidence() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let config = AdaptiveFeedbackConfig {
+        retention_factor: 1.0,
+        confidence_scale: 2.0,
+        ..AdaptiveFeedbackConfig::default()
+    };
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let mut observations = ObservationBuffer::default();
+    for offset in 0..12_u64 {
+        observations.push(
+            ConflictObservation::conflict(
+                credit,
+                credit,
+                TxId(100 + offset * 2),
+                TxId(101 + offset * 2),
+                ConflictKinds::WRITE_WRITE,
+                ObservationSource::Replay,
+                ObservationTarget::Static { edge_index: edge },
+                1.0,
+                1,
+                true,
+            )
+            .unwrap()
+            .with_replay_impact(500_000, 1),
+        );
+    }
+    store.apply_batch(&graph, observations, &config).unwrap();
+    store
+        .record_static_serialization_cost(edge, 250_000, 12.0, 1, &config)
+        .unwrap();
+
+    let before = store.estimate_static_edge(edge, 1, &config).unwrap();
+    let replay_before = store.estimate_static_replay_cost(edge, 1, &config).unwrap();
+    let serialization_before = store
+        .estimate_static_serialization_cost(edge, 1, &config)
+        .unwrap();
+    let cumulative_positive = before.positive_observations;
+
+    store.decay_for_regime_change(2, 0.20, &config).unwrap();
+    let after = store.estimate_static_edge(edge, 2, &config).unwrap();
+    let replay_after = store.estimate_static_replay_cost(edge, 2, &config).unwrap();
+    let serialization_after = store
+        .estimate_static_serialization_cost(edge, 2, &config)
+        .unwrap();
+
+    assert!((after.probability - before.probability).abs() < 1e-9);
+    assert!(after.posterior_mass < before.posterior_mass);
+    assert!(after.confidence < before.confidence);
+    assert!(
+        after.confidence < 0.25,
+        "regime reset must make stale topology immature"
+    );
+    assert_eq!(after.positive_observations, cumulative_positive);
+    assert!(replay_after.confidence < replay_before.confidence);
+    assert!(serialization_after.confidence < serialization_before.confidence);
+}
+
+#[test]
 fn legacy_v1_checkpoint_loads_with_empty_replay_cost_state() {
     let graph = graph();
     let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
@@ -789,12 +978,52 @@ fn serialization_cost_statistics_track_decay_and_checkpoint() {
     assert!(projected.confidence < now.confidence);
 
     let checkpoint = store.checkpoint(&graph).unwrap();
-    assert_eq!(checkpoint.format_version, 3);
+    assert_eq!(checkpoint.format_version, 4);
     let restored = AdaptiveFeedbackStore::restore(&graph, checkpoint, 0).unwrap();
     assert_eq!(
         restored.static_serialization_cost_statistics(edge),
         store.static_serialization_cost_statistics(edge)
     );
+}
+
+#[test]
+fn legacy_v3_candidate_miss_checkpoint_migrates_to_active_verification_state() {
+    let graph = graph();
+    let edge = static_edge(&graph, "execute::Credit", "execute::Credit");
+    let credit = profile_id(&graph, "execute::Credit");
+    let config = AdaptiveFeedbackConfig::default();
+    let mut store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let mut miss = ObservationBuffer::default();
+    miss.push(
+        ConflictObservation::conflict(
+            credit,
+            credit,
+            TxId(1),
+            TxId(2),
+            ConflictKinds::WRITE_WRITE,
+            ObservationSource::CanonicalExecution,
+            ObservationTarget::Static { edge_index: edge },
+            1.0,
+            7,
+            false,
+        )
+        .unwrap(),
+    );
+    store.apply_batch(&graph, miss, &config).unwrap();
+
+    let mut value = serde_json::to_value(store.checkpoint(&graph).unwrap()).unwrap();
+    value["format_version"] = serde_json::json!(3);
+    for saved in value["static_edges"].as_array_mut().unwrap() {
+        let stats = saved["statistics"].as_object_mut().unwrap();
+        stats.remove("last_candidate_miss_epoch");
+        stats.remove("candidate_miss_verification_weight");
+    }
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let checkpoint = FeedbackCheckpoint::from_json(&bytes).unwrap();
+    let restored = AdaptiveFeedbackStore::restore(&graph, checkpoint, 0).unwrap();
+    let estimate = restored.estimate_static_edge(edge, 7, &config).unwrap();
+    assert_eq!(estimate.last_candidate_miss_epoch, Some(7));
+    assert!(estimate.has_candidate_miss_history());
 }
 
 #[test]

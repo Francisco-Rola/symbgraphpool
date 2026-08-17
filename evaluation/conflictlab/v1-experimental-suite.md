@@ -132,8 +132,9 @@ receipts, replayed transactions, and results ready before cutoff.
 
 ### Serial-prefix cutoff
 
-Forces the existing admission path to choose buffered serial pre-execution and sweeps
-10/25/50/100/250/500 ms across all four complexity tiers. The validator requires at least one
+Uses the evaluation-only buffered-preexecution control to preserve the historical serial-prefix
+experiment, then sweeps 10/25/50/100/250/500 ms across all four complexity tiers. Normal fail-safe
+admission uses direct post-consensus serial execution instead. The validator requires at least one
 partially prepared block and one fully prepared block.
 
 ### Compaction reference and block scaling
@@ -175,8 +176,10 @@ fallback evidence while every decided result remains serial-equivalent.
 
 Adaptation experiments establish an old regime for eight blocks, switch the workload, and sample
 post-change depths 0/1/2/4/8/16. Transitions cover low↔high contention and cheap↔expensive execution,
-with admission both disabled and enabled. `adaptive_state` telemetry records static/fallback/miss
-history and mean probability/confidence at each sampled state.
+with admission both disabled and enabled. Enabled runs use a two-block direct-serial probation after
+an adverse detected change below the 1.10x safety margin, then one bounded adaptive counterfactual
+probe; a sub-threshold probe re-arms probation. `adaptive_state` telemetry records
+static/fallback/miss history and mean probability/confidence at each sampled state.
 
 ### Runtime semantics
 

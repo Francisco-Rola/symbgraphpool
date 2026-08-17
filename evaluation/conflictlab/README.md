@@ -27,6 +27,20 @@ The V1 grids cover:
 All V1 paper-facing runs use six workers. Core-count and memory-capacity scaling are separate future
 experiments.
 
+## Focused post-V1 fixes
+
+Before rerunning the full suite after adaptive/runtime changes, run the 146-record focused gate:
+
+```bash
+./scripts/run-conflictlab-fix-validation.sh
+```
+
+It isolates four behaviors: reordered-receipt read-set reuse, fail-safe regime changes with direct
+serial probation/re-probes, temporary hidden-key miss recovery, and the cost-aware combined-pipeline
+objective. The regime microbenchmark uses five seeds; direct-bypass correctness is checked structurally,
+while bypass-vs-serial timing is reported only as a noise-sensitive diagnostic. All focused records still
+require serial equivalence.
+
 ## Controlled parallelism ceiling
 
 Run:

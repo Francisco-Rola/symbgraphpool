@@ -37,7 +37,18 @@
       "prediction_fault_rate_bps": "0",
       "operation_mix": "credit",
       "consensus_divergence": "identical",
-      "consensus_cutoff_ms": "250"
+      "consensus_cutoff_ms": "250",
+      "acg.softening_min_confidence": "0.20",
+      "acg.serial_bypass_immediate_speedup_floor": "1.0",
+      "acg.serial_bypass_buffered_preexecution": "false",
+      "acg.regime_change_enabled": "true",
+      "acg.regime_service_cost_drop_ratio": "0.60",
+      "acg.regime_contention_increase_ratio": "1.50",
+      "acg.regime_contention_increase_absolute": "0.10",
+      "acg.regime_retained_evidence": "0.20",
+      "acg.regime_probation_bypass_blocks": "2",
+      "acg.regime_probation_min_projected_speedup": "1.10",
+      "acg.candidate_miss_verification_weight_threshold": "32.0"
     }
   },
   "order_seed": 2026081710,

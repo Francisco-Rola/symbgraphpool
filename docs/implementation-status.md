@@ -32,7 +32,7 @@ Implemented runtime behavior:
 - dependency-driven READY-DAG execution without global wave barriers;
 - block-local persistent MVCC visibility for storage/bank/contract state;
 - replay/fan-out and serialization-cost learning;
-- serial bypass admission based on previous-block economics;
+- direct serial bypass admission based on previous-block economics, including adverse-regime probation and bounded adaptive re-probes;
 - schema-v3 experiment records with planning/execution/feedback/consensus timing;
 - manifest-driven Phase-5F correctness/provenance acceptance.
 

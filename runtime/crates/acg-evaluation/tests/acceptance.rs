@@ -354,8 +354,54 @@ fn schema_v2_plus_acceptance_requires_consistent_reduction_and_worker_bound_metr
 }
 
 #[test]
-fn schema_v3_acceptance_understands_buffered_serial_bypass_preexecution() {
+fn schema_v3_acceptance_understands_direct_serial_bypass() {
     let mut record = complete_record();
+    record.planning.serial_bypassed = true;
+    record.execution.workers = 1;
+    record.scheduling.pre_reduction_dependencies = 199;
+    record.scheduling.scheduled_dependencies = 199;
+    record.scheduling.ordering_dependencies = 199;
+    record.scheduling.soft_dependencies = 0;
+    record.scheduling.hard_dependencies = 199;
+    record.execution.dependency_count = 199;
+    record.execution.hard_dependency_count = 199;
+    record.execution.max_in_flight = 1;
+    record.execution.speculative_results = 0;
+    record.execution.reused_results = 0;
+    record.execution.invalidated_results = 0;
+    record.execution.replayed_transactions = 0;
+    record.execution.canonical_transactions = 200;
+    record.execution.preexecution_executor_total_nanos = 0;
+    record.execution.preexecution_worker_wall_nanos = 0;
+    record.consensus.prepared_receipts = 0;
+    record.consensus.successful_preexecution_receipts = Some(0);
+    record.consensus.failed_preexecution_receipts = Some(0);
+    let manifest = manifest_for(&record);
+
+    let report = manifest.evaluate(std::slice::from_ref(&record));
+    assert_eq!(report.status, ExperimentAcceptanceStatus::Accepted);
+    assert!(report.run_reports[0].issues.is_empty());
+
+    let mut invalid = record;
+    invalid.execution.max_in_flight = 2;
+    let report = manifest.evaluate(&[invalid]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "serial_bypass_parallel_execution"));
+}
+
+#[test]
+fn schema_v3_acceptance_allows_buffered_serial_bypass_control() {
+    let mut record = complete_record();
+    record.metadata.parameters.insert(
+        "acg.serial_bypass_buffered_preexecution".to_owned(),
+        "true".to_owned(),
+    );
     record.planning.serial_bypassed = true;
     record.execution.workers = 1;
     record.scheduling.pre_reduction_dependencies = 199;
@@ -376,18 +422,6 @@ fn schema_v3_acceptance_understands_buffered_serial_bypass_preexecution() {
     let report = manifest.evaluate(std::slice::from_ref(&record));
     assert_eq!(report.status, ExperimentAcceptanceStatus::Accepted);
     assert!(report.run_reports[0].issues.is_empty());
-
-    let mut invalid = record;
-    invalid.execution.max_in_flight = 2;
-    let report = manifest.evaluate(&[invalid]);
-    assert_eq!(
-        report.status,
-        ExperimentAcceptanceStatus::ConfigurationError
-    );
-    assert!(report.run_reports[0]
-        .issues
-        .iter()
-        .any(|issue| issue.code == "serial_bypass_parallel_preexecution"));
 }
 
 #[test]

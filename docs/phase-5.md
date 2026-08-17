@@ -43,7 +43,14 @@ transaction overlays and never commit into the snapshot.
 
 Phase 5B keeps execution single-threaded while proving the correctness state machine that Phase 5C will run beneath a worker pool.
 
-A speculative receipt is now bound to the exact `BlockContext`, `ExecutionRequest`, and engine that produced it. The canonical coordinator drains transactions strictly in block order. For each speculative receipt it validates all 5A read dependencies against the current canonical predecessor state:
+A speculative receipt is bound to the exact `ExecutionRequest`, engine, and semantic block context
+(height, time, and chain id) that produced it. Canonical transaction position is deliberately *not*
+part of receipt identity: a transaction moved by block reordering may still reuse its receipt when
+its concrete read set remains valid. Contracts whose semantics depend on `Env.transaction.index` are
+out of scope for receipt reuse; such environment dependencies would require analyzer/VM-level
+tracking before they could be admitted safely. The canonical coordinator drains transactions
+strictly in block order and validates all 5A read dependencies against the current canonical
+predecessor state:
 
 - contract metadata/existence;
 - point storage reads, including observed absence;
@@ -51,7 +58,11 @@ A speculative receipt is now bound to the exact `BlockContext`, `ExecutionReques
 - point bank balances;
 - all-balances enumeration with transaction-local masked denominations removed.
 
-A valid successful receipt commits its detached `StateWriteSet` atomically under the canonical world-state write lock and reuses the speculative events/data/result without re-executing the contract. A valid failed receipt reuses the failure and commits no writes. An invalid receipt is discarded and the original transaction is replayed through the canonical execution path.
+A valid successful receipt commits its detached `StateWriteSet` atomically under the canonical
+world-state write lock and reuses the speculative events/data/result without re-executing the
+contract. A valid failed receipt reuses the failure and commits no writes. A receipt whose concrete
+read dependencies became stale after reordering is replayed through the canonical execution path; a
+malformed receipt or one from an incompatible semantic block context is rejected/discarded.
 
 Blind writes deliberately do not create read dependencies. Therefore a later canonical blind write can reuse its speculative receipt even when an earlier predecessor wrote the same key: canonical ordering still makes the later write authoritative.
 

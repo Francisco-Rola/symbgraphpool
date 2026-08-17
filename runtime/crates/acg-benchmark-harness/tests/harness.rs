@@ -302,6 +302,18 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
         "6".to_owned(),
     );
     values.insert(
+        "acg.serial_bypass_buffered_preexecution".to_owned(),
+        "true".to_owned(),
+    );
+    values.insert(
+        "acg.regime_probation_bypass_blocks".to_owned(),
+        "3".to_owned(),
+    );
+    values.insert(
+        "acg.regime_probation_min_projected_speedup".to_owned(),
+        "1.20".to_owned(),
+    );
+    values.insert(
         "acg.pre_consensus_serialization_weight".to_owned(),
         "0.75".to_owned(),
     );
@@ -365,6 +377,18 @@ fn tuning_parameters_are_manifest_driven_and_invalid_values_fail_before_executio
             .serial_bypass
             .max_consecutive_bypasses,
         6
+    );
+    assert!(tuning.planning_config.serial_bypass.buffered_preexecution);
+    assert_eq!(
+        tuning.planning_config.regime_change.probation_bypass_blocks,
+        3
+    );
+    assert_eq!(
+        tuning
+            .planning_config
+            .regime_change
+            .probation_min_projected_speedup,
+        1.20
     );
     assert_eq!(
         tuning
@@ -542,12 +566,53 @@ fn serial_bypass_skips_candidate_graph_after_losing_warmup_economics() {
     assert_eq!(record.execution.hard_dependency_count, 31);
     assert_eq!(record.execution.workers, 1);
     assert_eq!(record.execution.max_in_flight, 1);
+    assert_eq!(record.execution.speculative_results, 0);
+    assert_eq!(record.execution.reused_results, 0);
+    assert_eq!(record.execution.canonical_transactions, 32);
+    assert_eq!(record.consensus.prepared_receipts, 0);
+    assert_eq!(record.pipeline_timing.preexecution_nanos, 0);
+    assert_eq!(record.execution.preexecution_worker_wall_nanos, 0);
+    assert!(record.execution.replay_or_missing_execution_nanos > 0);
+    assert!(record.consensus.post_consensus_nanos > 0);
+    assert_eq!(record.feedback.positive_observations, 0);
+    assert_eq!(record.feedback.negative_observations, 0);
+    assert_eq!(record.correctness.serial_equivalent, Some(true));
+}
+
+#[test]
+fn buffered_serial_bypass_control_preserves_detached_prefix_semantics() {
+    let mut bypass = run("cost-aware", 14);
+    bypass
+        .parameters
+        .insert("transactions".to_owned(), "32".to_owned());
+    bypass
+        .parameters
+        .insert("accounts".to_owned(), "32".to_owned());
+    bypass
+        .parameters
+        .insert("warmup_blocks".to_owned(), "4".to_owned());
+    bypass
+        .parameters
+        .insert("acg.serial_bypass_enabled".to_owned(), "true".to_owned());
+    bypass.parameters.insert(
+        "acg.serial_bypass_min_projected_speedup".to_owned(),
+        "100.0".to_owned(),
+    );
+    bypass.parameters.insert(
+        "acg.serial_bypass_buffered_preexecution".to_owned(),
+        "true".to_owned(),
+    );
+
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness.run_manifest(&smoke_manifest(vec![bypass])).unwrap();
+    let record = &outcome.records[0];
+    assert!(record.planning.serial_bypassed);
+    assert_eq!(record.execution.workers, 1);
     assert_eq!(record.execution.speculative_results, 32);
     assert_eq!(record.execution.reused_results, 32);
     assert_eq!(record.execution.canonical_transactions, 0);
     assert_eq!(record.consensus.prepared_receipts, 32);
-    assert_eq!(record.feedback.positive_observations, 0);
-    assert_eq!(record.feedback.negative_observations, 0);
+    assert!(record.pipeline_timing.preexecution_nanos > 0);
     assert_eq!(record.correctness.serial_equivalent, Some(true));
 }
 
@@ -559,7 +624,13 @@ fn consensus_divergence_reconciles_candidate_preexecution_against_decided_order(
         .insert("transactions".to_owned(), "32".to_owned());
     identity
         .parameters
-        .insert("accounts".to_owned(), "16".to_owned());
+        .insert("accounts".to_owned(), "32".to_owned());
+    identity
+        .parameters
+        .insert("hot_account_probability_bps".to_owned(), "0".to_owned());
+    identity
+        .parameters
+        .insert("parallelism_lanes".to_owned(), "32".to_owned());
     identity
         .parameters
         .insert("warmup_blocks".to_owned(), "1".to_owned());
@@ -584,20 +655,22 @@ fn consensus_divergence_reconciles_candidate_preexecution_against_decided_order(
     assert!(record.consensus.same_position_transactions < 32);
     assert!(record.consensus.common_prefix_transactions < 32);
 
-    // Reordering changes the canonical transaction index exposed through CosmWasm Env. A receipt
-    // prepared at the old index therefore has a different block context and cannot be reused
-    // safely, even when the transaction ID and request are otherwise identical.
+    // Transaction position is not a receipt-identity boundary. Environment-index-dependent
+    // contracts are outside ConflictLab's reusable-receipt workload contract, so moved receipts
+    // are matched by transaction/request and then accepted or replayed from their concrete read
+    // dependencies.
     let moved_transactions = record
         .consensus
         .candidate_transactions
         .saturating_sub(record.consensus.same_position_transactions);
     assert!(moved_transactions > 0);
-    assert_eq!(record.execution.discarded_predictions, moved_transactions);
-    assert_eq!(record.execution.missing_predictions, moved_transactions);
-    assert_eq!(
-        record.execution.matched_transactions,
-        record.consensus.same_position_transactions
-    );
+    assert_eq!(record.execution.discarded_predictions, 0);
+    assert_eq!(record.execution.missing_predictions, 0);
+    assert_eq!(record.execution.matched_transactions, 32);
+    assert_eq!(record.execution.reused_results, 32);
+    assert_eq!(record.execution.invalidated_results, 0);
+    assert_eq!(record.execution.replayed_transactions, 0);
+    assert!(record.execution.reused_results > record.consensus.same_position_transactions);
 }
 
 #[test]
@@ -794,6 +867,12 @@ fn mature_bucketed_soft_relationships_remain_compact_after_feedback() {
     identity
         .parameters
         .insert("warmup_blocks".to_owned(), "4".to_owned());
+    // Four bucketed warm-up blocks are intentionally sufficient to mature ordinary evidence.
+    // The production confidence floor must not turn this long-standing compact-soft path hard;
+    // regime-change decay is what drives confidence below the floor when evidence is stale.
+    identity
+        .parameters
+        .insert("acg.softening_min_confidence".to_owned(), "0.20".to_owned());
     identity
         .parameters
         .insert("acg.hard_threshold".to_owned(), "0.99".to_owned());

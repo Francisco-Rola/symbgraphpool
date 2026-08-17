@@ -41,7 +41,10 @@ The projected mean replay cost/fan-out stays stable under pure decay while confi
 observation weight decays. New independence/conflict evidence continues to update the existing Beta
 posterior independently.
 
-Phase 5D introduced checkpoint v2 for replay-cost state. Phase 5E subsequently advances the format to **v3** for learned serialization cost; v1 and v2 remain readable. v1 starts replay/serialization cost empty, while v2 restores replay cost and starts only serialization cost empty.
+Phase 5D introduced checkpoint v2 for replay-cost state. Phase 5E added v3 serialization-cost
+state. The current feedback checkpoint is **v4**, adding candidate-miss verification metadata while
+remaining backward-readable: v1 restores conflict state, v2 adds replay cost, v3 adds serialization
+cost, and v4 adds targeted miss-history recovery state.
 
 ## 5D.3 — cost-adjusted scheduling risk
 
@@ -52,21 +55,27 @@ A candidate edge now exposes two separate concepts:
 
 With no replay-cost evidence, `scheduling_risk == probability`, preserving Phase 4 behavior.
 
-With cost evidence, the current policy computes:
+With cost evidence, the policy now targets **combined pipeline execution work** rather than
+normalizing replay penalty against one fixed reference. It compares the expected post-consensus
+replay work of relaxing the relationship with the pre-consensus serialization work of enforcing it:
 
 ```text
 fanout_multiplier = 1 + fanout_weight * expected_invalidated_descendants
 
-expected_speculation_penalty =
+expected_replay_work =
     conflict_probability
     * expected_replay_cost
     * fanout_multiplier
+    * post_consensus_replay_weight
 
-cost_risk = clamp(
-    expected_speculation_penalty / serialization_cost_reference,
-    0,
-    1
-)
+expected_serialization_work =
+    effective_serialization_cost
+    * pre_consensus_serialization_weight
+
+if replay_work <= serialization_work:
+    cost_risk = conflict_probability * replay_work / serialization_work
+else:
+    cost_risk = 1 - (1 - conflict_probability) * serialization_work / replay_work
 
 scheduling_risk = lerp(
     conflict_probability,
@@ -74,6 +83,11 @@ scheduling_risk = lerp(
     replay_cost_confidence
 )
 ```
+
+At break-even cost the scheduling risk stays equal to the calibrated conflict probability. Cheaper
+replay lowers scheduling risk; more expensive replay raises it. The learned serialization cost from
+Phase 5E is used when confident, otherwise the configured serialization reference remains the
+cold-start fallback.
 
 `RiskBoundedScheduler` uses `scheduling_risk` for hard/soft classification and same-wave soft-risk
 accumulation. Raw probability remains available for diagnostics and learning inspection.
