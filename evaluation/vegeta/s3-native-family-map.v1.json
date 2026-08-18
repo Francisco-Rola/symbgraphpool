@@ -1,0 +1,153 @@
+{
+  "schema_version": "1-native-s3-frozen-family-map",
+  "dataset": "vegeta-s3",
+  "status": "frozen-preimplementation-map",
+  "target_conflict_coverage": 0.95,
+  "selected_profile_families": 11,
+  "observed_source_conflict_coverage": 0.9544560299036002,
+  "observed_source_conflict_pairs": 9703,
+  "observed_total_conflict_pairs": 10166,
+  "methodology_note": "This map freezes the source/interface review of the 11 Ethereum profile families selected for the 95% S3 conflict-coverage target. It maps profile families to seven native CosmWasm code-family slots. It does not claim that translated native execution already preserves 95.45% of conflict pairs; topology fidelity must be measured after the native contracts and genuine symbolic analyses exist.",
+  "native_code_families": {
+    "cw20-base": {
+      "native_contract_source": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw20-base.symbolic.json",
+      "implementation_status": "slot-only",
+      "semantic_scope": "standard fungible-token transfer/balance/allowance behavior exercised by S3"
+    },
+    "controlled-cw20": {
+      "native_contract_source": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/controlled-cw20.symbolic.json",
+      "implementation_status": "slot-only",
+      "semantic_scope": "fungible token with pause/blacklist/mint-burn/config style state, used for Tether/FiatToken-like families"
+    },
+    "fee-token-cw20": {
+      "native_contract_source": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/fee-token-cw20.symbolic.json",
+      "implementation_status": "slot-only",
+      "semantic_scope": "fungible token with transfer policy/fee/router state"
+    },
+    "astroport-pair": {
+      "native_contract_source": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/astroport-pair.symbolic.json",
+      "implementation_status": "slot-only",
+      "semantic_scope": "constant-product AMM pair behavior corresponding to the Uniswap-V2-like family"
+    },
+    "wrapped-native-token": {
+      "native_contract_source": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/wrapped-native-token.symbolic.json",
+      "implementation_status": "slot-only",
+      "semantic_scope": "wrapped native token deposit/withdraw plus fungible-token behavior"
+    },
+    "cw721-mintable": {
+      "native_contract_source": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw721-mintable.symbolic.json",
+      "implementation_status": "slot-only",
+      "semantic_scope": "NFT ownership/approval/transfer plus mint behavior exercised by MIAToken and Mistfits-like families"
+    },
+    "xen-like": {
+      "native_contract_source": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/xen-like.symbolic.json",
+      "implementation_status": "slot-only",
+      "semantic_scope": "rank/mint/stake state machine corresponding to the XENCrypto family; Math delegatecalls are treated as internal helpers rather than a separate state namespace"
+    }
+  },
+  "profile_mappings": [
+    {
+      "rank": 1,
+      "ethereum_profile_family": "6d967f98f2f3843065688dc2065248e3686b56fc0b6ddfa82007df016148becb",
+      "ethereum_contract_identifier": "TetherToken.sol:TetherToken",
+      "conflict_pair_coverage": 0.6781428290379697,
+      "native_code_family": "controlled-cw20",
+      "mapping_basis": "verified-source-interface-review"
+    },
+    {
+      "rank": 2,
+      "ethereum_profile_family": "8b5db55fa9ab3b9527508d4abe0b39eb588bf310270c8e04b3f38214e8ba63b4",
+      "ethereum_contract_identifier": "UniswapV2Pair.sol:UniswapV2Pair",
+      "conflict_pair_coverage": 0.1239425536100728,
+      "native_code_family": "astroport-pair",
+      "mapping_basis": "verified-source-interface-review"
+    },
+    {
+      "rank": 3,
+      "ethereum_profile_family": "5566bf50796faf93c9b6f6adacd3b32c70bfe16b48ffc59db6cd144cbdc89739",
+      "ethereum_contract_identifier": "WETH9.sol:WETH9",
+      "conflict_pair_coverage": 0.09708833366122369,
+      "native_code_family": "wrapped-native-token",
+      "mapping_basis": "verified-source-interface-review"
+    },
+    {
+      "rank": 4,
+      "ethereum_profile_family": "51a81a6105cc3c7311e17c59b7228561425101e2c3f7844dfe8f4faf3882582f",
+      "ethereum_contract_identifier": "MIAToken.sol:MIAToken",
+      "conflict_pair_coverage": 0.05213456620106236,
+      "native_code_family": "cw721-mintable",
+      "mapping_basis": "verified ABI exposes ownerOf/getApproved/setApprovalForAll/safeTransferFrom/mint operations"
+    },
+    {
+      "rank": 5,
+      "ethereum_profile_family": "c1bcd4dc4f30c4dcf6c9fe462abeaf2efefc065dcb4dec74996e471f1ce219b4",
+      "ethereum_contract_identifier": "FiatTokenProxy.sol:FiatTokenProxy + observed FiatTokenV2_1 delegate target",
+      "conflict_pair_coverage": 0.04082234900649223,
+      "native_code_family": "controlled-cw20",
+      "mapping_basis": "verified proxy plus verified FiatTokenV2_1 source/interface; historical generic-DELEGATECALL status remains unresolved in trace metadata"
+    },
+    {
+      "rank": 6,
+      "ethereum_profile_family": "6eaa756f42c049e367b2c6efdb27a6290260e50f311ff5ce1eba5493a8a8b71a",
+      "ethereum_contract_identifier": "shibariumcash.sol:shibariumcash",
+      "conflict_pair_coverage": 0.037477867401141056,
+      "native_code_family": "fee-token-cw20",
+      "mapping_basis": "verified source/interface includes token transfer plus wallet-limit/fee/router state"
+    },
+    {
+      "rank": 7,
+      "ethereum_profile_family": "c120860259b3a050e6f7dca1bb7d337ff57d0c9d7b9604c87e8930bc072bfc7b",
+      "ethereum_contract_identifier": "TokenMintERC20Token.sol:TokenMintERC20Token",
+      "conflict_pair_coverage": 0.023313004131418454,
+      "native_code_family": "cw20-base",
+      "mapping_basis": "verified-source-interface-review"
+    },
+    {
+      "rank": 8,
+      "ethereum_profile_family": "ed357d169c8acac5245ebb366bce1d610c0ff26ceeaa6f1777d1dd9a3a9266c2",
+      "ethereum_contract_identifier": "project:/contracts/XENCrypto.sol:XENCrypto",
+      "conflict_pair_coverage": 0.01839464882943144,
+      "native_code_family": "xen-like",
+      "mapping_basis": "verified source/interface; S3 activity is dominated by claim/rank operations, while the observed Math delegate target is treated as an internal helper"
+    },
+    {
+      "rank": 9,
+      "ethereum_profile_family": "1298c624e85f5c43022509dd2ca830e3b94330780b35117d8b3c2970e23d3254",
+      "ethereum_contract_identifier": "MistfitsNFTV3.sol:MistfitsNFTV3",
+      "conflict_pair_coverage": 0.015050167224080268,
+      "native_code_family": "cw721-mintable",
+      "mapping_basis": "verified-source-interface-review"
+    },
+    {
+      "rank": 10,
+      "ethereum_profile_family": "20eb99b3610cc2648b0e918931736af025155d5dc0f37d0023b7418364022720",
+      "ethereum_contract_identifier": "ENJToken.sol:ENJToken",
+      "conflict_pair_coverage": 0.015050167224080268,
+      "native_code_family": "cw20-base",
+      "mapping_basis": "verified ERC20-like ABI; S3 exercises transfer"
+    },
+    {
+      "rank": 11,
+      "ethereum_profile_family": "29aa63c9f1f3ff6664753a81efa3f87fef503049c8304e27be0bc727adb5865b",
+      "ethereum_contract_identifier": "MaskToken.sol:MaskToken",
+      "conflict_pair_coverage": 0.0065905961046626,
+      "native_code_family": "cw20-base",
+      "mapping_basis": "verified ERC20-like ABI; S3 primarily exercises transfer/balanceOf"
+    }
+  ],
+  "translation_rules": [
+    "Every source Ethereum transaction remains in the same block and transaction position.",
+    "Every distinct Ethereum storage-owner address maps to a distinct native instance namespace even when code families are shared.",
+    "Mapped CALL/STATICCALL frames become native contract actions; DELEGATECALL/CALLCODE frames inherit the parent storage namespace and are represented as inlined implementation/helper actions.",
+    "Unsupported or unselected calls become explicit background-fallback actions and are never deleted.",
+    "Concrete historical reads/writes are used only for offline coverage accounting and must never be embedded in the native execution plan or exposed to SymbGraph prediction.",
+    "Native conflict-topology fidelity is not claimed until concrete accesses from translated native execution are measured against the source trace."
+  ]
+}

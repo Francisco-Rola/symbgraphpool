@@ -983,3 +983,87 @@ fn common_harness_runs_serial_ariafb_vegeta_and_exact_access_baselines() {
     assert!(exact.strategy.as_ref().unwrap().oracle_accesses);
     assert_eq!(exact.execution.replayed_transactions, 0);
 }
+
+fn vegeta_fixture_parameters() -> BTreeMap<String, String> {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/vegeta-s3-mini.jsonl")
+        .canonicalize()
+        .unwrap();
+    BTreeMap::from([
+        ("vegeta.corpus_path".to_owned(), fixture.display().to_string()),
+        ("vegeta.measured_block".to_owned(), "4".to_owned()),
+        ("warmup_blocks".to_owned(), "2".to_owned()),
+        ("vegeta.prediction_history_blocks".to_owned(), "2".to_owned()),
+        ("vegeta.prediction_min_frequency_bps".to_owned(), "1".to_owned()),
+        ("vegeta.prediction_max_keys_per_method".to_owned(), "16".to_owned()),
+        ("vegeta.work_step_divisor".to_owned(), "0".to_owned()),
+        ("execution_backend".to_owned(), "native".to_owned()),
+        ("consensus_cutoff_ms".to_owned(), "5000".to_owned()),
+        ("acg.serial_bypass_enabled".to_owned(), "false".to_owned()),
+        ("acg.regime_change_enabled".to_owned(), "false".to_owned()),
+    ])
+}
+
+fn vegeta_run(mode: &str, run_index: u32) -> RunIdentity {
+    RunIdentity {
+        workload: "vegeta-eth".to_owned(),
+        mode: mode.to_owned(),
+        run_index,
+        seed: 7,
+        workers: 2,
+        parameters: vegeta_fixture_parameters(),
+    }
+}
+
+#[test]
+fn vegeta_eth_workload_preparation_is_deterministic_and_hides_future_accesses() {
+    let workload = acg_benchmark_harness::VegetaEthWorkload;
+    let identity = vegeta_run("cost-aware", 1);
+    let left = workload.prepare(&identity).unwrap();
+    let right = workload.prepare(&identity).unwrap();
+    assert_eq!(left.warmup_blocks(), right.warmup_blocks());
+    assert_eq!(left.measured_block(), right.measured_block());
+    assert_eq!(
+        left.canonical_state_bytes().unwrap(),
+        right.canonical_state_bytes().unwrap()
+    );
+    assert_eq!(left.measured_block().context.height, 4);
+    assert_eq!(left.measured_block().transactions.len(), 3);
+    assert_eq!(
+        left.environment_metadata()
+            .get("vegeta_access_semantics")
+            .map(String::as_str),
+        Some("evm-storage-sload-sstore-v1")
+    );
+}
+
+#[test]
+fn vegeta_eth_fixture_runs_all_seven_strategies_with_serial_equivalence() {
+    let modes = [
+        "serial",
+        "aria-fb",
+        "vegeta",
+        "exact-access",
+        "static",
+        "probability-only",
+        "cost-aware",
+    ];
+    let runs = modes
+        .iter()
+        .enumerate()
+        .map(|(index, mode)| vegeta_run(mode, u32::try_from(index + 1).unwrap()))
+        .collect::<Vec<_>>();
+    let manifest = smoke_manifest(runs);
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness.run_manifest(&manifest).unwrap();
+    assert_eq!(outcome.records.len(), 7);
+    assert!(outcome.acceptance.accepted());
+    for record in outcome.records {
+        assert_eq!(record.metadata.workload, "vegeta-eth");
+        assert_eq!(record.correctness.serial_equivalent, Some(true));
+        assert_eq!(
+            record.correctness.canonical_state_digest,
+            record.correctness.serial_reference_digest
+        );
+    }
+}

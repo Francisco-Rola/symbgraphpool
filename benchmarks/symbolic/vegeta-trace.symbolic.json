@@ -1,0 +1,82 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "vegeta-trace",
+  "source": "benchmarks/contracts/vegeta-trace/src/lib.rs",
+  "storage_resources": {
+    "EVM_STORAGE": {
+      "key_semantic_name": "ethereum_address_storage_slot"
+    }
+  },
+  "dependency_kinds": {
+    "input": "The predicted access hint is supplied as transaction input by the workload adapter.",
+    "state": "The access or path condition depends on previously stored state.",
+    "input_and_state": "The access or path condition depends on both input and state.",
+    "none": "Unconditional.",
+    "unknown": "Not resolved by the benchmark profile."
+  },
+  "profiles": [
+    {
+      "entrypoint": "execute::Replay",
+      "input_parameters": [
+        "predicted_reads",
+        "predicted_writes",
+        "actual_reads",
+        "actual_writes",
+        "work_iterations",
+        "tx_hash",
+        "target",
+        "selector"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "EVM_STORAGE",
+          "key": {
+            "semantic_name": "ethereum_address_storage_slot",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "predicted_reads[i]"
+            }
+          },
+          "guard": {
+            "expression": "predicted_reads is non-empty",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "runtime/crates/acg-benchmark-harness/src/vegeta_eth.rs",
+            "start_line": 1,
+            "end_line": 1,
+            "code": "history-derived predicted read keys are attached to Replay messages by the workload adapter"
+          },
+          "notes": [
+            "This profile intentionally models prediction hints rather than concrete trace keys. The contract executes actual_reads/actual_writes, which remain invisible to the candidate predicate."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "EVM_STORAGE",
+          "key": {
+            "semantic_name": "ethereum_address_storage_slot",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "predicted_writes[i]"
+            }
+          },
+          "guard": {
+            "expression": "predicted_writes is non-empty",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "runtime/crates/acg-benchmark-harness/src/vegeta_eth.rs",
+            "start_line": 1,
+            "end_line": 1,
+            "code": "history-derived predicted write keys are attached to Replay messages by the workload adapter"
+          },
+          "notes": [
+            "Concrete EVM access keys are used only by execution and validation, not by candidate-graph construction."
+          ]
+        }
+      ]
+    }
+  ]
+}

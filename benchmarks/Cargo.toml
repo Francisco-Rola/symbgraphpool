@@ -2,6 +2,7 @@
 members = [
     "contracts/conflictlab",
     "contracts/miniwarehouse",
+    "contracts/vegeta-trace",
 ]
 resolver = "2"
 

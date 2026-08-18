@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "dataset": "vegeta-s3",
+  "policy_status": "frozen-preexecution-fidelity-v1",
+  "metrics": {
+    "aggregate_source_conflict_coverage": {
+      "minimum": 0.95,
+      "enforced": true,
+      "reason": "frozen 11-family aggregate source-conflict target"
+    },
+    "median_conflict_bearing_block_coverage": {
+      "minimum": 0.80,
+      "enforced": true,
+      "reason": "block-balanced fidelity floor chosen after reviewing the source-family concentration diagnostic"
+    },
+    "semantic_transaction_coverage": {
+      "minimum": 0.75,
+      "enforced": true,
+      "measurement_source": "final-mapping-simulation",
+      "reason": "semantic workload-volume floor for the selector-granular final mapping before native implementation"
+    },
+    "semantic_call_frame_coverage": {
+      "minimum": 0.50,
+      "enforced": true,
+      "measurement_source": "final-mapping-simulation",
+      "reason": "semantic call-composition floor for the selector-granular final mapping before native implementation"
+    }
+  }
+}

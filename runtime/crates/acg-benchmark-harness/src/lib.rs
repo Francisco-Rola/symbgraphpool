@@ -11,6 +11,7 @@
 
 mod baselines;
 mod conflictlab;
+mod vegeta_eth;
 
 use std::{
     collections::BTreeMap,
@@ -49,6 +50,7 @@ use thiserror::Error;
 pub use baselines::ExecutionStrategy;
 use baselines::{BaselineExecutionContext, BaselineMeasuredExecution};
 pub use conflictlab::ConflictLabWorkload;
+pub use vegeta_eth::VegetaEthWorkload;
 
 pub const BENCHMARK_HARNESS_SCHEMA_VERSION: u16 = 3;
 
@@ -129,6 +131,7 @@ impl WorkloadRegistry {
     pub fn with_builtin_workloads() -> Self {
         let mut registry = Self::new();
         registry.register(ConflictLabWorkload);
+        registry.register(VegetaEthWorkload);
         registry
     }
 
