@@ -15,6 +15,8 @@ V1_CORRECTNESS_DIAG = ROOT / "scripts" / "internal" / "diagnose-conflictlab-v1-c
 V1_VALIDATOR = ROOT / "scripts" / "internal" / "validate-conflictlab-v1.py"
 PARALLELISM_SUMMARY = ROOT / "scripts" / "internal" / "summarize-conflictlab-parallelism.py"
 FOUR_FIX_SUMMARY = ROOT / "scripts" / "internal" / "summarize-conflictlab-fixes.py"
+BASELINE_GRID = ROOT / "evaluation" / "baselines" / "conflictlab-strategy-smoke.grid.json"
+BASELINE_SUMMARY = ROOT / "scripts" / "internal" / "summarize-baseline-comparison.py"
 
 sys.path.insert(0, str(ROOT / "scripts" / "internal"))
 from conflictlab_v1_miss_policy import (  # noqa: E402
@@ -78,6 +80,145 @@ class EvaluationToolTests(unittest.TestCase):
             self.assertEqual(sorted(run["run_index"] for run in manifest["runs"]), list(range(1, 33)))
             self.assertTrue(all(run["workers"] <= 6 for run in manifest["runs"]))
             self.assertEqual({run["parameters"]["complexity"] for run in manifest["runs"]}, {"tiny", "heavy"})
+
+    def test_baseline_smoke_matrix_has_all_seven_strategies(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "manifest.json"
+            subprocess.run(
+                [sys.executable, str(GENERATOR), str(BASELINE_GRID), str(output)],
+                check=True,
+            )
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(len(manifest["runs"]), 63)
+            self.assertEqual(
+                {run["mode"] for run in manifest["runs"]},
+                {
+                    "serial",
+                    "aria-fb",
+                    "vegeta",
+                    "exact-access",
+                    "static",
+                    "probability-only",
+                    "cost-aware",
+                },
+            )
+            self.assertEqual({run["seed"] for run in manifest["runs"]}, {11, 47, 101})
+            self.assertTrue(
+                all(run["parameters"]["consensus_divergence"] == "identical" for run in manifest["runs"])
+            )
+
+    def test_matched_serial_normalization_uses_direct_serial_same_seed_and_parameters(self):
+        namespace = runpy.run_path(str(AGGREGATOR), run_name="aggregate_test")
+        records = [
+            {
+                "metadata": {
+                    "experiment_id": "baseline",
+                    "workload": "conflictlab",
+                    "mode": "serial",
+                    "workers": 6,
+                    "seed": 11,
+                    "parameters": {"contention": "25pct"},
+                },
+                "pipeline_timing": {"total_adaptive_block_nanos": 1000},
+            },
+            {
+                "metadata": {
+                    "experiment_id": "baseline",
+                    "workload": "conflictlab",
+                    "mode": "static",
+                    "workers": 6,
+                    "seed": 11,
+                    "parameters": {"contention": "25pct"},
+                },
+                "pipeline_timing": {"total_adaptive_block_nanos": 400},
+            },
+        ]
+        flat = [{}, {}]
+        namespace["add_matched_serial_metrics"](records, flat)
+        self.assertEqual(flat[0]["derived.matched_serial_speedup"], 1.0)
+        self.assertEqual(flat[1]["derived.matched_serial_total_nanos"], 1000.0)
+        self.assertEqual(flat[1]["derived.matched_serial_speedup"], 2.5)
+
+    def test_baseline_summary_reports_matched_serial_ranges_and_controls(self):
+        namespace = runpy.run_path(str(BASELINE_SUMMARY), run_name="baseline_summary_test")
+        records = []
+        for mode, wall in {
+            "serial": 1000,
+            "aria-fb": 800,
+            "vegeta": 700,
+            "exact-access": 400,
+            "static": 500,
+            "probability-only": 600,
+            "cost-aware": 650,
+        }.items():
+            records.append(
+                {
+                    "metadata": {
+                        "experiment_id": "baseline",
+                        "workload": "conflictlab",
+                        "mode": mode,
+                        "workers": 6,
+                        "seed": 11,
+                        "parameters": {
+                            "contention": "25pct",
+                            "hot_account_probability_bps": "2500",
+                            "acg.serial_bypass_enabled": "false",
+                            "acg.regime_change_enabled": "false",
+                            "consensus_divergence": "identical",
+                        },
+                    },
+                    "pipeline_timing": {
+                        "total_adaptive_block_nanos": wall,
+                        "serial_reference_execution_nanos": 1000,
+                    },
+                    "consensus": {
+                        "serial_validation_latency_nanos": 1000,
+                        "bottleneck_nanos": wall,
+                        "post_consensus_nanos": wall,
+                    },
+                    "execution": {"replayed_transactions": 0},
+                    "strategy": {
+                        "discovered_conflicts": 0,
+                        "replay_dependencies": 0,
+                        "forward_conflict_fallbacks": 0,
+                        "access_set_mismatch_fallbacks": 0,
+                    },
+                    "correctness": {"serial_equivalent": True},
+                }
+            )
+        serial_index = namespace["build_serial_index"](records)
+        static = next(record for record in records if record["metadata"]["mode"] == "static")
+        self.assertEqual(namespace["matched_serial_speedup"](static, serial_index), 2.0)
+        self.assertEqual(namespace["parameter_value"](records, "acg.serial_bypass_enabled"), "false")
+        self.assertEqual(namespace["fmt_range"]([1.5, 2.0, 2.5]), "1.50/2.00/2.50x")
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            source = temp / "records.jsonl"
+            report = temp / "report.txt"
+            matched = temp / "matched.csv"
+            source.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(BASELINE_SUMMARY),
+                    str(source),
+                    "--output",
+                    str(report),
+                    "--matched-output",
+                    str(matched),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            report_text = report.read_text(encoding="utf-8")
+            self.assertIn("matched direct-Serial actual block wall", report_text)
+            self.assertIn("serial_bypass_enabled=false", report_text)
+            self.assertIn("2.00/2.00/2.00x", report_text)
+            with matched.open(newline="", encoding="utf-8") as handle:
+                matched_rows = list(csv.DictReader(handle))
+            static_row = next(row for row in matched_rows if row["mode"] == "static")
+            self.assertAlmostEqual(float(static_row["matched_serial_speedup"]), 2.0)
 
     def test_aggregator_emits_flat_wide_and_long_plot_tables(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -150,9 +291,10 @@ class EvaluationToolTests(unittest.TestCase):
                         "scheduling": {
                             "candidate_edges": 10,
                             "materialized_candidate_edges": 5,
-                            "pre_reduction_dependencies": 0,
-                            "scheduled_dependencies": 0,
+                            "pre_reduction_dependencies": 3,
+                            "scheduled_dependencies": 3,
                             "edges_elided_by_reduction": 0,
+                            "hard_dependencies": 3,
                         },
                         "feedback": {
                             "positive_observations": 1,
@@ -215,6 +357,10 @@ class EvaluationToolTests(unittest.TestCase):
             self.assertAlmostEqual(float(precision["mean"]), 0.5)
             recall = next(row for row in plot if row["metric"] == "prediction_recall")
             self.assertAlmostEqual(float(recall["mean"]), 1.0)
+            hard_dependencies = next(
+                row for row in plot if row["metric"] == "hard_dependencies"
+            )
+            self.assertAlmostEqual(float(hard_dependencies["mean"]), 3.0)
 
     def test_consensus_window_counts_serial_fallback_preexecution_before_consensus(self):
         with tempfile.TemporaryDirectory() as temp:

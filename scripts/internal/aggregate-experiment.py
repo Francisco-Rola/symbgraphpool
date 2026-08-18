@@ -51,6 +51,8 @@ METRICS = {
     "pipeline_preexecution_ms": ("pipeline_timing.preexecution_nanos", 1e-6),
     "pipeline_reconciliation_ms": ("pipeline_timing.reconciliation_nanos", 1e-6),
     "pipeline_speedup": ("pipeline_timing.end_to_end_speedup_milli", 1e-3),
+    "matched_serial_speedup": ("derived.matched_serial_speedup", 1.0),
+    "matched_serial_total_ms": ("derived.matched_serial_total_nanos", 1e-6),
     "total_work_speedup": ("derived.total_work_speedup", 1.0),
     "preconsensus_eligible_ms": ("derived.preconsensus_eligible_nanos", 1e-6),
     "pre_consensus_ms": ("derived.pre_consensus_nanos", 1e-6),
@@ -86,8 +88,17 @@ METRICS = {
     "hard_edges": ("scheduling.hard_edges", 1.0),
     "wave_count": ("scheduling.wave_count", 1.0),
     "soft_dependencies": ("scheduling.soft_dependencies", 1.0),
-    "hard_dependencies": ("execution.hard_dependency_count", 1.0),
+    # Scheduling hard dependencies describe the canonical/replay dependency plan. This is
+    # identical to execution.hard_dependency_count for single-plan strategies, but Vegeta-like
+    # intentionally has a fully-parallel discovery pass followed by a separate replay DAG.
+    "hard_dependencies": ("scheduling.hard_dependencies", 1.0),
     "max_in_flight": ("execution.max_in_flight", 1.0),
+    "strategy_discovery_transactions": ("strategy.discovery_transactions", 1.0),
+    "strategy_discovered_conflicts": ("strategy.discovered_conflicts", 1.0),
+    "strategy_forward_conflict_fallbacks": ("strategy.forward_conflict_fallbacks", 1.0),
+    "strategy_access_set_mismatch_fallbacks": ("strategy.access_set_mismatch_fallbacks", 1.0),
+    "strategy_replay_dependencies": ("strategy.replay_dependencies", 1.0),
+    "strategy_replay_parallel_ms": ("strategy.replay_parallel_nanos", 1e-6),
     "wasm_acquire_ms": ("execution.contract.aggregate_wasm_instance_acquire_nanos", 1e-6),
     "wasm_instance_reuse_hits": ("execution.contract.wasm_instance_reuse_hits", 1.0),
     "wasm_instance_pool_misses": ("execution.contract.wasm_instance_pool_misses", 1.0),
@@ -298,6 +309,43 @@ def describe(values):
     }
 
 
+def matched_serial_key(record):
+    metadata = record.get("metadata", {})
+    params = metadata.get("parameters", {})
+    return (
+        metadata.get("experiment_id"),
+        metadata.get("workload"),
+        metadata.get("workers"),
+        metadata.get("seed"),
+        tuple(sorted((str(k), str(v)) for k, v in params.items())),
+    )
+
+
+def add_matched_serial_metrics(records, flat_records):
+    serial_walls = {}
+    for record in records:
+        if record.get("metadata", {}).get("mode") != "serial":
+            continue
+        wall = record.get("pipeline_timing", {}).get("total_adaptive_block_nanos")
+        if isinstance(wall, (int, float)) and wall > 0:
+            serial_walls.setdefault(matched_serial_key(record), []).append(float(wall))
+
+    for record, flat in zip(records, flat_records):
+        candidates = serial_walls.get(matched_serial_key(record), [])
+        if not candidates:
+            flat["derived.matched_serial_total_nanos"] = None
+            flat["derived.matched_serial_speedup"] = None
+            continue
+        serial_wall = statistics.median(candidates)
+        adaptive_wall = record.get("pipeline_timing", {}).get("total_adaptive_block_nanos")
+        flat["derived.matched_serial_total_nanos"] = serial_wall
+        flat["derived.matched_serial_speedup"] = (
+            serial_wall / float(adaptive_wall)
+            if isinstance(adaptive_wall, (int, float)) and adaptive_wall > 0
+            else None
+        )
+
+
 def group_key(record):
     metadata = record.get("metadata", {})
     params = metadata.get("parameters", {})
@@ -333,6 +381,7 @@ def main() -> int:
     if not records:
         raise SystemExit("no records found")
     flat_records = [derived_flat(record, args.preconsensus_window_ms) for record in records]
+    add_matched_serial_metrics(records, flat_records)
     all_fields = sorted({key for record in flat_records for key in record})
     write_csv(args.out_dir / "records-flat.csv", flat_records, all_fields)
 

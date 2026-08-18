@@ -581,8 +581,15 @@ fn consensus_cutoff_stops_new_serial_launches_without_preconsensus_commit() {
         )
         .unwrap();
 
-    assert_eq!(prepared.receipts.len(), 1);
-    assert_eq!(prepared.metrics.speculative.speculative_results, 1);
+    // The cutoff budget starts at API entry, so on a heavily loaded host it is valid for the
+    // budget to expire before the worker thread launches the first transaction. The invariant
+    // under test is that no *new* transaction starts after the cutoff. With one worker and a
+    // hard 10 -> 11 dependency, at most transaction 10 can therefore produce a receipt.
+    assert!(prepared.receipts.len() <= 1);
+    assert_eq!(
+        prepared.metrics.speculative.speculative_results,
+        prepared.receipts.len() as u64
+    );
     assert!(prepared.metrics.dependency_diagnostics.cutoff_reached);
     assert_eq!(
         prepared
@@ -596,18 +603,25 @@ fn consensus_cutoff_stops_new_serial_launches_without_preconsensus_commit() {
             .metrics
             .dependency_diagnostics
             .receipts_completed_after_cutoff,
-        1
+        prepared.receipts.len() as u64
     );
+    if let Some(receipt) = prepared.receipts.first() {
+        assert_eq!(receipt.transaction_id, TransactionId(10));
+    }
     assert!(before.same_world_state(&engine.snapshot()));
     assert_eq!(engine.raw_storage(&contract, b"first"), None);
     assert_eq!(engine.raw_storage(&contract, b"second"), None);
 
+    let prepared_count = prepared.receipts.len() as u64;
     let outcome = engine
         .reconcile_prepared_block(transactions, prepared)
         .unwrap();
-    assert_eq!(outcome.speculative.speculative_results, 1);
-    assert_eq!(outcome.speculative.reused_results, 1);
-    assert_eq!(outcome.speculative.canonical_transactions, 1);
+    assert_eq!(outcome.speculative.speculative_results, prepared_count);
+    assert_eq!(outcome.speculative.reused_results, prepared_count);
+    assert_eq!(
+        outcome.speculative.canonical_transactions,
+        2 - prepared_count
+    );
     assert_eq!(
         engine.raw_storage(&contract, b"first"),
         Some(b"one".to_vec())
@@ -653,7 +667,9 @@ fn consensus_cutoff_stops_parallel_launch_frontier_and_reconciles_remainder() {
         .unwrap();
 
     assert!(prepared.metrics.dependency_diagnostics.cutoff_reached);
-    assert!(!prepared.receipts.is_empty());
+    // As above, the budget includes setup/thread-launch time. Zero receipts is therefore a valid
+    // outcome under host scheduling pressure; what matters is that the launch frontier never
+    // exceeds the two workers that were already in flight when the cutoff became observable.
     assert!(prepared.receipts.len() <= 2);
     assert_eq!(
         prepared.metrics.speculative.speculative_results,

@@ -20,7 +20,9 @@ use acg_candidate_graph::EdgeClass;
 use acg_cosmwasm_engine::{ContractExecutionDiagnostics, ParallelSpeculativeExecutionMetrics};
 use acg_feedback::ApplySummary;
 use acg_runtime_feedback::{AdaptiveBlockPlan, AdaptivePlanningConfig, AdaptivePlanningMetrics};
-use acg_validator_sim::{BlockExecutionReport, SplitPhaseSpeculativeExecutionReport};
+use acg_validator_sim::{
+    BlockExecutionReport, ExecutionPlan, SplitPhaseSpeculativeExecutionReport,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -183,6 +185,40 @@ impl SchedulingRecord {
                     record.soft_dependencies = record.soft_dependencies.saturating_add(1)
                 }
                 EdgeClass::Low => {}
+            }
+        }
+        record
+    }
+
+    /// Build scheduling diagnostics for a non-SymbGraph execution strategy using an explicit
+    /// dependency plan. `concrete_relationships` is the number of observed/oracle conflict pairs
+    /// that informed the strategy; the scheduled dependency count may be smaller.
+    pub fn from_execution_plan(plan: &ExecutionPlan, concrete_relationships: u64) -> Self {
+        let scheduled_dependencies = u64::try_from(plan.dependencies.len()).unwrap_or(u64::MAX);
+        let mut record = Self {
+            candidate_edges: concrete_relationships,
+            materialized_candidate_edges: concrete_relationships,
+            hard_edges: concrete_relationships,
+            pre_reduction_dependencies: scheduled_dependencies,
+            scheduled_dependencies,
+            ordering_dependencies: scheduled_dependencies,
+            wave_count: u64::try_from(plan.waves.len()).unwrap_or(u64::MAX),
+            max_wave_width: plan
+                .waves
+                .iter()
+                .map(|wave| u64::try_from(wave.transaction_indices.len()).unwrap_or(u64::MAX))
+                .max()
+                .unwrap_or(0),
+            ..Self::default()
+        };
+        for dependency in &plan.dependencies {
+            match dependency.class {
+                acg_validator_sim::ExecutionDependencyClass::Hard => {
+                    record.hard_dependencies = record.hard_dependencies.saturating_add(1);
+                }
+                acg_validator_sim::ExecutionDependencyClass::Soft => {
+                    record.soft_dependencies = record.soft_dependencies.saturating_add(1);
+                }
             }
         }
         record
@@ -369,7 +405,7 @@ pub struct ExecutionRecord {
 }
 
 impl ExecutionRecord {
-    fn from_reports(
+    pub fn from_speculative_reports(
         preexecution: &ParallelSpeculativeExecutionMetrics,
         reconciliation: &SplitPhaseSpeculativeExecutionReport,
     ) -> Self {
@@ -414,7 +450,7 @@ impl ExecutionRecord {
         }
     }
 
-    fn from_serial_bypass(
+    pub fn from_serial_execution(
         report: &BlockExecutionReport,
         execution_wall: Duration,
         diagnostics: &ContractExecutionDiagnostics,
@@ -553,6 +589,96 @@ impl ParallelismRecord {
                 .and_then(|observed| ratio_milli(actual_execution_wall_nanos, observed)),
             scheduler_realization_corrected_milli: parallel_lower_bound_nanos
                 .and_then(|bound| ratio_milli(actual_execution_wall_nanos, bound)),
+        }
+    }
+
+    /// Parallelism diagnostics for a baseline that executes an explicit dependency plan.
+    pub fn from_execution_plan(
+        plan: &ExecutionPlan,
+        report: &BlockExecutionReport,
+        metrics: &ParallelSpeculativeExecutionMetrics,
+        reference: ParallelismReference,
+    ) -> Self {
+        let observed_services = service_nanos_by_execution_plan(plan, report);
+        let observed_service_dag_bound_nanos = observed_services
+            .as_ref()
+            .map(|values| dag_bound_from_execution_plan(plan, values));
+        let observed_service_work_nanos = observed_services
+            .as_ref()
+            .map(|values| values.iter().copied().fold(0_u64, u64::saturating_add));
+        let worker_capacity_bound_nanos = observed_service_work_nanos.and_then(|work| {
+            let workers = u64::try_from(metrics.workers).ok()?;
+            ceil_div(work, workers)
+        });
+        let parallel_lower_bound_nanos = match (
+            observed_service_dag_bound_nanos,
+            worker_capacity_bound_nanos,
+        ) {
+            (Some(dag), Some(capacity)) => Some(dag.max(capacity)),
+            (Some(dag), None) => Some(dag),
+            (None, Some(capacity)) => Some(capacity),
+            (None, None) => None,
+        };
+        let actual_execution_wall_nanos = nanos(metrics.dependency_diagnostics.worker_phase_wall);
+        Self {
+            serial_equivalent_work_nanos: reference.serial_equivalent_work_nanos,
+            serial_cost_dag_bound_nanos: reference.serial_cost_dag_bound_nanos,
+            perfect_conflict_dag_bound_nanos: reference.perfect_conflict_dag_bound_nanos,
+            perfect_conflict_parallel_lower_bound_nanos: reference
+                .perfect_conflict_parallel_lower_bound_nanos,
+            observed_service_dag_bound_nanos,
+            observed_service_work_nanos,
+            worker_capacity_bound_nanos,
+            parallel_lower_bound_nanos,
+            actual_execution_wall_nanos,
+            service_inflation_milli: match (
+                observed_service_dag_bound_nanos,
+                reference.serial_cost_dag_bound_nanos,
+            ) {
+                (Some(observed), Some(serial)) => ratio_milli(observed, serial),
+                _ => None,
+            },
+            scheduler_realization_milli: observed_service_dag_bound_nanos
+                .and_then(|observed| ratio_milli(actual_execution_wall_nanos, observed)),
+            scheduler_realization_corrected_milli: parallel_lower_bound_nanos
+                .and_then(|bound| ratio_milli(actual_execution_wall_nanos, bound)),
+        }
+    }
+
+    pub fn from_serial_execution(
+        report: &BlockExecutionReport,
+        execution_wall: Duration,
+        reference: ParallelismReference,
+    ) -> Self {
+        let observed_service_work_nanos = report
+            .transactions
+            .iter()
+            .map(|execution| nanos(execution.timing.service_duration))
+            .fold(0_u64, u64::saturating_add);
+        let actual_execution_wall_nanos = nanos(execution_wall);
+        let observed = Some(observed_service_work_nanos);
+        Self {
+            serial_equivalent_work_nanos: reference.serial_equivalent_work_nanos,
+            serial_cost_dag_bound_nanos: reference.serial_cost_dag_bound_nanos,
+            perfect_conflict_dag_bound_nanos: reference.perfect_conflict_dag_bound_nanos,
+            perfect_conflict_parallel_lower_bound_nanos: reference
+                .perfect_conflict_parallel_lower_bound_nanos,
+            observed_service_dag_bound_nanos: observed,
+            observed_service_work_nanos: observed,
+            worker_capacity_bound_nanos: observed,
+            parallel_lower_bound_nanos: observed,
+            actual_execution_wall_nanos,
+            service_inflation_milli: reference
+                .serial_cost_dag_bound_nanos
+                .and_then(|serial| ratio_milli(observed_service_work_nanos, serial)),
+            scheduler_realization_milli: ratio_milli(
+                actual_execution_wall_nanos,
+                observed_service_work_nanos,
+            ),
+            scheduler_realization_corrected_milli: ratio_milli(
+                actual_execution_wall_nanos,
+                observed_service_work_nanos,
+            ),
         }
     }
 
@@ -777,6 +903,32 @@ pub struct AdaptiveStateRecord {
     pub mean_confidence_q16: u64,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StrategyRecord {
+    /// Stable strategy family used by cross-system/baseline evaluation.
+    pub family: String,
+    /// Human-readable implementation variant. Baselines that intentionally preserve canonical
+    /// decided-order semantics record that distinction here instead of impersonating an upstream
+    /// implementation with different ordering rules.
+    pub implementation: String,
+    /// Whether useful transaction execution occurred before consensus.
+    pub pre_consensus_execution: bool,
+    /// Whether concrete access information came from an evaluation-only hindsight oracle.
+    pub oracle_accesses: bool,
+    /// Transactions whose concrete access footprints were observed during a discovery pass.
+    pub discovery_transactions: u64,
+    /// Concrete conflicting transaction pairs found by discovery/oracle analysis.
+    pub discovered_conflicts: u64,
+    /// Transactions proactively sent to fallback by the AriaFB Rule-2 forward-dependency test.
+    pub forward_conflict_fallbacks: u64,
+    /// Transactions sent to deterministic fallback because replay accessed a different R/W set.
+    pub access_set_mismatch_fallbacks: u64,
+    /// Dependencies supplied to the final dependency-driven execution/replay pass.
+    pub replay_dependencies: u64,
+    /// Wall time of an additional post-consensus parallel replay pass, when a strategy has one.
+    pub replay_parallel_nanos: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExperimentRecord {
     pub schema_version: u16,
@@ -793,6 +945,9 @@ pub struct ExperimentRecord {
     pub pipeline_timing: PipelineTimingRecord,
     #[serde(default)]
     pub consensus: ConsensusExecutionRecord,
+    /// Cross-strategy metadata. Legacy/SymbGraph records leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<StrategyRecord>,
     pub correctness: CorrectnessRecord,
 }
 
@@ -825,12 +980,16 @@ impl ExperimentRecord {
                 preexecution_metrics,
                 parallelism_reference,
             ),
-            execution: ExecutionRecord::from_reports(preexecution_metrics, reconciliation),
+            execution: ExecutionRecord::from_speculative_reports(
+                preexecution_metrics,
+                reconciliation,
+            ),
             feedback: feedback_summary.into(),
             feedback_timing,
             adaptive_state,
             pipeline_timing,
             consensus,
+            strategy: None,
             correctness,
         }
     }
@@ -861,7 +1020,7 @@ impl ExperimentRecord {
                 serial_execution_wall,
                 parallelism_reference,
             ),
-            execution: ExecutionRecord::from_serial_bypass(
+            execution: ExecutionRecord::from_serial_execution(
                 serial_report,
                 serial_execution_wall,
                 serial_contract_diagnostics,
@@ -871,6 +1030,7 @@ impl ExperimentRecord {
             adaptive_state,
             pipeline_timing,
             consensus,
+            strategy: None,
             correctness,
         }
     }
@@ -910,6 +1070,42 @@ impl ExperimentRecord {
         file.write_all(&self.to_json_line()?)?;
         Ok(())
     }
+}
+
+fn service_nanos_by_execution_plan(
+    plan: &ExecutionPlan,
+    report: &BlockExecutionReport,
+) -> Option<Vec<u64>> {
+    if report.transactions.len() != plan.transaction_count {
+        return None;
+    }
+    let mut services = vec![None; plan.transaction_count];
+    for execution in &report.transactions {
+        if execution.transaction_index >= plan.transaction_count
+            || services[execution.transaction_index].is_some()
+        {
+            return None;
+        }
+        services[execution.transaction_index] = Some(nanos(execution.timing.service_duration));
+    }
+    services.into_iter().collect()
+}
+
+fn dag_bound_from_execution_plan(plan: &ExecutionPlan, services: &[u64]) -> u64 {
+    let mut completion = vec![0_u64; services.len()];
+    for wave in &plan.waves {
+        for &transaction in &wave.transaction_indices {
+            let predecessor_completion = plan
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.successor_index == transaction)
+                .map(|dependency| completion[dependency.predecessor_index])
+                .max()
+                .unwrap_or(0);
+            completion[transaction] = predecessor_completion.saturating_add(services[transaction]);
+        }
+    }
+    completion.into_iter().max().unwrap_or(0)
 }
 
 fn service_nanos_by_transaction(

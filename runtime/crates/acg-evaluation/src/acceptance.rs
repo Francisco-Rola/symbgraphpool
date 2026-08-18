@@ -519,6 +519,14 @@ pub fn evaluate_record(
             .parameters
             .get("acg.serial_bypass_buffered_preexecution")
             .is_some_and(|value| value == "true");
+    let canonical_serial_strategy = record
+        .strategy
+        .as_ref()
+        .is_some_and(|strategy| strategy.family == "serial");
+    let post_consensus_only_strategy = record
+        .strategy
+        .as_ref()
+        .is_some_and(|strategy| !strategy.pre_consensus_execution);
     if record.planning.serial_bypassed {
         if record.execution.workers != 1 {
             issues.push(AcceptanceIssue::new(
@@ -526,6 +534,17 @@ pub fn evaluate_record(
                 "serial_bypass_worker_mismatch",
                 format!(
                     "serial bypass must execute with exactly 1 worker, got {}",
+                    record.execution.workers
+                ),
+            ));
+        }
+    } else if canonical_serial_strategy {
+        if record.execution.workers != 1 {
+            issues.push(AcceptanceIssue::new(
+                AcceptanceIssueCategory::ConfigurationError,
+                "serial_strategy_worker_mismatch",
+                format!(
+                    "canonical serial strategy must execute with exactly 1 worker, got {}",
                     record.execution.workers
                 ),
             ));
@@ -627,25 +646,64 @@ pub fn evaluate_record(
                 ),
             ));
         }
-        if record.execution.dependency_count != record.scheduling.scheduled_dependencies {
-            issues.push(AcceptanceIssue::new(
-                AcceptanceIssueCategory::ConfigurationError,
-                "execution_dependency_count_mismatch",
-                format!(
-                    "execution dependency_count {} differs from scheduled_dependencies {}",
-                    record.execution.dependency_count, record.scheduling.scheduled_dependencies
-                ),
-            ));
-        }
-        if record.execution.hard_dependency_count != record.scheduling.hard_dependencies {
-            issues.push(AcceptanceIssue::new(
-                AcceptanceIssueCategory::ConfigurationError,
-                "execution_hard_dependency_count_mismatch",
-                format!(
-                    "execution hard_dependency_count {} differs from hard_dependencies {}",
-                    record.execution.hard_dependency_count, record.scheduling.hard_dependencies
-                ),
-            ));
+        // Most strategies use one dependency plan for both speculative execution and the
+        // reported schedule. Vegeta-like is intentionally split-phase: its pre-consensus
+        // discovery pass is fully parallel (zero execution dependencies), while the concrete
+        // dependencies learned from that pass are supplied to a distinct post-consensus replay
+        // plan. Do not force those two plans to have the same edge count. Instead, validate the
+        // replay-plan count through strategy telemetry and keep the execution counters tied to
+        // the discovery pass they actually measure.
+        let vegeta_like = record
+            .strategy
+            .as_ref()
+            .is_some_and(|strategy| strategy.family == "vegeta-like");
+        if vegeta_like {
+            let strategy = record
+                .strategy
+                .as_ref()
+                .expect("vegeta_like implies strategy telemetry is present");
+            if strategy.replay_dependencies != record.scheduling.scheduled_dependencies {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "vegeta_replay_dependency_count_mismatch",
+                    format!(
+                        "Vegeta-like replay_dependencies {} differs from scheduled_dependencies {}",
+                        strategy.replay_dependencies, record.scheduling.scheduled_dependencies
+                    ),
+                ));
+            }
+            if record.execution.dependency_count != 0 || record.execution.hard_dependency_count != 0
+            {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "vegeta_discovery_dependency_count_nonzero",
+                    format!(
+                        "Vegeta-like discovery pass must be fully parallel, got dependency_count={} hard_dependency_count={}",
+                        record.execution.dependency_count, record.execution.hard_dependency_count
+                    ),
+                ));
+            }
+        } else {
+            if record.execution.dependency_count != record.scheduling.scheduled_dependencies {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "execution_dependency_count_mismatch",
+                    format!(
+                        "execution dependency_count {} differs from scheduled_dependencies {}",
+                        record.execution.dependency_count, record.scheduling.scheduled_dependencies
+                    ),
+                ));
+            }
+            if record.execution.hard_dependency_count != record.scheduling.hard_dependencies {
+                issues.push(AcceptanceIssue::new(
+                    AcceptanceIssueCategory::ConfigurationError,
+                    "execution_hard_dependency_count_mismatch",
+                    format!(
+                        "execution hard_dependency_count {} differs from hard_dependencies {}",
+                        record.execution.hard_dependency_count, record.scheduling.hard_dependencies
+                    ),
+                ));
+            }
         }
         if record.planning.serial_bypassed && record.execution.max_in_flight > 1 {
             issues.push(AcceptanceIssue::new(
@@ -746,7 +804,24 @@ pub fn evaluate_record(
                     "consensus-aware records must report non-zero candidate and decided transaction counts",
                 ));
             }
-            if record.consensus.prepared_receipts != record.execution.speculative_results {
+            // A post-consensus-only baseline may use the speculative executor internally as a
+            // parallel batch engine, but those receipts are not pre-consensus work and must not be
+            // reported as consensus-prepared receipts. SymbGraph, Exact-Access, and Vegeta-like do
+            // pre-consensus execution, so for those strategies the two counts remain identical.
+            if post_consensus_only_strategy {
+                if record.consensus.prepared_receipts != 0
+                    || record.consensus.receipts_ready_by_cutoff != 0
+                    || record.consensus.receipts_completed_after_cutoff != 0
+                    || record.consensus.pre_consensus_nanos != 0
+                    || record.consensus.pre_consensus_overrun_nanos != 0
+                {
+                    issues.push(AcceptanceIssue::new(
+                        AcceptanceIssueCategory::ConfigurationError,
+                        "post_consensus_strategy_reports_preconsensus_work",
+                        "post-consensus-only strategy must report zero consensus-prepared receipts and zero pre-consensus wall time",
+                    ));
+                }
+            } else if record.consensus.prepared_receipts != record.execution.speculative_results {
                 issues.push(AcceptanceIssue::new(
                     AcceptanceIssueCategory::ConfigurationError,
                     "consensus_prepared_receipt_mismatch",

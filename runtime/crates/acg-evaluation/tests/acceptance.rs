@@ -5,7 +5,8 @@ use acg_evaluation::{
     ConsensusExecutionRecord, CorrectnessRecord, ExecutionRecord, ExperimentAcceptanceStatus,
     ExperimentManifest, ExperimentMetadata, ExperimentRecord, FeedbackRecord, FeedbackTimingRecord,
     ParallelismRecord, PerformanceAcceptancePolicy, PipelineTimingRecord, PlanningRecord,
-    RunAcceptanceStatus, RunIdentity, SchedulingRecord, EXPERIMENT_RECORD_SCHEMA_VERSION,
+    RunAcceptanceStatus, RunIdentity, SchedulingRecord, StrategyRecord,
+    EXPERIMENT_RECORD_SCHEMA_VERSION,
 };
 
 fn complete_record() -> ExperimentRecord {
@@ -106,6 +107,7 @@ fn complete_record() -> ExperimentRecord {
             end_to_end_speedup_milli: Some(3_571),
         },
         consensus: ConsensusExecutionRecord::default(),
+        strategy: None,
         correctness: CorrectnessRecord {
             canonical_state_digest: Some("same-state".to_owned()),
             serial_reference_digest: Some("same-state".to_owned()),
@@ -351,6 +353,131 @@ fn schema_v2_plus_acceptance_requires_consistent_reduction_and_worker_bound_metr
         .issues
         .iter()
         .any(|issue| issue.code == "missing_corrected_scheduler_realization"));
+}
+
+#[test]
+fn schema_v3_acceptance_understands_vegeta_split_discovery_and_replay_plans() {
+    let mut record = complete_record();
+    record.metadata.mode = "vegeta".to_owned();
+    record.execution.dependency_count = 0;
+    record.execution.hard_dependency_count = 0;
+    record.strategy = Some(StrategyRecord {
+        family: "vegeta-like".to_owned(),
+        implementation: "speculate-order-replay;canonical-order-no-rule1-reordering".to_owned(),
+        pre_consensus_execution: true,
+        replay_dependencies: record.scheduling.scheduled_dependencies,
+        ..StrategyRecord::default()
+    });
+    let manifest = manifest_for(&record);
+    let report = manifest.evaluate(std::slice::from_ref(&record));
+    assert!(report.accepted(), "{:#?}", report.run_reports[0].issues);
+
+    let mut bad_replay = record.clone();
+    bad_replay.strategy.as_mut().unwrap().replay_dependencies = bad_replay
+        .scheduling
+        .scheduled_dependencies
+        .saturating_sub(1);
+    let manifest = manifest_for(&bad_replay);
+    let report = manifest.evaluate(&[bad_replay]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "vegeta_replay_dependency_count_mismatch"));
+
+    let mut bad_discovery = record;
+    bad_discovery.execution.dependency_count = 1;
+    let manifest = manifest_for(&bad_discovery);
+    let report = manifest.evaluate(&[bad_discovery]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "vegeta_discovery_dependency_count_nonzero"));
+}
+
+#[test]
+fn schema_v3_acceptance_understands_canonical_serial_strategy_worker_count() {
+    let mut record = complete_record();
+    record.metadata.mode = "serial".to_owned();
+    record.execution.workers = 1;
+    record.execution.max_in_flight = 1;
+    record.strategy = Some(StrategyRecord {
+        family: "serial".to_owned(),
+        implementation: "canonical-decided-order".to_owned(),
+        ..StrategyRecord::default()
+    });
+    let manifest = manifest_for(&record);
+
+    let report = manifest.evaluate(std::slice::from_ref(&record));
+    assert!(report.accepted(), "{:#?}", report.run_reports[0].issues);
+
+    let mut invalid = record;
+    invalid.execution.workers = 2;
+    let manifest = manifest_for(&invalid);
+    let report = manifest.evaluate(&[invalid]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "serial_strategy_worker_mismatch"));
+}
+
+#[test]
+fn schema_v3_acceptance_distinguishes_post_consensus_batch_receipts() {
+    let mut record = complete_record();
+    record.metadata.mode = "aria-fb".to_owned();
+    record.strategy = Some(StrategyRecord {
+        family: "aria-fb".to_owned(),
+        implementation: "rule2-forward-fallback+canonical-readset-validation".to_owned(),
+        pre_consensus_execution: false,
+        ..StrategyRecord::default()
+    });
+    record.consensus = ConsensusExecutionRecord {
+        cutoff_nanos: 5_000_000_000,
+        candidate_transactions: 200,
+        decided_transactions: 200,
+        shared_transactions: 200,
+        same_position_transactions: 200,
+        common_prefix_transactions: 200,
+        prepared_receipts: 0,
+        successful_preexecution_receipts: Some(0),
+        failed_preexecution_receipts: Some(0),
+        receipts_ready_by_cutoff: 0,
+        receipts_completed_after_cutoff: 0,
+        pre_consensus_nanos: 0,
+        pre_consensus_overrun_nanos: 0,
+        post_consensus_nanos: 2_800_000,
+        bottleneck_nanos: 2_800_000,
+        ..ConsensusExecutionRecord::default()
+    };
+    let manifest = manifest_for(&record);
+
+    let report = manifest.evaluate(std::slice::from_ref(&record));
+    assert!(report.accepted(), "{:#?}", report.run_reports[0].issues);
+
+    let mut invalid = record;
+    invalid.consensus.prepared_receipts = 1;
+    invalid.consensus.receipts_ready_by_cutoff = 1;
+    let manifest = manifest_for(&invalid);
+    let report = manifest.evaluate(&[invalid]);
+    assert_eq!(
+        report.status,
+        ExperimentAcceptanceStatus::ConfigurationError
+    );
+    assert!(report.run_reports[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "post_consensus_strategy_reports_preconsensus_work"));
 }
 
 #[test]

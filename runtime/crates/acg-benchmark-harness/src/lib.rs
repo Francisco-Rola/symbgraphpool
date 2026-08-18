@@ -9,6 +9,7 @@
 //! The harness is performance/evaluation infrastructure only. It never changes canonical validity
 //! or commit semantics.
 
+mod baselines;
 mod conflictlab;
 
 use std::{
@@ -26,9 +27,10 @@ use acg_cosmwasm_adapter::{CosmWasmAdapterConfig, CosmWasmCandidateAdapter};
 use acg_cosmwasm_engine::{ContractExecutionDiagnostics, CosmWasmEngine, ParallelExecutionConfig};
 use acg_evaluation::{
     AcceptanceError, AdaptiveStateRecord, ConsensusExecutionRecord, CorrectnessRecord,
-    ExperimentAcceptanceReport, ExperimentManifest, ExperimentMetadata, ExperimentRecord,
-    ExperimentRecordError, FeedbackTimingRecord, ParallelismReference, PipelineTimingRecord,
-    RunIdentity,
+    ExecutionRecord, ExperimentAcceptanceReport, ExperimentManifest, ExperimentMetadata,
+    ExperimentRecord, ExperimentRecordError, FeedbackRecord, FeedbackTimingRecord,
+    ParallelismRecord, ParallelismReference, PipelineTimingRecord, PlanningRecord, RunIdentity,
+    SchedulingRecord, EXPERIMENT_RECORD_SCHEMA_VERSION,
 };
 use acg_feedback::{AdaptiveFeedbackConfig, ApplySummary};
 use acg_profile_graph::ProfileGraph;
@@ -44,9 +46,11 @@ use acg_validator_sim::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use baselines::ExecutionStrategy;
+use baselines::{BaselineExecutionContext, BaselineMeasuredExecution};
 pub use conflictlab::ConflictLabWorkload;
 
-pub const BENCHMARK_HARNESS_SCHEMA_VERSION: u16 = 2;
+pub const BENCHMARK_HARNESS_SCHEMA_VERSION: u16 = 3;
 
 /// Built-in speculative policy ablations supported by the common harness.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -227,15 +231,34 @@ impl BenchmarkHarness {
             .registry
             .get(&run.workload)
             .ok_or_else(|| HarnessError::UnknownWorkload(run.workload.clone()))?;
-        let mode = HarnessMode::parse(&run.mode)?;
+        let strategy = ExecutionStrategy::parse(&run.mode)?;
         let tuning = HarnessTuningConfig::from_parameters(&run.parameters)?;
 
         let serial = workload.prepare(run)?;
         let adaptive = workload.prepare(run)?;
         ensure_deterministic_preparation(serial.as_ref(), adaptive.as_ref())?;
 
-        let serial_reference = run_serial_reference(serial.as_ref())?;
+        let serial_reference =
+            run_serial_reference(serial.as_ref(), strategy == ExecutionStrategy::ExactAccess)?;
         let serial_state = serial.canonical_state_bytes()?;
+
+        if strategy.is_baseline() {
+            return run_baseline_strategy(BaselineRunContext {
+                manifest,
+                run,
+                repo_root: &self.repo_root,
+                workload_name: workload.name(),
+                serial: serial.as_ref(),
+                adaptive: adaptive.as_ref(),
+                serial_reference: &serial_reference,
+                serial_state: &serial_state,
+                strategy,
+                tuning,
+            });
+        }
+        let mode = strategy
+            .adaptive_mode()
+            .expect("non-baseline execution strategy must map to a SymbGraph mode");
 
         let graph = adaptive.profile_graph();
         let engine = adaptive.engine();
@@ -448,6 +471,223 @@ impl BenchmarkHarness {
         };
         Ok(record)
     }
+}
+
+struct BaselineRunContext<'a> {
+    manifest: &'a ExperimentManifest,
+    run: &'a RunIdentity,
+    repo_root: &'a Path,
+    workload_name: &'static str,
+    serial: &'a dyn PreparedBenchmark,
+    adaptive: &'a dyn PreparedBenchmark,
+    serial_reference: &'a SerialReference,
+    serial_state: &'a [u8],
+    strategy: ExecutionStrategy,
+    tuning: HarnessTuningConfig,
+}
+
+fn run_baseline_strategy(
+    context: BaselineRunContext<'_>,
+) -> Result<ExperimentRecord, HarnessError> {
+    let BaselineRunContext {
+        manifest,
+        run,
+        repo_root,
+        workload_name,
+        serial,
+        adaptive,
+        serial_reference,
+        serial_state,
+        strategy,
+        tuning,
+    } = context;
+    if adaptive.warmup_blocks().len() != adaptive.warmup_decided_blocks().len() {
+        return Err(HarnessError::NonDeterministicTransactions);
+    }
+    if strategy == ExecutionStrategy::ExactAccess
+        && adaptive.warmup_blocks().len() != serial_reference.warmup_reports.len()
+    {
+        return Err(HarnessError::NonDeterministicTransactions);
+    }
+    let workers = usize::try_from(run.workers).map_err(|_| HarnessError::NumericOverflow)?;
+    for (warmup_index, (predicted, decided)) in adaptive
+        .warmup_blocks()
+        .iter()
+        .zip(adaptive.warmup_decided_blocks())
+        .enumerate()
+    {
+        let oracle_report = if strategy == ExecutionStrategy::ExactAccess {
+            serial_reference.warmup_reports.get(warmup_index)
+        } else {
+            None
+        };
+        baselines::execute_baseline_block(BaselineExecutionContext {
+            strategy,
+            engine: adaptive.engine(),
+            workers,
+            predicted_block: predicted,
+            decided_block: decided,
+            oracle_report,
+            trace_config: tuning.trace_config,
+            consensus_cutoff: tuning.consensus_cutoff,
+            measured: false,
+        })?;
+    }
+
+    let measured = baselines::execute_baseline_block(BaselineExecutionContext {
+        strategy,
+        engine: adaptive.engine(),
+        workers,
+        predicted_block: adaptive.measured_block(),
+        decided_block: adaptive.measured_decided_block(),
+        oracle_report: Some(&serial_reference.report),
+        trace_config: tuning.trace_config,
+        consensus_cutoff: tuning.consensus_cutoff,
+        measured: true,
+    })?
+    .ok_or(HarnessError::MissingMeasuredArtifacts)?;
+
+    let adaptive_state_bytes = adaptive.canonical_state_bytes()?;
+    let correctness = CorrectnessRecord::from_state_bytes(&adaptive_state_bytes, serial_state);
+    if correctness.serial_equivalent == Some(false) {
+        maybe_write_correctness_diagnostics(
+            manifest,
+            run,
+            serial,
+            adaptive,
+            serial_state,
+            &adaptive_state_bytes,
+            &correctness,
+        )?;
+    }
+
+    let serial_services = serial_services(&serial_reference.report)?;
+    let serial_equivalent_work_nanos = nanos(serial_reference.wall);
+    let concrete_conflicts = AccessConflictDetector::new(tuning.trace_config)
+        .detect(&serial_reference.report)
+        .map_err(display_error)?;
+    let perfect_conflict_dag_bound_nanos =
+        concrete_conflict_dag_bound(&serial_services, &concrete_conflicts)?;
+    let worker_count = u64::from(run.workers).max(1);
+    let perfect_worker_capacity_bound_nanos = ceil_div_u64(
+        serial_services
+            .iter()
+            .copied()
+            .fold(0_u64, u64::saturating_add),
+        worker_count,
+    );
+    let perfect_conflict_parallel_lower_bound_nanos =
+        perfect_conflict_dag_bound_nanos.max(perfect_worker_capacity_bound_nanos);
+    let serial_cost_dag_bound_nanos = Some(execution_plan_dag_bound(
+        &measured.parallelism_plan,
+        &serial_services,
+    ));
+    let parallelism_reference = ParallelismReference {
+        serial_equivalent_work_nanos: Some(serial_equivalent_work_nanos),
+        serial_cost_dag_bound_nanos,
+        perfect_conflict_dag_bound_nanos: Some(perfect_conflict_dag_bound_nanos),
+        perfect_conflict_parallel_lower_bound_nanos: Some(
+            perfect_conflict_parallel_lower_bound_nanos,
+        ),
+    };
+
+    let mut metadata = ExperimentMetadata {
+        experiment_id: manifest.experiment_id.clone(),
+        workload: run.workload.clone(),
+        mode: run.mode.clone(),
+        run_index: run.run_index,
+        seed: run.seed,
+        workers: run.workers,
+        physical_cores: manifest.physical_core_limit,
+        parameters: run.parameters.clone(),
+        ..ExperimentMetadata::default()
+    }
+    .capture_standard_environment(repo_root);
+    metadata.environment.insert(
+        "benchmark_harness_schema".to_owned(),
+        BENCHMARK_HARNESS_SCHEMA_VERSION.to_string(),
+    );
+    metadata
+        .environment
+        .insert("benchmark_adapter".to_owned(), workload_name.to_owned());
+    metadata.environment.insert(
+        "execution_strategy".to_owned(),
+        measured.strategy.family.clone(),
+    );
+    metadata.environment.insert(
+        "baseline_semantics".to_owned(),
+        "canonical-decided-order".to_owned(),
+    );
+    metadata.environment.extend(adaptive.environment_metadata());
+
+    let planning = PlanningRecord {
+        scheduler_nanos: nanos(measured.planning_wall),
+        total_nanos: nanos(measured.planning_wall),
+        ..PlanningRecord::default()
+    };
+    let scheduling = SchedulingRecord::from_execution_plan(
+        &measured.scheduling_plan,
+        measured.concrete_relationships,
+    );
+    let pipeline_timing = PipelineTimingRecord::from_durations(
+        measured.planning_wall,
+        measured.preexecution_wall,
+        Duration::ZERO,
+        measured.reconciliation_wall,
+        Duration::ZERO,
+        measured.total_wall,
+    )
+    .with_serial_reference(serial_reference.wall);
+    let consensus = measured
+        .consensus
+        .with_serial_reference(serial_reference.wall);
+
+    let (parallelism, mut execution) = match &measured.execution {
+        BaselineMeasuredExecution::Serial(execution) => (
+            ParallelismRecord::from_serial_execution(
+                &execution.report,
+                execution.wall,
+                parallelism_reference,
+            ),
+            ExecutionRecord::from_serial_execution(
+                &execution.report,
+                execution.wall,
+                &execution.diagnostics,
+            ),
+        ),
+        BaselineMeasuredExecution::Speculative(execution) => (
+            ParallelismRecord::from_execution_plan(
+                &measured.parallelism_plan,
+                &execution.preexecution_report,
+                &execution.preexecution_metrics,
+                parallelism_reference,
+            ),
+            ExecutionRecord::from_speculative_reports(
+                &execution.preexecution_metrics,
+                &execution.reconciliation,
+            ),
+        ),
+    };
+    // The generic speculative record only sees the final reconciliation object. For order-execute
+    // and speculate-order-replay baselines, include any parallel replay/batch work in the actual
+    // post-consensus critical path reported by the strategy runner.
+    execution.post_consensus_total_nanos = consensus.post_consensus_nanos;
+
+    Ok(ExperimentRecord {
+        schema_version: EXPERIMENT_RECORD_SCHEMA_VERSION,
+        metadata,
+        planning,
+        scheduling,
+        parallelism,
+        execution,
+        feedback: FeedbackRecord::default(),
+        feedback_timing: FeedbackTimingRecord::default(),
+        adaptive_state: AdaptiveStateRecord::default(),
+        pipeline_timing,
+        consensus,
+        strategy: Some(measured.strategy),
+        correctness,
+    })
 }
 
 pub struct HarnessOutcome {
@@ -1193,6 +1433,7 @@ fn estimated_serial_service_nanos(
 }
 
 struct SerialReference {
+    warmup_reports: Vec<BlockExecutionReport>,
     report: BlockExecutionReport,
     wall: Duration,
 }
@@ -1267,12 +1508,23 @@ fn maybe_write_correctness_diagnostics(
     Ok(())
 }
 
-fn run_serial_reference(prepared: &dyn PreparedBenchmark) -> Result<SerialReference, HarnessError> {
+fn run_serial_reference(
+    prepared: &dyn PreparedBenchmark,
+    retain_warmup_reports: bool,
+) -> Result<SerialReference, HarnessError> {
     let executor = acg_validator_sim::SerialBlockExecutor::new(prepared.engine().clone());
+    let mut warmup_reports = if retain_warmup_reports {
+        Vec::with_capacity(prepared.warmup_decided_blocks().len())
+    } else {
+        Vec::new()
+    };
     for block in prepared.warmup_decided_blocks() {
-        executor
+        let report = executor
             .execute(block, &canonical_serial_plan(block.transactions.len()))
             .map_err(display_error)?;
+        if retain_warmup_reports {
+            warmup_reports.push(report);
+        }
     }
     let block = prepared.measured_decided_block();
     let started = Instant::now();
@@ -1280,6 +1532,7 @@ fn run_serial_reference(prepared: &dyn PreparedBenchmark) -> Result<SerialRefere
         .execute(block, &canonical_serial_plan(block.transactions.len()))
         .map_err(display_error)?;
     Ok(SerialReference {
+        warmup_reports,
         report,
         wall: started.elapsed(),
     })
@@ -1314,6 +1567,23 @@ fn ensure_deterministic_preparation(
         return Err(HarnessError::NonDeterministicInitialState);
     }
     Ok(())
+}
+
+fn execution_plan_dag_bound(plan: &ExecutionPlan, services: &[u64]) -> u64 {
+    let mut completion = vec![0_u64; services.len()];
+    for wave in &plan.waves {
+        for &transaction in &wave.transaction_indices {
+            let predecessor_completion = plan
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.successor_index == transaction)
+                .map(|dependency| completion[dependency.predecessor_index])
+                .max()
+                .unwrap_or(0);
+            completion[transaction] = predecessor_completion.saturating_add(services[transaction]);
+        }
+    }
+    completion.into_iter().max().unwrap_or(0)
 }
 
 fn serial_services(report: &BlockExecutionReport) -> Result<Vec<u64>, HarnessError> {
@@ -1558,7 +1828,7 @@ fn display_error(error: impl std::fmt::Display) -> HarnessError {
 pub enum HarnessError {
     #[error("unknown benchmark workload {0:?}; register a workload adapter before running it")]
     UnknownWorkload(String),
-    #[error("unsupported benchmark mode {0:?}; supported modes are static, probability-only, cost-aware")]
+    #[error("unsupported benchmark mode {0:?}; supported modes are serial, aria-fb, vegeta, exact-access, static, probability-only, cost-aware")]
     UnsupportedMode(String),
     #[error("run requests {workers} workers with a physical-core limit of {physical_cores}")]
     WorkerBudget { workers: u32, physical_cores: u32 },

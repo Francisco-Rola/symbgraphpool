@@ -197,26 +197,14 @@ fn compaction_reference_normalizes_adaptive_warmup_before_measured_toggle() {
         dense.scheduling.scheduled_dependencies,
         compact.scheduling.scheduled_dependencies
     );
-    assert_eq!(
-        dense.feedback.positive_observations,
-        compact.feedback.positive_observations
-    );
-    assert_eq!(
-        dense.feedback.negative_observations,
-        compact.feedback.negative_observations
-    );
-    assert_eq!(
-        dense.feedback.candidate_misses,
-        compact.feedback.candidate_misses
-    );
-    assert_eq!(
-        dense.adaptive_state.mean_probability_q16,
-        compact.adaptive_state.mean_probability_q16
-    );
-    assert_eq!(
-        dense.adaptive_state.mean_confidence_q16,
-        compact.adaptive_state.mean_confidence_q16
-    );
+    // The measured compact and dense runs start from the same deterministic single-worker
+    // warm-up checkpoint, so their *pre-execution* planning/scheduling decisions above must
+    // match. Do not require their post-execution feedback/posterior snapshots to match: the
+    // measured block runs with the configured parallel worker count, and completion-order
+    // differences can legitimately change adaptive feedback attribution even when the logical
+    // candidate classes, READY-DAG, canonical result, and safety behavior are equivalent.
+    // Same-report compact/dense feedback equivalence is covered deterministically in
+    // acg-runtime-feedback's `compact_and_dense_aggregated_feedback_match_on_the_same_execution_report`.
     assert!(
         compact.scheduling.materialized_candidate_edges
             < dense.scheduling.materialized_candidate_edges
@@ -926,4 +914,72 @@ fn conflictlab_mixed_complexity_is_deterministic_and_reported() {
             .map(String::as_str),
         Some("33-34-33")
     );
+}
+
+#[test]
+fn common_harness_runs_serial_ariafb_vegeta_and_exact_access_baselines() {
+    let mut runs = vec![
+        run("serial", 101),
+        run("aria-fb", 102),
+        run("vegeta", 103),
+        run("exact-access", 104),
+    ];
+    for identity in &mut runs {
+        identity
+            .parameters
+            .insert("consensus_cutoff_ms".to_owned(), "5000".to_owned());
+    }
+    let harness = BenchmarkHarness::with_builtin_workloads(repo_root());
+    let outcome = harness.run_manifest(&smoke_manifest(runs)).unwrap();
+    assert_eq!(outcome.records.len(), 4);
+    assert!(
+        outcome.acceptance.accepted(),
+        "baseline smoke acceptance failed: {:#?}",
+        outcome.acceptance.run_reports
+    );
+
+    for record in &outcome.records {
+        assert_eq!(record.correctness.serial_equivalent, Some(true));
+        assert_eq!(
+            record.correctness.canonical_state_digest,
+            record.correctness.serial_reference_digest
+        );
+        assert!(record.strategy.is_some());
+        assert_eq!(record.feedback.positive_observations, 0);
+        assert_eq!(record.feedback.negative_observations, 0);
+        assert!(record
+            .pipeline_timing
+            .serial_reference_execution_nanos
+            .is_some());
+    }
+
+    let serial = &outcome.records[0];
+    assert_eq!(serial.strategy.as_ref().unwrap().family, "serial");
+    assert_eq!(serial.execution.workers, 1);
+    assert_eq!(serial.execution.speculative_results, 0);
+
+    let aria = &outcome.records[1];
+    assert_eq!(aria.strategy.as_ref().unwrap().family, "aria-fb");
+    assert!(!aria.strategy.as_ref().unwrap().pre_consensus_execution);
+    assert!(aria.strategy.as_ref().unwrap().discovered_conflicts > 0);
+    assert!(aria.strategy.as_ref().unwrap().forward_conflict_fallbacks > 0);
+    assert_eq!(aria.consensus.prepared_receipts, 0);
+    assert_eq!(aria.consensus.pre_consensus_nanos, 0);
+    let aria_stage_total = aria
+        .pipeline_timing
+        .planning_nanos
+        .saturating_add(aria.pipeline_timing.preexecution_nanos)
+        .saturating_add(aria.pipeline_timing.reconciliation_nanos);
+    assert!(aria.pipeline_timing.total_adaptive_block_nanos >= aria_stage_total);
+
+    let vegeta = &outcome.records[2];
+    assert_eq!(vegeta.strategy.as_ref().unwrap().family, "vegeta-like");
+    assert!(vegeta.strategy.as_ref().unwrap().pre_consensus_execution);
+    assert!(vegeta.strategy.as_ref().unwrap().discovered_conflicts > 0);
+    assert!(vegeta.strategy.as_ref().unwrap().replay_dependencies > 0);
+
+    let exact = &outcome.records[3];
+    assert_eq!(exact.strategy.as_ref().unwrap().family, "exact-access");
+    assert!(exact.strategy.as_ref().unwrap().oracle_accesses);
+    assert_eq!(exact.execution.replayed_transactions, 0);
 }

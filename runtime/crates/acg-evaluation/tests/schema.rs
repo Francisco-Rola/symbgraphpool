@@ -81,6 +81,7 @@ fn record() -> ExperimentRecord {
             end_to_end_speedup_milli: Some(1_250),
         },
         consensus: ConsensusExecutionRecord::default(),
+        strategy: None,
         correctness: CorrectnessRecord {
             canonical_state_digest: Some("abc".to_owned()),
             serial_reference_digest: Some("abc".to_owned()),
