@@ -1,0 +1,13 @@
+[package]
+name = "acg-vegeta-native-s3-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+acg-cosmwasm-engine.workspace = true
+cosmwasm-std.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true

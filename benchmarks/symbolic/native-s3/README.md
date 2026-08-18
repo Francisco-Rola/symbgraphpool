@@ -1,20 +1,20 @@
-# Native S3 symbolic-analysis slots
+# Vegeta S3 source-derived symbolic analyses
 
-This directory is reserved for the **genuine LLM-generated symbolic analyses** consumed by
-SymbGraphPool for the seven native code families frozen in
-`evaluation/vegeta/s3-native-family-map.v1.json`.
+The ten JSON artifacts in this directory are the production-format symbolic analyses for the real
+native S3 CosmWasm sources under `benchmarks/contracts/native-s3/`.
 
-The native S3 planner intentionally references the following paths before they exist:
+Each artifact uses schema `3.1-compact-config-field-groups` and includes an
+`analysis_provenance` record with:
 
-- `cw20-base.symbolic.json`
-- `controlled-cw20.symbolic.json`
-- `fee-token-cw20.symbolic.json`
-- `astroport-pair.symbolic.json`
-- `wrapped-native-token.symbolic.json`
-- `cw721-mintable.symbolic.json`
-- `xen-like.symbolic.json`
+- `method = llm-source-derived`;
+- the SHA-256 of the complete checked-in source file;
+- an explicit statement that historical Ethereum trace keys were not analyzer inputs.
 
-Do **not** create synthetic placeholder profiles just to make the execution gate pass. Each file
-must be generated from the real native CosmWasm source in the same production format as the existing
-LLM symbolic-analysis artifacts. Translation/preflight evaluation is allowed while these slots are
-missing; production SymbGraph evaluation is not.
+Every access also contains line-scoped source evidence. `validate-native-s3-implementation.py`
+fails if a source hash changes, an evidence snippet no longer matches its declared lines, a required
+profile disappears, or a native source contains the old trace-oracle array names. This makes source
+changes require an intentional symbolic-analysis refresh rather than silently using stale profiles.
+
+The seven conflict-dominant families are frozen by
+`evaluation/vegeta/s3-native-family-map.v1.json`. `cw1155-like`, `marketplace-router`, and
+`operator-filter-helper` are selector-granular semantic extensions from the final background pass.

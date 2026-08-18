@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s3",
+  "status": "implemented-source-derived-symbolic",
+  "methodology": [
+    "Each native code family is a real standalone CosmWasm contract with concrete storage semantics.",
+    "Each symbolic artifact was derived from the complete checked-in native source and records the source SHA-256 plus line-scoped evidence.",
+    "Historical Ethereum concrete read/write keys are forbidden as symbolic-analysis inputs and are not embedded in these contracts or artifacts.",
+    "Candidate extension families are workload analogues for the observed selector semantics; they are not claims of byte-for-byte Ethereum application equivalence."
+  ],
+  "families": [
+    {
+      "native_code_family": "cw20-base",
+      "package": "acg-benchmark-native-s3-cw20-base",
+      "source": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw20-base.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_cw20_base.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "execute::Burn",
+        "query::Balance",
+        "query::Allowance",
+        "query::TotalSupply",
+        "query::Decimals"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "controlled-cw20",
+      "package": "acg-benchmark-native-s3-controlled-cw20",
+      "source": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/controlled-cw20.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_controlled_cw20.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "query::Balance",
+        "query::Allowance",
+        "query::TotalSupply"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "fee-token-cw20",
+      "package": "acg-benchmark-native-s3-fee-token-cw20",
+      "source": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/fee-token-cw20.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_fee_token_cw20.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "execute::SetPolicy",
+        "query::Balance",
+        "query::Allowance",
+        "query::TotalSupply"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "wrapped-native-token",
+      "package": "acg-benchmark-native-s3-wrapped-native-token",
+      "source": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/wrapped-native-token.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_wrapped_native_token.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Deposit",
+        "execute::Withdraw",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "query::Balance"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "cw721-mintable",
+      "package": "acg-benchmark-native-s3-cw721-mintable",
+      "source": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw721-mintable.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_cw721_mintable.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Mint",
+        "execute::TransferNft",
+        "execute::SendOrSafeTransferNft",
+        "execute::ApproveNft",
+        "execute::ApproveAll",
+        "query::OwnerOf",
+        "query::TokensByOwnerCount"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "astroport-pair",
+      "package": "acg-benchmark-native-s3-astroport-pair",
+      "source": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/astroport-pair.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_astroport_pair.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Swap",
+        "execute::MintLiquidity",
+        "execute::BurnLiquidity",
+        "execute::Sync",
+        "query::GetReserves",
+        "query::LpBalance"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "xen-like",
+      "package": "acg-benchmark-native-s3-xen-like",
+      "source": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/xen-like.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_xen_like.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ClaimRank",
+        "execute::ClaimMintReward",
+        "execute::ClaimMintRewardAndShare",
+        "execute::Stake",
+        "execute::Withdraw",
+        "execute::Transfer",
+        "query::Balance"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "cw1155-like",
+      "package": "acg-benchmark-native-s3-cw1155-like",
+      "source": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw1155-like.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_cw1155_like.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Mint",
+        "execute::SendFrom",
+        "execute::ApproveAll",
+        "query::Balance"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "marketplace-router",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::RegisterOrder",
+        "execute::FulfillOrder",
+        "execute::CancelOrder",
+        "execute::IncrementCounter",
+        "query::GetOrderStatus",
+        "query::GetCounter"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "operator-filter-helper",
+      "package": "acg-benchmark-native-s3-operator-filter-helper",
+      "source": "benchmarks/contracts/native-s3/operator-filter-helper/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/operator-filter-helper.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_operator_filter_helper.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::RegisterAndSubscribe",
+        "execute::SetOperatorAllowed",
+        "query::IsOperatorAllowed"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    }
+  ]
+}

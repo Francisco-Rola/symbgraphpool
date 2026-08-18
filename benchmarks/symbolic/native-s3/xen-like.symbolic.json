@@ -1,0 +1,472 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "xen-like",
+  "source": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+  "analysis_provenance": {
+    "method": "llm-source-derived",
+    "source_sha256": "d9926aba54e54be5a92078a26235d7c8fb2bafc552e171796b09c0b65ac91764",
+    "source_scope": "complete native contract source",
+    "historical_trace_keys_used": false,
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+  },
+  "storage_resources": {
+    "GLOBAL": {
+      "key_semantic_name": "singleton"
+    },
+    "USER_MINTS": {
+      "key_semantic_name": "address"
+    },
+    "USER_STAKES": {
+      "key_semantic_name": "address"
+    },
+    "BALANCES": {
+      "key_semantic_name": "address"
+    }
+  },
+  "dependency_kinds": {
+    "input": "depends only on message/sender/environment input",
+    "state": "depends only on stored state",
+    "input_and_state": "depends on both input and stored state",
+    "none": "unconditional"
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "msg.genesis_ts"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "GLOBAL",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{GLOBAL.save(deps.storage,&Global{genesis_ts:msg.genesis_ts,global_rank:1,total_supply:Uint128::zero(),total_staked:Uint128::zero()})?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ClaimRank",
+      "input_parameters": [
+        "info.sender",
+        "term_days",
+        "env.block.time"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "USER_MINTS",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn claim_rank(deps:DepsMut,env:Env,user:Addr,term:u64)->Result<Response,ContractError>{if USER_MINTS.may_load(deps.storage,user.as_str())?.is_some(){return Err(ContractError::ActiveMint)};let mut g=GLOBAL.load(deps.storage)?;let rank=g.global_rank;g.global_rank=g.global_rank.saturating_add(1);GLOBAL.save(deps.storage,&g)?;USER_MINTS.save(deps.storage,user.as_str(),&MintRecord{rank,maturity:env.block.time.seconds().saturating_add(term.saturating_mul(86_400))})?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "GLOBAL",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn claim_rank(deps:DepsMut,env:Env,user:Addr,term:u64)->Result<Response,ContractError>{if USER_MINTS.may_load(deps.storage,user.as_str())?.is_some(){return Err(ContractError::ActiveMint)};let mut g=GLOBAL.load(deps.storage)?;let rank=g.global_rank;g.global_rank=g.global_rank.saturating_add(1);GLOBAL.save(deps.storage,&g)?;USER_MINTS.save(deps.storage,user.as_str(),&MintRecord{rank,maturity:env.block.time.seconds().saturating_add(term.saturating_mul(86_400))})?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "GLOBAL",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "no active mint",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn claim_rank(deps:DepsMut,env:Env,user:Addr,term:u64)->Result<Response,ContractError>{if USER_MINTS.may_load(deps.storage,user.as_str())?.is_some(){return Err(ContractError::ActiveMint)};let mut g=GLOBAL.load(deps.storage)?;let rank=g.global_rank;g.global_rank=g.global_rank.saturating_add(1);GLOBAL.save(deps.storage,&g)?;USER_MINTS.save(deps.storage,user.as_str(),&MintRecord{rank,maturity:env.block.time.seconds().saturating_add(term.saturating_mul(86_400))})?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "USER_MINTS",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "no active mint",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn claim_rank(deps:DepsMut,env:Env,user:Addr,term:u64)->Result<Response,ContractError>{if USER_MINTS.may_load(deps.storage,user.as_str())?.is_some(){return Err(ContractError::ActiveMint)};let mut g=GLOBAL.load(deps.storage)?;let rank=g.global_rank;g.global_rank=g.global_rank.saturating_add(1);GLOBAL.save(deps.storage,&g)?;USER_MINTS.save(deps.storage,user.as_str(),&MintRecord{rank,maturity:env.block.time.seconds().saturating_add(term.saturating_mul(86_400))})?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ClaimMintReward",
+      "input_parameters": [
+        "info.sender",
+        "env.block.time"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "USER_MINTS",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn claim_reward(deps:DepsMut,env:Env,user:Addr,share:Option<(String,u8)>)->Result<Response,ContractError>{let m=USER_MINTS.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;if env.block.time.seconds()<m.maturity{return Err(ContractError::MintNotMature)};let g=GLOBAL.load(deps.storage)?;let reward=Uint128::new((g.global_rank.saturating_sub(m.rank).saturating_add(1)) as u128*1_000);USER_MINTS.remove(deps.storage,user.as_str());if let Some((other,pct))=share{let other=deps.api.addr_validate(&other)?;let other_amount=reward.multiply_ratio(pct as u128,100u128);credit(deps.storage,other.as_str(),other_amount)?;credit(deps.storage,user.as_str(),reward.checked_sub(other_amount).map_err(StdError::overflow)?)?;}else{credit(deps.storage,user.as_str(),reward)?;}GLOBAL.update(deps.storage,|mut x|->StdResult<_>{x.total_supply=x.total_supply.checked_add(reward).map_err(StdError::overflow)?;Ok(x)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "GLOBAL",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "mint mature",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn claim_reward(deps:DepsMut,env:Env,user:Addr,share:Option<(String,u8)>)->Result<Response,ContractError>{let m=USER_MINTS.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;if env.block.time.seconds()<m.maturity{return Err(ContractError::MintNotMature)};let g=GLOBAL.load(deps.storage)?;let reward=Uint128::new((g.global_rank.saturating_sub(m.rank).saturating_add(1)) as u128*1_000);USER_MINTS.remove(deps.storage,user.as_str());if let Some((other,pct))=share{let other=deps.api.addr_validate(&other)?;let other_amount=reward.multiply_ratio(pct as u128,100u128);credit(deps.storage,other.as_str(),other_amount)?;credit(deps.storage,user.as_str(),reward.checked_sub(other_amount).map_err(StdError::overflow)?)?;}else{credit(deps.storage,user.as_str(),reward)?;}GLOBAL.update(deps.storage,|mut x|->StdResult<_>{x.total_supply=x.total_supply.checked_add(reward).map_err(StdError::overflow)?;Ok(x)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "mint mature",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 20,
+            "end_line": 20,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "GLOBAL",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "mint mature",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn claim_reward(deps:DepsMut,env:Env,user:Addr,share:Option<(String,u8)>)->Result<Response,ContractError>{let m=USER_MINTS.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;if env.block.time.seconds()<m.maturity{return Err(ContractError::MintNotMature)};let g=GLOBAL.load(deps.storage)?;let reward=Uint128::new((g.global_rank.saturating_sub(m.rank).saturating_add(1)) as u128*1_000);USER_MINTS.remove(deps.storage,user.as_str());if let Some((other,pct))=share{let other=deps.api.addr_validate(&other)?;let other_amount=reward.multiply_ratio(pct as u128,100u128);credit(deps.storage,other.as_str(),other_amount)?;credit(deps.storage,user.as_str(),reward.checked_sub(other_amount).map_err(StdError::overflow)?)?;}else{credit(deps.storage,user.as_str(),reward)?;}GLOBAL.update(deps.storage,|mut x|->StdResult<_>{x.total_supply=x.total_supply.checked_add(reward).map_err(StdError::overflow)?;Ok(x)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ClaimMintRewardAndShare",
+      "input_parameters": [
+        "info.sender",
+        "other",
+        "pct",
+        "env.block.time"
+      ],
+      "accesses": [],
+      "delegates_to": {
+        "entrypoint": "execute::ClaimMintReward",
+        "input_mapping": {
+          "info.sender": "info.sender",
+          "env.block.time": "env.block.time"
+        }
+      }
+    },
+    {
+      "entrypoint": "execute::Stake",
+      "input_parameters": [
+        "info.sender",
+        "amount",
+        "term_days",
+        "env.block.time"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "BALANCES[sender] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 19,
+            "end_line": 19,
+            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "USER_STAKES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 16,
+            "end_line": 16,
+            "code": "fn stake(deps:DepsMut,env:Env,user:Addr,amount:Uint128,term:u64)->Result<Response,ContractError>{debit(deps.storage,user.as_str(),amount)?;USER_STAKES.save(deps.storage,user.as_str(),&StakeRecord{amount,maturity:env.block.time.seconds().saturating_add(term.saturating_mul(86_400))})?;GLOBAL.update(deps.storage,|mut g|->StdResult<_>{g.total_staked=g.total_staked.checked_add(amount).map_err(StdError::overflow)?;Ok(g)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "GLOBAL",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 16,
+            "end_line": 16,
+            "code": "fn stake(deps:DepsMut,env:Env,user:Addr,amount:Uint128,term:u64)->Result<Response,ContractError>{debit(deps.storage,user.as_str(),amount)?;USER_STAKES.save(deps.storage,user.as_str(),&StakeRecord{amount,maturity:env.block.time.seconds().saturating_add(term.saturating_mul(86_400))})?;GLOBAL.update(deps.storage,|mut g|->StdResult<_>{g.total_staked=g.total_staked.checked_add(amount).map_err(StdError::overflow)?;Ok(g)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Withdraw",
+      "input_parameters": [
+        "info.sender",
+        "env.block.time"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "USER_STAKES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 17,
+            "end_line": 17,
+            "code": "fn withdraw(deps:DepsMut,env:Env,user:Addr)->Result<Response,ContractError>{let s=USER_STAKES.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;if env.block.time.seconds()<s.maturity{return Err(ContractError::StakeNotMature)};USER_STAKES.remove(deps.storage,user.as_str());credit(deps.storage,user.as_str(),s.amount)?;GLOBAL.update(deps.storage,|mut g|->StdResult<_>{g.total_staked=g.total_staked.checked_sub(s.amount).map_err(StdError::overflow)?;Ok(g)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "stake mature",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 20,
+            "end_line": 20,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Transfer",
+      "input_parameters": [
+        "info.sender",
+        "recipient",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "BALANCES[sender] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 19,
+            "end_line": 19,
+            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 20,
+            "end_line": 20,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Balance",
+      "input_parameters": [
+        "address"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "address"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 21,
+            "end_line": 21,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::GlobalRank{}=>to_json_binary(&GLOBAL.load(deps.storage)?),QueryMsg::UserMint{address}=>to_json_binary(&USER_MINTS.may_load(deps.storage,&address)?),QueryMsg::UserStake{address}=>to_json_binary(&USER_STAKES.may_load(deps.storage,&address)?),QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()})}}"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 {
   "schema_version": "1-native-s3-frozen-family-map",
   "dataset": "vegeta-s3",
-  "status": "frozen-preimplementation-map",
+  "status": "frozen-map-native-implementation-present",
   "target_conflict_coverage": 0.95,
   "selected_profile_families": 11,
   "observed_source_conflict_coverage": 0.9544560299036002,
@@ -12,43 +12,43 @@
     "cw20-base": {
       "native_contract_source": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
       "symbolic_analysis": "benchmarks/symbolic/native-s3/cw20-base.symbolic.json",
-      "implementation_status": "slot-only",
+      "implementation_status": "implemented-source-derived-symbolic",
       "semantic_scope": "standard fungible-token transfer/balance/allowance behavior exercised by S3"
     },
     "controlled-cw20": {
       "native_contract_source": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
       "symbolic_analysis": "benchmarks/symbolic/native-s3/controlled-cw20.symbolic.json",
-      "implementation_status": "slot-only",
+      "implementation_status": "implemented-source-derived-symbolic",
       "semantic_scope": "fungible token with pause/blacklist/mint-burn/config style state, used for Tether/FiatToken-like families"
     },
     "fee-token-cw20": {
       "native_contract_source": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
       "symbolic_analysis": "benchmarks/symbolic/native-s3/fee-token-cw20.symbolic.json",
-      "implementation_status": "slot-only",
+      "implementation_status": "implemented-source-derived-symbolic",
       "semantic_scope": "fungible token with transfer policy/fee/router state"
     },
     "astroport-pair": {
       "native_contract_source": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
       "symbolic_analysis": "benchmarks/symbolic/native-s3/astroport-pair.symbolic.json",
-      "implementation_status": "slot-only",
+      "implementation_status": "implemented-source-derived-symbolic",
       "semantic_scope": "constant-product AMM pair behavior corresponding to the Uniswap-V2-like family"
     },
     "wrapped-native-token": {
       "native_contract_source": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
       "symbolic_analysis": "benchmarks/symbolic/native-s3/wrapped-native-token.symbolic.json",
-      "implementation_status": "slot-only",
+      "implementation_status": "implemented-source-derived-symbolic",
       "semantic_scope": "wrapped native token deposit/withdraw plus fungible-token behavior"
     },
     "cw721-mintable": {
       "native_contract_source": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
       "symbolic_analysis": "benchmarks/symbolic/native-s3/cw721-mintable.symbolic.json",
-      "implementation_status": "slot-only",
+      "implementation_status": "implemented-source-derived-symbolic",
       "semantic_scope": "NFT ownership/approval/transfer plus mint behavior exercised by MIAToken and Mistfits-like families"
     },
     "xen-like": {
       "native_contract_source": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
       "symbolic_analysis": "benchmarks/symbolic/native-s3/xen-like.symbolic.json",
-      "implementation_status": "slot-only",
+      "implementation_status": "implemented-source-derived-symbolic",
       "semantic_scope": "rank/mint/stake state machine corresponding to the XENCrypto family; Math delegatecalls are treated as internal helpers rather than a separate state namespace"
     }
   },

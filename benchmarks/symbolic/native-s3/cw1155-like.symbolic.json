@@ -1,0 +1,228 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "cw1155-like",
+  "source": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+  "analysis_provenance": {
+    "method": "llm-source-derived",
+    "source_sha256": "b7b02c4f9820bc183170eba60bf6f7d32fcc3cf08df60918d9b8d7b9486ad080",
+    "source_scope": "complete native contract source",
+    "historical_trace_keys_used": false,
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+  },
+  "storage_resources": {
+    "BALANCES": {
+      "key_semantic_name": "token_id_address"
+    },
+    "APPROVALS": {
+      "key_semantic_name": "owner_operator"
+    }
+  },
+  "dependency_kinds": {
+    "input": "depends only on message/sender/environment input",
+    "state": "depends only on stored state",
+    "input_and_state": "depends on both input and stored state",
+    "none": "unconditional"
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [],
+      "accesses": []
+    },
+    {
+      "entrypoint": "execute::Mint",
+      "input_parameters": [
+        "to",
+        "token_id",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "token_id_address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(token_id, to)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,id:u64,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,(id,a))?.unwrap_or_default();BALANCES.save(s,(id,a),&x.checked_add(n).map_err(StdError::overflow)?) }"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SendFrom",
+      "input_parameters": [
+        "info.sender",
+        "from",
+        "to",
+        "token_id",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "APPROVALS",
+          "key": {
+            "semantic_name": "owner_operator",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(from, info.sender)"
+            }
+          },
+          "guard": {
+            "expression": "info.sender != from",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "fn send_from(deps:DepsMut,sender:Addr,from:String,to:String,id:u64,amount:Uint128)->Result<Response,ContractError>{let from=deps.api.addr_validate(&from)?;let to=deps.api.addr_validate(&to)?;if sender!=from&&!APPROVALS.may_load(deps.storage,(from.as_str(),sender.as_str()))?.unwrap_or(false){return Err(ContractError::Unauthorized)};let x=BALANCES.may_load(deps.storage,(id,from.as_str()))?.unwrap_or_default();if x<amount{return Err(ContractError::InsufficientFunds)};BALANCES.save(deps.storage,(id,from.as_str()),&x.checked_sub(amount).map_err(StdError::overflow)?)?;credit(deps.storage,id,to.as_str(),amount)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "token_id_address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(token_id, from)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "fn send_from(deps:DepsMut,sender:Addr,from:String,to:String,id:u64,amount:Uint128)->Result<Response,ContractError>{let from=deps.api.addr_validate(&from)?;let to=deps.api.addr_validate(&to)?;if sender!=from&&!APPROVALS.may_load(deps.storage,(from.as_str(),sender.as_str()))?.unwrap_or(false){return Err(ContractError::Unauthorized)};let x=BALANCES.may_load(deps.storage,(id,from.as_str()))?.unwrap_or_default();if x<amount{return Err(ContractError::InsufficientFunds)};BALANCES.save(deps.storage,(id,from.as_str()),&x.checked_sub(amount).map_err(StdError::overflow)?)?;credit(deps.storage,id,to.as_str(),amount)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "token_id_address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(token_id, from)"
+            }
+          },
+          "guard": {
+            "expression": "authorized && balance >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "fn send_from(deps:DepsMut,sender:Addr,from:String,to:String,id:u64,amount:Uint128)->Result<Response,ContractError>{let from=deps.api.addr_validate(&from)?;let to=deps.api.addr_validate(&to)?;if sender!=from&&!APPROVALS.may_load(deps.storage,(from.as_str(),sender.as_str()))?.unwrap_or(false){return Err(ContractError::Unauthorized)};let x=BALANCES.may_load(deps.storage,(id,from.as_str()))?.unwrap_or_default();if x<amount{return Err(ContractError::InsufficientFunds)};BALANCES.save(deps.storage,(id,from.as_str()),&x.checked_sub(amount).map_err(StdError::overflow)?)?;credit(deps.storage,id,to.as_str(),amount)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "token_id_address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(token_id, to)"
+            }
+          },
+          "guard": {
+            "expression": "authorized",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,id:u64,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,(id,a))?.unwrap_or_default();BALANCES.save(s,(id,a),&x.checked_add(n).map_err(StdError::overflow)?) }"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ApproveAll",
+      "input_parameters": [
+        "info.sender",
+        "operator",
+        "approved"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "APPROVALS",
+          "key": {
+            "semantic_name": "owner_operator",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, operator)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Mint{to,token_id,amount}=>{let to=deps.api.addr_validate(&to)?;credit(deps.storage,token_id,to.as_str(),amount)?;Ok(Response::new())},ExecuteMsg::SendFrom{from,to,token_id,amount}=>send_from(deps,info.sender,from,to,token_id,amount),ExecuteMsg::ApproveAll{operator,approved}=>{let op=deps.api.addr_validate(&operator)?;APPROVALS.save(deps.storage,(info.sender.as_str(),op.as_str()),&approved)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Balance",
+      "input_parameters": [
+        "address",
+        "token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "token_id_address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(token_id, address)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address,token_id}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,(token_id,address.as_str()))?.unwrap_or_default()}),QueryMsg::ApprovedForAll{owner,operator}=>to_json_binary(&BoolResponse{value:APPROVALS.may_load(deps.storage,(owner.as_str(),operator.as_str()))?.unwrap_or(false)})}}"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ]
+}

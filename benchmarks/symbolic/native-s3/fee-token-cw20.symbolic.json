@@ -1,0 +1,462 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "fee-token-cw20",
+  "source": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+  "analysis_provenance": {
+    "method": "llm-source-derived",
+    "source_sha256": "455a0e27f27e00506405fc6fdee82aeb9d7b2e9da0ad0145b143d53aa6daf1d9",
+    "source_scope": "complete native contract source",
+    "historical_trace_keys_used": false,
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+  },
+  "storage_resources": {
+    "CONFIG": {
+      "key_semantic_name": "singleton"
+    },
+    "BALANCES": {
+      "key_semantic_name": "address"
+    },
+    "ALLOWANCES": {
+      "key_semantic_name": "owner_spender"
+    },
+    "TOTAL_SUPPLY": {
+      "key_semantic_name": "singleton"
+    }
+  },
+  "dependency_kinds": {
+    "input": "depends only on message/sender/environment input",
+    "state": "depends only on stored state",
+    "input_and_state": "depends on both input and stored state",
+    "none": "unconditional"
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "msg.admin",
+        "msg.fee_collector",
+        "msg.fee_bps",
+        "msg.initial_balances"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "msg.fee_bps <= 10000",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{if msg.fee_bps>10_000{return Err(ContractError::InvalidFee)};CONFIG.save(deps.storage,&Config{admin:deps.api.addr_validate(&msg.admin)?,fee_collector:deps.api.addr_validate(&msg.fee_collector)?,fee_bps:msg.fee_bps})?;let mut total=Uint128::zero();for b in msg.initial_balances{let a=deps.api.addr_validate(&b.address)?;BALANCES.save(deps.storage,a.as_str(),&b.amount)?;total=total.checked_add(b.amount).map_err(StdError::overflow)?;}TOTAL_SUPPLY.save(deps.storage,&total)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "msg.initial_balances[i].address"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{if msg.fee_bps>10_000{return Err(ContractError::InvalidFee)};CONFIG.save(deps.storage,&Config{admin:deps.api.addr_validate(&msg.admin)?,fee_collector:deps.api.addr_validate(&msg.fee_collector)?,fee_bps:msg.fee_bps})?;let mut total=Uint128::zero();for b in msg.initial_balances{let a=deps.api.addr_validate(&b.address)?;BALANCES.save(deps.storage,a.as_str(),&b.amount)?;total=total.checked_add(b.amount).map_err(StdError::overflow)?;}TOTAL_SUPPLY.save(deps.storage,&total)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "TOTAL_SUPPLY",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{if msg.fee_bps>10_000{return Err(ContractError::InvalidFee)};CONFIG.save(deps.storage,&Config{admin:deps.api.addr_validate(&msg.admin)?,fee_collector:deps.api.addr_validate(&msg.fee_collector)?,fee_bps:msg.fee_bps})?;let mut total=Uint128::zero();for b in msg.initial_balances{let a=deps.api.addr_validate(&b.address)?;BALANCES.save(deps.storage,a.as_str(),&b.amount)?;total=total.checked_add(b.amount).map_err(StdError::overflow)?;}TOTAL_SUPPLY.save(deps.storage,&total)?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Transfer",
+      "input_parameters": [
+        "info.sender",
+        "recipient",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn move_tokens(deps:DepsMut,from:&str,to:&str,amount:Uint128)->Result<Response,ContractError>{let to=deps.api.addr_validate(to)?;let c=CONFIG.load(deps.storage)?;let x=BALANCES.may_load(deps.storage,from)?.unwrap_or_default();if x<amount{return Err(ContractError::InsufficientFunds)};let fee=amount.multiply_ratio(c.fee_bps as u128,10_000u128);let net=amount.checked_sub(fee).map_err(StdError::overflow)?;BALANCES.save(deps.storage,from,&x.checked_sub(amount).map_err(StdError::overflow)?)?;credit(deps.storage,to.as_str(),net)?;credit(deps.storage,c.fee_collector.as_str(),fee)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn move_tokens(deps:DepsMut,from:&str,to:&str,amount:Uint128)->Result<Response,ContractError>{let to=deps.api.addr_validate(to)?;let c=CONFIG.load(deps.storage)?;let x=BALANCES.may_load(deps.storage,from)?.unwrap_or_default();if x<amount{return Err(ContractError::InsufficientFunds)};let fee=amount.multiply_ratio(c.fee_bps as u128,10_000u128);let net=amount.checked_sub(fee).map_err(StdError::overflow)?;BALANCES.save(deps.storage,from,&x.checked_sub(amount).map_err(StdError::overflow)?)?;credit(deps.storage,to.as_str(),net)?;credit(deps.storage,c.fee_collector.as_str(),fee)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "BALANCES[from] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn move_tokens(deps:DepsMut,from:&str,to:&str,amount:Uint128)->Result<Response,ContractError>{let to=deps.api.addr_validate(to)?;let c=CONFIG.load(deps.storage)?;let x=BALANCES.may_load(deps.storage,from)?.unwrap_or_default();if x<amount{return Err(ContractError::InsufficientFunds)};let fee=amount.multiply_ratio(c.fee_bps as u128,10_000u128);let net=amount.checked_sub(fee).map_err(StdError::overflow)?;BALANCES.save(deps.storage,from,&x.checked_sub(amount).map_err(StdError::overflow)?)?;credit(deps.storage,to.as_str(),net)?;credit(deps.storage,c.fee_collector.as_str(),fee)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "CONFIG.fee_collector",
+            "dependency_kind": "state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn move_tokens(deps:DepsMut,from:&str,to:&str,amount:Uint128)->Result<Response,ContractError>{let to=deps.api.addr_validate(to)?;let c=CONFIG.load(deps.storage)?;let x=BALANCES.may_load(deps.storage,from)?.unwrap_or_default();if x<amount{return Err(ContractError::InsufficientFunds)};let fee=amount.multiply_ratio(c.fee_bps as u128,10_000u128);let net=amount.checked_sub(fee).map_err(StdError::overflow)?;BALANCES.save(deps.storage,from,&x.checked_sub(amount).map_err(StdError::overflow)?)?;credit(deps.storage,to.as_str(),net)?;credit(deps.storage,c.fee_collector.as_str(),fee)?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::TransferFrom",
+      "input_parameters": [
+        "info.sender",
+        "owner",
+        "recipient",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, info.sender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Transfer{recipient,amount}=>move_tokens(deps,info.sender.as_str(),&recipient,amount),ExecuteMsg::TransferFrom{owner,recipient,amount}=>{let o=deps.api.addr_validate(&owner)?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),info.sender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),info.sender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;move_tokens(deps,o.as_str(),&recipient,amount)},ExecuteMsg::Approve{spender,amount}=>{let s=deps.api.addr_validate(&spender)?;ALLOWANCES.save(deps.storage,(info.sender.as_str(),s.as_str()),&amount)?;Ok(Response::new())},ExecuteMsg::SetPolicy{fee_bps,fee_collector}=>{let mut c=CONFIG.load(deps.storage)?;if c.admin!=info.sender{return Err(ContractError::Unauthorized)};if fee_bps>10_000{return Err(ContractError::InvalidFee)};c.fee_bps=fee_bps;c.fee_collector=deps.api.addr_validate(&fee_collector)?;CONFIG.save(deps.storage,&c)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, info.sender)"
+            }
+          },
+          "guard": {
+            "expression": "ALLOWANCES >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Transfer{recipient,amount}=>move_tokens(deps,info.sender.as_str(),&recipient,amount),ExecuteMsg::TransferFrom{owner,recipient,amount}=>{let o=deps.api.addr_validate(&owner)?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),info.sender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),info.sender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;move_tokens(deps,o.as_str(),&recipient,amount)},ExecuteMsg::Approve{spender,amount}=>{let s=deps.api.addr_validate(&spender)?;ALLOWANCES.save(deps.storage,(info.sender.as_str(),s.as_str()),&amount)?;Ok(Response::new())},ExecuteMsg::SetPolicy{fee_bps,fee_collector}=>{let mut c=CONFIG.load(deps.storage)?;if c.admin!=info.sender{return Err(ContractError::Unauthorized)};if fee_bps>10_000{return Err(ContractError::InvalidFee)};c.fee_bps=fee_bps;c.fee_collector=deps.api.addr_validate(&fee_collector)?;CONFIG.save(deps.storage,&c)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "BALANCES[owner] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn move_tokens(deps:DepsMut,from:&str,to:&str,amount:Uint128)->Result<Response,ContractError>{let to=deps.api.addr_validate(to)?;let c=CONFIG.load(deps.storage)?;let x=BALANCES.may_load(deps.storage,from)?.unwrap_or_default();if x<amount{return Err(ContractError::InsufficientFunds)};let fee=amount.multiply_ratio(c.fee_bps as u128,10_000u128);let net=amount.checked_sub(fee).map_err(StdError::overflow)?;BALANCES.save(deps.storage,from,&x.checked_sub(amount).map_err(StdError::overflow)?)?;credit(deps.storage,to.as_str(),net)?;credit(deps.storage,c.fee_collector.as_str(),fee)?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Approve",
+      "input_parameters": [
+        "info.sender",
+        "spender",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, spender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Transfer{recipient,amount}=>move_tokens(deps,info.sender.as_str(),&recipient,amount),ExecuteMsg::TransferFrom{owner,recipient,amount}=>{let o=deps.api.addr_validate(&owner)?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),info.sender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),info.sender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;move_tokens(deps,o.as_str(),&recipient,amount)},ExecuteMsg::Approve{spender,amount}=>{let s=deps.api.addr_validate(&spender)?;ALLOWANCES.save(deps.storage,(info.sender.as_str(),s.as_str()),&amount)?;Ok(Response::new())},ExecuteMsg::SetPolicy{fee_bps,fee_collector}=>{let mut c=CONFIG.load(deps.storage)?;if c.admin!=info.sender{return Err(ContractError::Unauthorized)};if fee_bps>10_000{return Err(ContractError::InvalidFee)};c.fee_bps=fee_bps;c.fee_collector=deps.api.addr_validate(&fee_collector)?;CONFIG.save(deps.storage,&c)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SetPolicy",
+      "input_parameters": [
+        "info.sender",
+        "fee_bps",
+        "fee_collector"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Transfer{recipient,amount}=>move_tokens(deps,info.sender.as_str(),&recipient,amount),ExecuteMsg::TransferFrom{owner,recipient,amount}=>{let o=deps.api.addr_validate(&owner)?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),info.sender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),info.sender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;move_tokens(deps,o.as_str(),&recipient,amount)},ExecuteMsg::Approve{spender,amount}=>{let s=deps.api.addr_validate(&spender)?;ALLOWANCES.save(deps.storage,(info.sender.as_str(),s.as_str()),&amount)?;Ok(Response::new())},ExecuteMsg::SetPolicy{fee_bps,fee_collector}=>{let mut c=CONFIG.load(deps.storage)?;if c.admin!=info.sender{return Err(ContractError::Unauthorized)};if fee_bps>10_000{return Err(ContractError::InvalidFee)};c.fee_bps=fee_bps;c.fee_collector=deps.api.addr_validate(&fee_collector)?;CONFIG.save(deps.storage,&c)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin && fee_bps <= 10000",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Transfer{recipient,amount}=>move_tokens(deps,info.sender.as_str(),&recipient,amount),ExecuteMsg::TransferFrom{owner,recipient,amount}=>{let o=deps.api.addr_validate(&owner)?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),info.sender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),info.sender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;move_tokens(deps,o.as_str(),&recipient,amount)},ExecuteMsg::Approve{spender,amount}=>{let s=deps.api.addr_validate(&spender)?;ALLOWANCES.save(deps.storage,(info.sender.as_str(),s.as_str()),&amount)?;Ok(Response::new())},ExecuteMsg::SetPolicy{fee_bps,fee_collector}=>{let mut c=CONFIG.load(deps.storage)?;if c.admin!=info.sender{return Err(ContractError::Unauthorized)};if fee_bps>10_000{return Err(ContractError::InvalidFee)};c.fee_bps=fee_bps;c.fee_collector=deps.api.addr_validate(&fee_collector)?;CONFIG.save(deps.storage,&c)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Balance",
+      "input_parameters": [
+        "address"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "address"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(owner.as_str(),spender.as_str()))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>to_json_binary(&AmountResponse{amount:TOTAL_SUPPLY.load(deps.storage)?}),QueryMsg::Policy{}=>to_json_binary(&CONFIG.load(deps.storage)?)}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Allowance",
+      "input_parameters": [
+        "owner",
+        "spender"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, spender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(owner.as_str(),spender.as_str()))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>to_json_binary(&AmountResponse{amount:TOTAL_SUPPLY.load(deps.storage)?}),QueryMsg::Policy{}=>to_json_binary(&CONFIG.load(deps.storage)?)}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::TotalSupply",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "TOTAL_SUPPLY",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(owner.as_str(),spender.as_str()))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>to_json_binary(&AmountResponse{amount:TOTAL_SUPPLY.load(deps.storage)?}),QueryMsg::Policy{}=>to_json_binary(&CONFIG.load(deps.storage)?)}}"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ]
+}

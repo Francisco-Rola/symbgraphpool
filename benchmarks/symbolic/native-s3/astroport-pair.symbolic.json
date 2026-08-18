@@ -1,0 +1,374 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "astroport-pair",
+  "source": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+  "analysis_provenance": {
+    "method": "llm-source-derived",
+    "source_sha256": "426122f37859aa0bc630ef8787e79772a200c609456b00be44fa8d8d2ff7cc33",
+    "source_scope": "complete native contract source",
+    "historical_trace_keys_used": false,
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+  },
+  "storage_resources": {
+    "CONFIG": {
+      "key_semantic_name": "singleton"
+    },
+    "RESERVES": {
+      "key_semantic_name": "singleton"
+    },
+    "TOTAL_LP": {
+      "key_semantic_name": "singleton"
+    },
+    "LP_BALANCES": {
+      "key_semantic_name": "provider"
+    }
+  },
+  "dependency_kinds": {
+    "input": "depends only on message/sender/environment input",
+    "state": "depends only on stored state",
+    "input_and_state": "depends on both input and stored state",
+    "none": "unconditional"
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "msg.asset0",
+        "msg.asset1"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{CONFIG.save(deps.storage,&Config{asset0:msg.asset0,asset1:msg.asset1})?;RESERVES.save(deps.storage,&Reserves{reserve0:Uint128::zero(),reserve1:Uint128::zero()})?;TOTAL_LP.save(deps.storage,&Uint128::zero())?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "RESERVES",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{CONFIG.save(deps.storage,&Config{asset0:msg.asset0,asset1:msg.asset1})?;RESERVES.save(deps.storage,&Reserves{reserve0:Uint128::zero(),reserve1:Uint128::zero()})?;TOTAL_LP.save(deps.storage,&Uint128::zero())?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Swap",
+      "input_parameters": [
+        "offer_index",
+        "amount_in",
+        "min_out",
+        "recipient"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "RESERVES",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn swap(deps:DepsMut,offer_index:u8,amount_in:Uint128,min_out:Uint128,_recipient:String)->Result<Response,ContractError>{let mut r=RESERVES.load(deps.storage)?;let (rin,rout)=match offer_index{0=>(r.reserve0,r.reserve1),1=>(r.reserve1,r.reserve0),_=>return Err(ContractError::InvalidAsset)};let amount_with_fee=amount_in.multiply_ratio(997u128,1000u128);let numerator=amount_with_fee.checked_mul(rout).map_err(StdError::overflow)?;let denominator=rin.checked_add(amount_with_fee).map_err(StdError::overflow)?;let out=if denominator.is_zero(){Uint128::zero()}else{numerator/denominator};if out<min_out{return Err(ContractError::Slippage)};if offer_index==0{r.reserve0=r.reserve0.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve1=r.reserve1.checked_sub(out).map_err(StdError::overflow)?;}else{r.reserve1=r.reserve1.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve0=r.reserve0.checked_sub(out).map_err(StdError::overflow)?;}RESERVES.save(deps.storage,&r)?;Ok(Response::new().add_attribute(\"amount_out\",out.to_string()))}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "RESERVES",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "computed amount_out >= min_out",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn swap(deps:DepsMut,offer_index:u8,amount_in:Uint128,min_out:Uint128,_recipient:String)->Result<Response,ContractError>{let mut r=RESERVES.load(deps.storage)?;let (rin,rout)=match offer_index{0=>(r.reserve0,r.reserve1),1=>(r.reserve1,r.reserve0),_=>return Err(ContractError::InvalidAsset)};let amount_with_fee=amount_in.multiply_ratio(997u128,1000u128);let numerator=amount_with_fee.checked_mul(rout).map_err(StdError::overflow)?;let denominator=rin.checked_add(amount_with_fee).map_err(StdError::overflow)?;let out=if denominator.is_zero(){Uint128::zero()}else{numerator/denominator};if out<min_out{return Err(ContractError::Slippage)};if offer_index==0{r.reserve0=r.reserve0.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve1=r.reserve1.checked_sub(out).map_err(StdError::overflow)?;}else{r.reserve1=r.reserve1.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve0=r.reserve0.checked_sub(out).map_err(StdError::overflow)?;}RESERVES.save(deps.storage,&r)?;Ok(Response::new().add_attribute(\"amount_out\",out.to_string()))}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::MintLiquidity",
+      "input_parameters": [
+        "provider",
+        "amount0",
+        "amount1"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "RESERVES",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn swap(deps:DepsMut,offer_index:u8,amount_in:Uint128,min_out:Uint128,_recipient:String)->Result<Response,ContractError>{let mut r=RESERVES.load(deps.storage)?;let (rin,rout)=match offer_index{0=>(r.reserve0,r.reserve1),1=>(r.reserve1,r.reserve0),_=>return Err(ContractError::InvalidAsset)};let amount_with_fee=amount_in.multiply_ratio(997u128,1000u128);let numerator=amount_with_fee.checked_mul(rout).map_err(StdError::overflow)?;let denominator=rin.checked_add(amount_with_fee).map_err(StdError::overflow)?;let out=if denominator.is_zero(){Uint128::zero()}else{numerator/denominator};if out<min_out{return Err(ContractError::Slippage)};if offer_index==0{r.reserve0=r.reserve0.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve1=r.reserve1.checked_sub(out).map_err(StdError::overflow)?;}else{r.reserve1=r.reserve1.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve0=r.reserve0.checked_sub(out).map_err(StdError::overflow)?;}RESERVES.save(deps.storage,&r)?;Ok(Response::new().add_attribute(\"amount_out\",out.to_string()))}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "RESERVES",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn swap(deps:DepsMut,offer_index:u8,amount_in:Uint128,min_out:Uint128,_recipient:String)->Result<Response,ContractError>{let mut r=RESERVES.load(deps.storage)?;let (rin,rout)=match offer_index{0=>(r.reserve0,r.reserve1),1=>(r.reserve1,r.reserve0),_=>return Err(ContractError::InvalidAsset)};let amount_with_fee=amount_in.multiply_ratio(997u128,1000u128);let numerator=amount_with_fee.checked_mul(rout).map_err(StdError::overflow)?;let denominator=rin.checked_add(amount_with_fee).map_err(StdError::overflow)?;let out=if denominator.is_zero(){Uint128::zero()}else{numerator/denominator};if out<min_out{return Err(ContractError::Slippage)};if offer_index==0{r.reserve0=r.reserve0.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve1=r.reserve1.checked_sub(out).map_err(StdError::overflow)?;}else{r.reserve1=r.reserve1.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve0=r.reserve0.checked_sub(out).map_err(StdError::overflow)?;}RESERVES.save(deps.storage,&r)?;Ok(Response::new().add_attribute(\"amount_out\",out.to_string()))}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "LP_BALANCES",
+          "key": {
+            "semantic_name": "provider",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "provider"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn mint(deps:DepsMut,provider:String,a0:Uint128,a1:Uint128)->Result<Response,ContractError>{let p=deps.api.addr_validate(&provider)?;let minted=Uint128::new(integer_sqrt(a0.u128().saturating_mul(a1.u128())));let mut r=RESERVES.load(deps.storage)?;r.reserve0=r.reserve0.checked_add(a0).map_err(StdError::overflow)?;r.reserve1=r.reserve1.checked_add(a1).map_err(StdError::overflow)?;RESERVES.save(deps.storage,&r)?;TOTAL_LP.update(deps.storage,|x|x.checked_add(minted).map_err(StdError::overflow))?;LP_BALANCES.update(deps.storage,p.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default().checked_add(minted).map_err(StdError::overflow)?)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::BurnLiquidity",
+      "input_parameters": [
+        "provider",
+        "liquidity"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "LP_BALANCES",
+          "key": {
+            "semantic_name": "provider",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "provider"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn burn(deps:DepsMut,provider:String,liq:Uint128)->Result<Response,ContractError>{let p=deps.api.addr_validate(&provider)?;let total=TOTAL_LP.load(deps.storage)?;let bal=LP_BALANCES.may_load(deps.storage,p.as_str())?.unwrap_or_default();if liq>bal||liq>total{return Err(ContractError::InsufficientLiquidity)};let mut r=RESERVES.load(deps.storage)?;let out0=r.reserve0.multiply_ratio(liq.u128(),total.u128());let out1=r.reserve1.multiply_ratio(liq.u128(),total.u128());r.reserve0=r.reserve0.checked_sub(out0).map_err(StdError::overflow)?;r.reserve1=r.reserve1.checked_sub(out1).map_err(StdError::overflow)?;RESERVES.save(deps.storage,&r)?;LP_BALANCES.save(deps.storage,p.as_str(),&bal.checked_sub(liq).map_err(StdError::overflow)?)?;TOTAL_LP.save(deps.storage,&total.checked_sub(liq).map_err(StdError::overflow)?)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "RESERVES",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn swap(deps:DepsMut,offer_index:u8,amount_in:Uint128,min_out:Uint128,_recipient:String)->Result<Response,ContractError>{let mut r=RESERVES.load(deps.storage)?;let (rin,rout)=match offer_index{0=>(r.reserve0,r.reserve1),1=>(r.reserve1,r.reserve0),_=>return Err(ContractError::InvalidAsset)};let amount_with_fee=amount_in.multiply_ratio(997u128,1000u128);let numerator=amount_with_fee.checked_mul(rout).map_err(StdError::overflow)?;let denominator=rin.checked_add(amount_with_fee).map_err(StdError::overflow)?;let out=if denominator.is_zero(){Uint128::zero()}else{numerator/denominator};if out<min_out{return Err(ContractError::Slippage)};if offer_index==0{r.reserve0=r.reserve0.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve1=r.reserve1.checked_sub(out).map_err(StdError::overflow)?;}else{r.reserve1=r.reserve1.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve0=r.reserve0.checked_sub(out).map_err(StdError::overflow)?;}RESERVES.save(deps.storage,&r)?;Ok(Response::new().add_attribute(\"amount_out\",out.to_string()))}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "RESERVES",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "liquidity <= LP balance and total",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn swap(deps:DepsMut,offer_index:u8,amount_in:Uint128,min_out:Uint128,_recipient:String)->Result<Response,ContractError>{let mut r=RESERVES.load(deps.storage)?;let (rin,rout)=match offer_index{0=>(r.reserve0,r.reserve1),1=>(r.reserve1,r.reserve0),_=>return Err(ContractError::InvalidAsset)};let amount_with_fee=amount_in.multiply_ratio(997u128,1000u128);let numerator=amount_with_fee.checked_mul(rout).map_err(StdError::overflow)?;let denominator=rin.checked_add(amount_with_fee).map_err(StdError::overflow)?;let out=if denominator.is_zero(){Uint128::zero()}else{numerator/denominator};if out<min_out{return Err(ContractError::Slippage)};if offer_index==0{r.reserve0=r.reserve0.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve1=r.reserve1.checked_sub(out).map_err(StdError::overflow)?;}else{r.reserve1=r.reserve1.checked_add(amount_in).map_err(StdError::overflow)?;r.reserve0=r.reserve0.checked_sub(out).map_err(StdError::overflow)?;}RESERVES.save(deps.storage,&r)?;Ok(Response::new().add_attribute(\"amount_out\",out.to_string()))}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "LP_BALANCES",
+          "key": {
+            "semantic_name": "provider",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "provider"
+            }
+          },
+          "guard": {
+            "expression": "liquidity <= balance",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn burn(deps:DepsMut,provider:String,liq:Uint128)->Result<Response,ContractError>{let p=deps.api.addr_validate(&provider)?;let total=TOTAL_LP.load(deps.storage)?;let bal=LP_BALANCES.may_load(deps.storage,p.as_str())?.unwrap_or_default();if liq>bal||liq>total{return Err(ContractError::InsufficientLiquidity)};let mut r=RESERVES.load(deps.storage)?;let out0=r.reserve0.multiply_ratio(liq.u128(),total.u128());let out1=r.reserve1.multiply_ratio(liq.u128(),total.u128());r.reserve0=r.reserve0.checked_sub(out0).map_err(StdError::overflow)?;r.reserve1=r.reserve1.checked_sub(out1).map_err(StdError::overflow)?;RESERVES.save(deps.storage,&r)?;LP_BALANCES.save(deps.storage,p.as_str(),&bal.checked_sub(liq).map_err(StdError::overflow)?)?;TOTAL_LP.save(deps.storage,&total.checked_sub(liq).map_err(StdError::overflow)?)?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Sync",
+      "input_parameters": [
+        "reserve0",
+        "reserve1"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "RESERVES",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,_:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Swap{offer_index,amount_in,min_out,recipient}=>swap(deps,offer_index,amount_in,min_out,recipient),ExecuteMsg::MintLiquidity{provider,amount0,amount1}=>mint(deps,provider,amount0,amount1),ExecuteMsg::BurnLiquidity{provider,liquidity}=>burn(deps,provider,liquidity),ExecuteMsg::Sync{reserve0,reserve1}=>{RESERVES.save(deps.storage,&Reserves{reserve0,reserve1})?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::GetReserves",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "RESERVES",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 17,
+            "end_line": 17,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::GetReserves{}=>to_json_binary(&RESERVES.load(deps.storage)?),QueryMsg::LpBalance{address}=>to_json_binary(&AmountResponse{amount:LP_BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Token0{}=>to_json_binary(&CONFIG.load(deps.storage)?.asset0),QueryMsg::Token1{}=>to_json_binary(&CONFIG.load(deps.storage)?.asset1)}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::LpBalance",
+      "input_parameters": [
+        "address"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "LP_BALANCES",
+          "key": {
+            "semantic_name": "provider",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "address"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+            "start_line": 17,
+            "end_line": 17,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::GetReserves{}=>to_json_binary(&RESERVES.load(deps.storage)?),QueryMsg::LpBalance{address}=>to_json_binary(&AmountResponse{amount:LP_BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Token0{}=>to_json_binary(&CONFIG.load(deps.storage)?.asset0),QueryMsg::Token1{}=>to_json_binary(&CONFIG.load(deps.storage)?.asset1)}}"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ]
+}

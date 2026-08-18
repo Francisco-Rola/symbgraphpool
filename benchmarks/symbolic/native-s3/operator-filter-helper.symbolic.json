@@ -1,0 +1,149 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "operator-filter-helper",
+  "source": "benchmarks/contracts/native-s3/operator-filter-helper/src/lib.rs",
+  "analysis_provenance": {
+    "method": "llm-source-derived",
+    "source_sha256": "1b2ebd351c130071b51c29244e5f37ba1312e2e380348f1105ec0fb64fc5b5c5",
+    "source_scope": "complete native contract source",
+    "historical_trace_keys_used": false,
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+  },
+  "storage_resources": {
+    "SUBSCRIPTIONS": {
+      "key_semantic_name": "registrant"
+    },
+    "BLOCKED": {
+      "key_semantic_name": "registrant_operator"
+    }
+  },
+  "dependency_kinds": {
+    "input": "depends only on message/sender/environment input",
+    "state": "depends only on stored state",
+    "input_and_state": "depends on both input and stored state",
+    "none": "unconditional"
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [],
+      "accesses": []
+    },
+    {
+      "entrypoint": "execute::RegisterAndSubscribe",
+      "input_parameters": [
+        "registrant",
+        "subscription"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "SUBSCRIPTIONS",
+          "key": {
+            "semantic_name": "registrant",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "registrant"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/operator-filter-helper/src/lib.rs",
+            "start_line": 9,
+            "end_line": 9,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,_info:MessageInfo,msg:ExecuteMsg)->StdResult<Response>{match msg{ExecuteMsg::RegisterAndSubscribe{registrant,subscription}=>{let r=deps.api.addr_validate(&registrant)?;let s=deps.api.addr_validate(&subscription)?;SUBSCRIPTIONS.save(deps.storage,r.as_str(),&s)?;Ok(Response::new())},ExecuteMsg::SetOperatorAllowed{registrant,operator,allowed}=>{let r=deps.api.addr_validate(&registrant)?;let o=deps.api.addr_validate(&operator)?;BLOCKED.save(deps.storage,(r.as_str(),o.as_str()),&!allowed)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SetOperatorAllowed",
+      "input_parameters": [
+        "registrant",
+        "operator",
+        "allowed"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "BLOCKED",
+          "key": {
+            "semantic_name": "registrant_operator",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(registrant, operator)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/operator-filter-helper/src/lib.rs",
+            "start_line": 9,
+            "end_line": 9,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,_info:MessageInfo,msg:ExecuteMsg)->StdResult<Response>{match msg{ExecuteMsg::RegisterAndSubscribe{registrant,subscription}=>{let r=deps.api.addr_validate(&registrant)?;let s=deps.api.addr_validate(&subscription)?;SUBSCRIPTIONS.save(deps.storage,r.as_str(),&s)?;Ok(Response::new())},ExecuteMsg::SetOperatorAllowed{registrant,operator,allowed}=>{let r=deps.api.addr_validate(&registrant)?;let o=deps.api.addr_validate(&operator)?;BLOCKED.save(deps.storage,(r.as_str(),o.as_str()),&!allowed)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::IsOperatorAllowed",
+      "input_parameters": [
+        "registrant",
+        "operator"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "SUBSCRIPTIONS",
+          "key": {
+            "semantic_name": "registrant",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "registrant"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/operator-filter-helper/src/lib.rs",
+            "start_line": 10,
+            "end_line": 10,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::IsOperatorAllowed{registrant,operator}=>{let owner=SUBSCRIPTIONS.may_load(deps.storage,&registrant)?.map(|x|x.into_string()).unwrap_or(registrant);let blocked=BLOCKED.may_load(deps.storage,(&owner,&operator))?.unwrap_or(false);to_json_binary(&BoolResponse{value:!blocked})}}}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BLOCKED",
+          "key": {
+            "semantic_name": "registrant_operator",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner_or_subscription, operator)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/operator-filter-helper/src/lib.rs",
+            "start_line": 10,
+            "end_line": 10,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::IsOperatorAllowed{registrant,operator}=>{let owner=SUBSCRIPTIONS.may_load(deps.storage,&registrant)?.map(|x|x.into_string()).unwrap_or(registrant);let blocked=BLOCKED.may_load(deps.storage,(&owner,&operator))?.unwrap_or(false);to_json_binary(&BoolResponse{value:!blocked})}}}"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ]
+}

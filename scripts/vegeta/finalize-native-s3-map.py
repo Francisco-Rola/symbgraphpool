@@ -494,35 +494,30 @@ def classify_archetype(summary: dict | None) -> str | None:
 
 
 ERC20_ENTRYPOINTS = {
-    "transfer(address,uint256)": "execute::transfer",
-    "transferFrom(address,address,uint256)": "execute::transfer_from",
-    "balanceOf(address)": "query::balance",
-    "approve(address,uint256)": "execute::approve",
-    "allowance(address,address)": "query::allowance",
-    "totalSupply()": "query::total_supply",
-    "decimals()": "query::decimals",
-    "increaseAllowance(address,uint256)": "execute::increase_allowance",
-    "decreaseAllowance(address,uint256)": "execute::decrease_allowance",
-    "burn(uint256)": "execute::burn",
+    "transfer(address,uint256)": "execute::Transfer",
+    "transferFrom(address,address,uint256)": "execute::TransferFrom",
+    "balanceOf(address)": "query::Balance",
+    "approve(address,uint256)": "execute::Approve",
+    "allowance(address,address)": "query::Allowance",
+    "totalSupply()": "query::TotalSupply",
+    "decimals()": "query::Decimals",
+    "burn(uint256)": "execute::Burn",
 }
 ERC721_ENTRYPOINTS = {
-    "safeTransferFrom(address,address,uint256)": "execute::transfer_nft",
-    "safeTransferFrom(address,address,uint256,bytes)": "execute::send_or_safe_transfer_nft",
-    "transferFrom(address,address,uint256)": "execute::transfer_nft",
-    "setApprovalForAll(address,bool)": "execute::approve_all",
-    "approve(address,uint256)": "execute::approve_nft",
-    "ownerOf(uint256)": "query::owner_of",
-    "balanceOf(address)": "query::tokens_by_owner_count",
-    "getApproved(uint256)": "query::approval",
-    "tokenURI(uint256)": "query::token_uri",
+    "safeTransferFrom(address,address,uint256)": "execute::TransferNft",
+    "safeTransferFrom(address,address,uint256,bytes)": "execute::SendOrSafeTransferNft",
+    "transferFrom(address,address,uint256)": "execute::TransferNft",
+    "setApprovalForAll(address,bool)": "execute::ApproveAll",
+    "approve(address,uint256)": "execute::ApproveNft",
+    "ownerOf(uint256)": "query::OwnerOf",
+    "balanceOf(address)": "query::TokensByOwnerCount",
+    "getApproved(uint256)": "query::Approved",
 }
 ERC1155_ENTRYPOINTS = {
-    "safeTransferFrom(address,address,uint256,uint256,bytes)": "execute::send_from",
-    "safeBatchTransferFrom(address,address,uint256[],uint256[],bytes)": "execute::batch_send_from",
-    "balanceOf(address,uint256)": "query::balance",
-    "balanceOfBatch(address[],uint256[])": "query::batch_balance",
-    "setApprovalForAll(address,bool)": "execute::approve_all",
-    "isApprovedForAll(address,address)": "query::approved_for_all",
+    "safeTransferFrom(address,address,uint256,uint256,bytes)": "execute::SendFrom",
+    "balanceOf(address,uint256)": "query::Balance",
+    "setApprovalForAll(address,bool)": "execute::ApproveAll",
+    "isApprovedForAll(address,address)": "query::ApprovedForAll",
 }
 
 
@@ -530,22 +525,42 @@ def entrypoint_for_signature(archetype: str, signature: str) -> str | None:
     if archetype in {"cw20-base", "controlled-cw20", "fee-token-cw20"}:
         return ERC20_ENTRYPOINTS.get(signature)
     if archetype == "wrapped-native-token":
-        extra = {"deposit()": "execute::deposit", "withdraw(uint256)": "execute::withdraw"}
+        extra = {"deposit()": "execute::Deposit", "withdraw(uint256)": "execute::Withdraw"}
         return extra.get(signature) or ERC20_ENTRYPOINTS.get(signature)
     if archetype == "cw721-mintable":
         return ERC721_ENTRYPOINTS.get(signature)
     if archetype == "cw1155-like":
         return ERC1155_ENTRYPOINTS.get(signature)
     if archetype == "astroport-pair":
-        pair = {"getReserves()": "query::reserves", "swap(uint256,uint256,address,bytes)": "execute::swap", "token0()": "query::asset0", "token1()": "query::asset1", "sync()": "execute::sync", "mint(address)": "execute::provide_liquidity_mint"}
+        pair = {
+            "getReserves()": "query::GetReserves",
+            "swap(uint256,uint256,address,bytes)": "execute::Swap",
+            "token0()": "query::Token0",
+            "token1()": "query::Token1",
+            "sync()": "execute::Sync",
+            "mint(address)": "execute::MintLiquidity",
+        }
         return pair.get(signature)
     if archetype == "xen-like":
-        xen = {"claimRank(uint256)": "execute::claim_rank", "claimMintReward()": "execute::claim_mint_reward", "claimMintRewardAndShare(address,uint256)": "execute::claim_mint_reward_and_share", "stake(uint256,uint256)": "execute::stake", "withdraw()": "execute::withdraw"}
+        xen = {
+            "claimRank(uint256)": "execute::ClaimRank",
+            "claimMintReward()": "execute::ClaimMintReward",
+            "claimMintRewardAndShare(address,uint256)": "execute::ClaimMintRewardAndShare",
+            "stake(uint256,uint256)": "execute::Stake",
+            "withdraw()": "execute::Withdraw",
+        }
         return xen.get(signature) or ERC20_ENTRYPOINTS.get(signature)
     if archetype == "operator-filter-helper":
-        return "helper::" + signature.split("(", 1)[0]
+        return {
+            "registerAndSubscribe(address,address)": "execute::RegisterAndSubscribe",
+            "isOperatorAllowed(address,address)": "query::IsOperatorAllowed",
+        }.get(signature)
     if archetype == "marketplace-router":
-        return "marketplace::" + signature.split("(", 1)[0]
+        return {
+            "getOrderStatus(bytes32)": "query::GetOrderStatus",
+            "incrementCounter()": "execute::IncrementCounter",
+            "getCounter(address)": "query::GetCounter",
+        }.get(signature)
     return None
 
 
@@ -1103,9 +1118,9 @@ def main() -> int:
         "base_family_map": str(args.base_family_map),
         "base_native_code_families": base_families,
         "additional_candidate_archetypes": {
-            "cw1155-like": {"status": "candidate-needs-native-contract-and-symbolic-analysis"},
-            "marketplace-router": {"status": "candidate-needs-native-contract-and-symbolic-analysis"},
-            "operator-filter-helper": {"status": "candidate-needs-native-contract-and-symbolic-analysis"},
+            "cw1155-like": {"status": "implemented-source-derived-symbolic"},
+            "marketplace-router": {"status": "implemented-source-derived-symbolic"},
+            "operator-filter-helper": {"status": "implemented-source-derived-symbolic"},
         },
         "address_scoped_system_semantics": {
             "status": "call-composition-audited-not-source-derived",

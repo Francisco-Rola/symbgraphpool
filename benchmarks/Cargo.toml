@@ -3,6 +3,16 @@ members = [
     "contracts/conflictlab",
     "contracts/miniwarehouse",
     "contracts/vegeta-trace",
+    "contracts/native-s3/cw20-base",
+    "contracts/native-s3/controlled-cw20",
+    "contracts/native-s3/fee-token-cw20",
+    "contracts/native-s3/wrapped-native-token",
+    "contracts/native-s3/cw721-mintable",
+    "contracts/native-s3/astroport-pair",
+    "contracts/native-s3/xen-like",
+    "contracts/native-s3/cw1155-like",
+    "contracts/native-s3/marketplace-router",
+    "contracts/native-s3/operator-filter-helper",
 ]
 resolver = "2"
 

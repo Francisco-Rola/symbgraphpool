@@ -36,8 +36,11 @@ use crate::speculative::{
 use crate::state::{code_id_of, SharedTx, SharedWorld, TransactionState, WorldState};
 use crate::storage::{EngineStorage, EngineStorageBinding};
 use crate::types::{
-    AccessKind, Address, BlockContext, CodeChecksum, CodeId, CodeKind, CodeMetadata,
-    ContractMetadata, ExecutionOutcome, ExecutionRequest, QueryOutcome, TransactionId,
+    AccessKind, Address, BlockContext, BundleCall, BundleCallAccessSpan, BundleCallFailure,
+    BundleExecutionOutcome,
+    BundleQueryResult, BundleRevertedScopeOutcome, ScopedBundleCall,
+    CodeChecksum, CodeId, CodeKind, CodeMetadata, ContractMetadata, ExecutionOutcome,
+    ExecutionRequest, QueryOutcome, TransactionId,
 };
 use crate::validation::{
     apply_write_set, validate_dependencies, write_set_touches_conflict, ValidationOutcome,
@@ -1222,6 +1225,303 @@ impl CosmWasmEngine {
                 msg,
             },
         )
+    }
+
+    /// Execute an ordered set of contract calls, smart queries, and bank sends as one atomic
+    /// transaction. All calls share one transactional overlay, so later calls observe earlier
+    /// writes and canonical state is committed only after the entire bundle succeeds.
+    pub fn execute_bundle(
+        &self,
+        transaction_id: TransactionId,
+        block: BlockContext,
+        calls: &[BundleCall],
+    ) -> EngineResult<BundleExecutionOutcome> {
+        self.execute_bundle_inner(transaction_id, block, calls, true, false)
+    }
+
+    /// Execute the same atomic bundle against canonical predecessor state without committing it.
+    /// Accesses are retained and marked reverted. This is useful for faithfully representing
+    /// source transactions whose canonical outcome is failure/revert.
+    pub fn execute_bundle_reverted(
+        &self,
+        transaction_id: TransactionId,
+        block: BlockContext,
+        calls: &[BundleCall],
+    ) -> EngineResult<BundleExecutionOutcome> {
+        self.execute_bundle_inner(transaction_id, block, calls, false, false)
+    }
+
+    /// Execute a bundle known to have reverted in the source workload. If a translated native call
+    /// also errors, stop at that call, preserve all accesses observed up to and including the
+    /// failure, mark them reverted, and return a non-committing outcome rather than aborting the
+    /// replay. This mirrors a source transaction that halts on its first failing operation.
+    ///
+    /// Strict successful transactions must continue to use `execute_bundle`; this tolerant API is
+    /// intentionally limited to already-known source reverts.
+    pub fn execute_bundle_reverted_tolerant(
+        &self,
+        transaction_id: TransactionId,
+        block: BlockContext,
+        calls: &[BundleCall],
+    ) -> EngineResult<BundleExecutionOutcome> {
+        self.execute_bundle_inner(transaction_id, block, calls, false, true)
+    }
+
+    /// Execute a successful outer transaction while honoring source-level internal call-frame
+    /// reverts. Calls tagged with the same `source_revert_scope` must be contiguous and are run on
+    /// one child transaction overlay cloned from the outer transaction's current state. The child
+    /// sees all earlier outer writes, may observe its own writes across calls, and is then discarded.
+    /// Its access records are appended to the outer receipt with `reverted=true`.
+    ///
+    /// This models an EVM CALL/DELEGATECALL that reverts and is caught by a successful ancestor.
+    /// Untagged calls remain strict and commit atomically with the outer transaction.
+    pub fn execute_bundle_with_reverted_scopes(
+        &self,
+        transaction_id: TransactionId,
+        block: BlockContext,
+        calls: &[ScopedBundleCall],
+    ) -> EngineResult<BundleExecutionOutcome> {
+        let tx = self.begin_transaction(transaction_id);
+        let mut events = Vec::new();
+        let mut query_results = Vec::new();
+        let mut call_access_spans = Vec::new();
+        let mut reverted_scopes = Vec::new();
+        let mut closed_scopes = BTreeSet::new();
+        let mut index = 0usize;
+
+        while index < calls.len() {
+            let Some(scope_id) = calls[index].source_revert_scope else {
+                let access_start = tx.lock().accesses.len();
+                let result = self.execute_bundle_call(
+                    tx.clone(),
+                    transaction_id,
+                    block.clone(),
+                    index,
+                    &calls[index].call,
+                    &mut events,
+                    &mut query_results,
+                );
+                let access_end = tx.lock().accesses.len();
+                call_access_spans.push(BundleCallAccessSpan {
+                    call_index: index,
+                    access_start,
+                    access_end,
+                });
+                if let Err(error) = result {
+                    return Err(EngineError::BundleCallFailed {
+                        call_index: index,
+                        error: error.to_string(),
+                    });
+                }
+                index += 1;
+                continue;
+            };
+
+            if closed_scopes.contains(&scope_id) {
+                return Err(EngineError::Internal(format!(
+                    "source revert scope {scope_id} is non-contiguous in bundle"
+                )));
+            }
+            let first = index;
+            let mut end = index + 1;
+            while end < calls.len() && calls[end].source_revert_scope == Some(scope_id) {
+                end += 1;
+            }
+
+            let outer_access_start = tx.lock().accesses.len();
+            let child_state = tx.lock().clone();
+            let access_start = child_state.accesses.len();
+            let child = Arc::new(parking_lot::Mutex::new(child_state));
+            let mut child_events = Vec::new();
+            let mut child_queries = Vec::new();
+            let mut failure = None;
+            let mut last_executed = first;
+
+            for call_index in first..end {
+                last_executed = call_index;
+                let local_start = child.lock().accesses.len().saturating_sub(access_start);
+                let result = self.execute_bundle_call(
+                    child.clone(),
+                    transaction_id,
+                    block.clone(),
+                    call_index,
+                    &calls[call_index].call,
+                    &mut child_events,
+                    &mut child_queries,
+                );
+                let local_end = child.lock().accesses.len().saturating_sub(access_start);
+                call_access_spans.push(BundleCallAccessSpan {
+                    call_index,
+                    access_start: outer_access_start + local_start,
+                    access_end: outer_access_start + local_end,
+                });
+                if let Err(error) = result {
+                    failure = Some(BundleCallFailure {
+                        call_index,
+                        error: error.to_string(),
+                    });
+                    break;
+                }
+            }
+
+            let child_state = child.lock();
+            let mut reverted_accesses = child_state.accesses[access_start..].to_vec();
+            drop(child_state);
+            for access in &mut reverted_accesses {
+                access.reverted = true;
+            }
+            tx.lock().accesses.extend(reverted_accesses);
+            reverted_scopes.push(BundleRevertedScopeOutcome {
+                scope_id,
+                first_call_index: first,
+                last_call_index: last_executed,
+                failure,
+            });
+            closed_scopes.insert(scope_id);
+            index = end;
+        }
+
+        let state = tx.lock();
+        state.commit();
+        let accesses = state.accesses.clone();
+        let created_contracts = state.created_addresses();
+        drop(state);
+
+        Ok(BundleExecutionOutcome {
+            transaction_id,
+            events,
+            query_results,
+            accesses,
+            call_access_spans,
+            created_contracts,
+            committed: true,
+            failure: None,
+            reverted_scopes,
+        })
+    }
+
+    fn execute_bundle_call(
+        &self,
+        tx: SharedTx,
+        transaction_id: TransactionId,
+        block: BlockContext,
+        call_index: usize,
+        call: &BundleCall,
+        events: &mut Vec<Event>,
+        query_results: &mut Vec<BundleQueryResult>,
+    ) -> EngineResult<()> {
+        match call {
+            BundleCall::Execute {
+                sender,
+                contract,
+                funds,
+                msg,
+            } => self
+                .execute_in_transaction(
+                    tx,
+                    transaction_id,
+                    block,
+                    sender.clone(),
+                    contract.clone(),
+                    funds.clone(),
+                    msg.clone(),
+                )
+                .map(|outcome| events.extend(outcome.events)),
+            BundleCall::Query { contract, msg } => validate_public_address(contract).and_then(|_| {
+                query_contract_shared(
+                    self.core.clone(),
+                    tx,
+                    block,
+                    contract.clone(),
+                    msg.clone(),
+                    0,
+                )
+                .map(|data| {
+                    query_results.push(BundleQueryResult {
+                        call_index,
+                        contract: contract.clone(),
+                        data,
+                    });
+                })
+            }),
+            BundleCall::BankSend { from, to, coins } => validate_public_address(from)
+                .and_then(|_| validate_public_address(to))
+                .and_then(|_| tx.lock().transfer(from, to, coins, from, 0)),
+            BundleCall::Noop => Ok(()),
+        }
+    }
+
+    fn execute_bundle_inner(
+        &self,
+        transaction_id: TransactionId,
+        block: BlockContext,
+        calls: &[BundleCall],
+        commit: bool,
+        tolerate_call_failure: bool,
+    ) -> EngineResult<BundleExecutionOutcome> {
+        let tx = self.begin_transaction(transaction_id);
+        let mut events = Vec::new();
+        let mut query_results = Vec::new();
+        let mut call_access_spans = Vec::new();
+        let mut failure = None;
+
+        for (call_index, call) in calls.iter().enumerate() {
+            let access_start = tx.lock().accesses.len();
+            let result = self.execute_bundle_call(
+                tx.clone(),
+                transaction_id,
+                block.clone(),
+                call_index,
+                call,
+                &mut events,
+                &mut query_results,
+            );
+            let access_end = tx.lock().accesses.len();
+            call_access_spans.push(BundleCallAccessSpan {
+                call_index,
+                access_start,
+                access_end,
+            });
+
+            if let Err(error) = result {
+                if !tolerate_call_failure {
+                    return Err(EngineError::BundleCallFailed {
+                        call_index,
+                        error: error.to_string(),
+                    });
+                }
+                failure = Some(BundleCallFailure {
+                    call_index,
+                    error: error.to_string(),
+                });
+                break;
+            }
+        }
+
+        let state = tx.lock();
+        if commit {
+            state.commit();
+        }
+        let mut accesses = state.accesses.clone();
+        if !commit {
+            for access in &mut accesses {
+                access.reverted = true;
+            }
+        }
+        let created_contracts = state.created_addresses();
+        drop(state);
+
+        Ok(BundleExecutionOutcome {
+            transaction_id,
+            events,
+            query_results,
+            accesses,
+            call_access_spans,
+            created_contracts,
+            committed: commit,
+            failure,
+            reverted_scopes: Vec::new(),
+        })
     }
 
     pub fn query(

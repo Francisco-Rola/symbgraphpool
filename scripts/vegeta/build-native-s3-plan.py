@@ -388,9 +388,16 @@ def translate_call_tree(
         parent_storage_context: str | None,
         parent_native_family: str | None,
         parent_instance: str | None,
+        parent_msg_sender: str | None,
     ) -> None:
         call_type = str(frame.get("type") or "UNKNOWN").upper()
         code_address = normalize_address(frame.get("to"))
+        frame_from = normalize_address(frame.get("from"))
+        # geth callTracer `from` is the address that initiated this call frame.  For CALL and
+        # STATICCALL that is also the callee-visible msg.sender.  DELEGATECALL is different:
+        # EIP-7 preserves CALLER (msg.sender) from the parent execution scope even though the trace
+        # frame itself is initiated by the proxy/current execution context.
+        msg_sender = parent_msg_sender if call_type == "DELEGATECALL" and parent_msg_sender else frame_from
         system = None if call_type in DELEGATE_TYPES else classify_system_call(frame, resolver)
 
         if system is not None:
@@ -450,6 +457,10 @@ def translate_call_tree(
             "translation_status": status,
             "dispatch": dispatch,
             "system_action_kind": system_action_kind,
+            # Compatibility/provenance field: raw geth callTracer frame initiator (`from`).
+            # Do not use this as contract msg.sender for DELEGATECALL.
+            "ethereum_caller": frame_from,
+            "ethereum_msg_sender": msg_sender,
             "ethereum_code_address": code_address,
             "storage_context_address": storage_context,
             "ethereum_profile_family": profile,
@@ -472,9 +483,10 @@ def translate_call_tree(
                     storage_context if system is None else parent_storage_context,
                     native_family if system is None else parent_native_family,
                     instance if system is None else parent_instance,
+                    msg_sender if system is None else parent_msg_sender,
                 )
 
-    walk(root, 0, None, None, None, None)
+    walk(root, 0, None, None, None, None, None)
     return actions
 
 def _conflict_pairs_for_key(readers: set[int], writers: set[int]) -> set[tuple[int, int]]:
@@ -912,6 +924,8 @@ def main() -> int:
         "family_map": str(args.family_map),
         "family_map_sha256": hashlib.sha256(args.family_map.read_bytes()).hexdigest(),
         "call_trace_semantics": "geth-callTracer-v1",
+        "ethereum_caller_provenance": "geth-callTracer.from (frame initiator; compatibility field, not DELEGATECALL msg.sender)",
+        "ethereum_msg_sender_provenance": "derived from geth callTracer tree; DELEGATECALL inherits parent execution-scope msg.sender per EIP-7",
         "plan": "native-plan.jsonl",
         "translation_coverage": "translation-coverage.json",
         "instance_catalog": "native-instance-catalog.json",

@@ -370,3 +370,207 @@ identity plus verified ABI/source metadata only; it does not embed or expose his
 read/write sets. Native conflict precision/recall and critical-chain fidelity remain post-execution
 measurements after real CosmWasm contracts and genuine LLM symbolic analyses exist.
 
+
+## Native implementation + source-derived symbolic phase
+
+After the selector-granular pre-execution gates are frozen, validate the concrete native workload
+implementation with:
+
+```bash
+bash scripts/run-vegeta-s3-native-implementation-validation.sh
+```
+
+This phase checks ten real CosmWasm code families: the seven conflict-dominant families plus the
+three selector-level semantic extensions (`cw1155-like`, `marketplace-router`, and
+`operator-filter-helper`). The checked-in
+`evaluation/vegeta/s3-native-implementation-manifest.v1.json` binds each family to its Cargo package,
+source file, Wasm artifact and source-derived symbolic JSON.
+
+The validator is deliberately fail-closed. It verifies each symbolic artifact's complete-source
+SHA-256, line-scoped evidence, required profile set, declared storage resources and explicit denial
+of historical trace-key inputs. It also checks that generated `final-native-family-map.v2.json` and
+`selector-semantic-map.json` do not reference an unimplemented non-system family. The shell wrapper
+then runs every native contract unit test, compiles every family to `wasm32-unknown-unknown`, parses
+and normalizes all symbolic artifacts through `acg-symbolic-json`, and reruns the validator requiring
+the Wasm artifacts to exist.
+
+Successful implementation validation means the workload has concrete native state semantics and
+source-derived SymbGraph profiles. It still does **not** claim native conflict-topology fidelity;
+that requires executing the translated S3 workload and comparing the resulting native concrete
+accesses with the source-trace topology.
+
+## Native S3 atomic bundle execution and topology fidelity
+
+After `run-vegeta-s3-native-implementation-validation.sh` passes, execute the translated workload
+against the real native-family Wasm contracts with:
+
+```bash
+bash scripts/run-vegeta-s3-native-execution.sh
+```
+
+The execution stage compiles `native-plan.jsonl` plus the verified selector map into atomic
+per-Ethereum-transaction bundles. The CosmWasm engine executes each bundle on one transactional
+overlay: execute calls retain the historical frame caller, smart queries observe earlier writes in
+the same bundle, bank sends share the same atomic transaction, and any source-reverted Ethereum
+transaction is executed without committing its native write set. Background actions that still have
+no defensible semantic mapping remain explicit skips rather than being assigned fabricated storage.
+
+Historical EVM concrete read/write keys are **not** used to build or execute the native bundles.
+They are loaded only after native execution by `measure-native-s3-fidelity.py`, which compares the
+independently observed CosmWasm access trace against the source trace at transaction-pair level.
+The report includes conflict-pair precision/recall/F1, an ordered conflict-DAG critical-path sum,
+and the Vegeta-compatible per-block hot-key-chain sum. Amounts are deliberately normalized to a
+bounded `Uint128` domain and historical balances/allowances are deterministically primed outside
+the measured 101 blocks; this preserves storage-key/control-path topology without claiming exact
+Ethereum value-state reconstruction.
+
+Outputs are written to `benchmarks/corpora/vegeta-ethereum/s3/native-execution/`:
+
+- `execution-manifest.json` / `execution-plan.jsonl`: executable bundles and out-of-measurement priming;
+- `native-accesses.jsonl`: concrete access traces from all 101 serially executed native blocks;
+- `native-topology-fidelity.json` / `.txt`: conflict precision/recall and critical-chain fidelity.
+
+The fidelity report is a translated-workload result, not byte-for-byte EVM equivalence. In
+particular, unsupported long-tail frames remain absent from native accesses and should appear as
+false negatives rather than being hidden by oracle-key replay.
+
+
+### Native execution token-ID normalization
+
+Ethereum ERC-721/ERC-1155 token IDs are `uint256`, while the compact native S3 contracts use
+`u64` map keys.  The execution preparer therefore uses a **per-instance dense bijection** from each
+distinct observed source token ID to a native `u64`.  It never truncates or applies modulo arithmetic
+to token IDs: equal source IDs remain equal and distinct source IDs within the same contract instance
+remain distinct.  This avoids introducing artificial NFT/ERC1155 conflicts while keeping the native
+contract key type bounded.  The execution manifest records the mapping policy and distinct-ID counts.
+
+
+### Native execution allowance normalization
+
+ERC20-style approvals use a separate normalization from transfer amounts.  A zero approval remains
+zero, while any positive approval becomes the large `SEED` sentinel.  This is deliberate: applying
+the transfer modulo independently to approvals can invert the source authorization relation
+`allowance >= transferFrom amount` even for a canonically successful Ethereum transaction (notably
+`uint256::MAX` approvals).  The sentinel preserves the allowance key, zero/revoke behavior, and
+successful authorization control path without importing historical allowance values into the native
+workload.  `transferFrom` continues to decrement the native allowance, so allowance reads/writes and
+dependency keys remain real contract accesses.
+
+
+### Native ERC721 ownership and authorization setup
+
+ERC721 `transferFrom(address,address,uint256)` and three-argument `safeTransferFrom` both take
+`(from, to, tokenId)`, so token identity is decoded from ABI word 2 before applying the collision-free
+per-instance token-ID remap.  The first explicit source `from` address supplies the initial native
+owner.  If the historical caller differs from that owner (for example a marketplace conduit), the
+owner/operator approval is primed outside the measured workload.  The measured native transfer still
+runs the real approval/operator checks and records their storage reads; later transfers do not rewrite
+initial ownership during setup.
+
+
+### Source-reverted native bundles
+
+A transaction marked failed by the canonical S3 trace is replayed on a non-committing native overlay.
+If one of its translated native calls also returns an error, the bundle now stops at that call and
+retains the accesses observed up to and including the failure, all marked `reverted`.  This is an
+expected source-revert outcome rather than a benchmark abort.  Successful source transactions remain
+strict: any native error still fails the run.  `native-accesses.jsonl` records the failed native call
+index, originating action ID, and error string when this occurs.
+
+This distinction matters for transactions such as failed marketplace/NFT operations: forcing a
+source-reverted call to succeed would fabricate an execution path, while dropping the transaction
+would lose the dependency reads that led to the revert.
+
+
+### Strict native failure diagnostics
+
+Successful source transactions remain fail-closed.  When one fails natively, the engine now preserves
+the exact bundle-call index in `EngineError::BundleCallFailed`, and the S3 executor reports the
+translated call's native family, instance, sender, originating action ID, kind, message, and underlying
+contract/VM error.  This is diagnostic-only and does not relax execution semantics; it avoids having
+to infer which call in a multi-contract bundle diverged.
+
+
+### RPC-backed native ERC721 initial state
+
+Publication native-S3 runs now reconstruct recognized ERC721 logical state at the predecessor block
+(`16774644` for S3) through standard high-level `eth_call` queries: `ownerOf(tokenId)`,
+`getApproved(tokenId)`, and `isApprovedForAll(owner,operator)`.  The results are normalized into the
+native contract's token-ID namespace and applied only during out-of-measurement priming.  No EVM
+storage slots or concrete trace read/write keys are queried or copied.  The measured workload still
+executes the real native ownership and approval checks.
+
+This replaces the earlier "first transfer implies initial owner/operator approval" heuristic for
+publication runs.  Responses are resumably cached in
+`native-execution/evm-initial-state-cache.json`, so subsequent replays can be offline.  Set
+`ETH_RPC_URL` to an archive-capable Ethereum endpoint for the first run.  The explicit
+`VEGETA_S3_NATIVE_INITIAL_STATE_MODE=heuristic` fallback is retained only for diagnostics and is
+recorded as such in the execution manifest.
+
+
+### Caught internal EVM reverts
+
+A successful Ethereum transaction may contain an internal `CALL`/`DELEGATECALL` that reverts while a
+successful ancestor catches the failure.  The native execution plan now tags every translated action
+under such a subtree with the **top-most failed callTracer action ID**.  The executor runs all
+contiguous translated calls in that subtree against one nested transaction overlay cloned from the
+outer transaction's current state.  The nested overlay sees prior successful writes and its own
+in-scope writes, but is discarded at the end of the failed source scope.  Its concrete native access
+records are retained with `reverted=true`; execution then resumes with the successful outer bundle.
+
+This is distinct from a top-level source revert: successful source transactions remain strict outside
+the explicitly traced failed subtrees.  The execution output records each reverted internal scope and
+any native call at which that scope itself stopped.
+
+
+### Exact EVM `msg.sender` provenance
+
+Publication native-S3 execution distinguishes geth callTracer's raw frame `from` from the
+callee-visible EVM `msg.sender`.  For ordinary `CALL`/`STATICCALL` frames they coincide, but
+`DELEGATECALL` preserves the parent execution scope's `msg.sender` (EIP-7).  The native-plan builder
+therefore records both `ethereum_caller` (the trace frame initiator, retained for provenance) and
+`ethereum_msg_sender` (the value native contract execution must use).
+
+The execution wrapper refreshes `native-plan.jsonl` from the local call-cache before each run and the
+preparer rejects stale publication actions that lack `ethereum_msg_sender`.  The former raw-frame/
+parent-context fallback remains available only through `VEGETA_S3_NATIVE_CALLER_MODE=heuristic` for
+diagnostics and is rejected by the final execution validator.
+
+This distinction is essential for proxy and implementation calls.  A proxy may appear as
+callTracer's `from` on its `DELEGATECALL` into an implementation while the implementation still sees
+the original user as `msg.sender`; feeding the proxy address into a native ERC721 authorization
+check manufactures an `unauthorized` result that did not exist in the source execution.
+
+
+### Fungible `totalSupply` execution compatibility
+
+The native execution translator emits `query::total_supply` for ERC-20 selector `0x18160ddd`
+across the fungible families. `controlled-cw20` now exposes its already-maintained `TOTAL_SUPPLY`
+item through that query. `fee-token-cw20` now maintains a fixed supply initialized from its seed
+balances and exposes the same query; fee-on-transfer operations redistribute balances without
+changing supply. Their source-derived symbolic artifacts include the singleton initialization/read
+and the implementation manifest requires the query profile, preventing translator/contract message
+schema drift from reappearing.
+
+
+### Native topology FP/FN attribution
+
+`measure-native-s3-fidelity.py` now emits `native-topology-attribution.json` and
+`native-topology-attribution.txt` after the aggregate topology report.  The executor preserves a
+per-bundle-call access span and annotates each concrete native access with its originating family,
+instance, semantic action, and source action ID.  This lets the report rank false-positive conflict
+pairs by native family, instance, decoded storage namespace, semantic action, concrete key, and
+block.
+
+A conflict pair caused by multiple keys receives one unit of fractional credit split across those
+keys, so the ranking is comparable to the total false-positive pair count rather than double
+counting every multi-key conflict.  The report separately counts pair-key incidences and identifies
+false-positive edges that participate in at least one native longest conflict-DAG path.  It also
+computes a true-positive-only native critical path by removing all native-only edges, which isolates
+how much the native critical path depends on false-positive edges.
+
+False negatives are attributed to their source EVM storage owner/key and, when available, joined to
+the Ethereum profile family using native-plan storage-context metadata.  All source concrete-key
+attribution happens only after native execution; it is diagnostic and is never fed into the native
+planner, executor, initial-state priming, or symbolic profiles.  Decoded CosmWasm resource names are
+best-effort namespace labels, not semantic ground truth.

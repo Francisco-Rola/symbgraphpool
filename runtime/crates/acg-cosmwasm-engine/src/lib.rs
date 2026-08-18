@@ -35,9 +35,11 @@ pub use crate::speculative::{
     StateWriteSet, StorageWrite,
 };
 pub use crate::types::{
-    AccessKind, AccessRecord, Address, BlockContext, CodeChecksum, CodeId, CodeKind, CodeMetadata,
-    ContractMetadata, ExecutionOutcome, ExecutionRequest, NativeResponse, QueryOutcome,
-    TransactionId,
+    AccessKind, AccessRecord, Address, BlockContext, BundleCall, BundleCallAccessSpan,
+    BundleCallFailure, BundleExecutionOutcome, BundleQueryResult, BundleRevertedScopeOutcome,
+    ScopedBundleCall,
+    CodeChecksum, CodeId, CodeKind, CodeMetadata, ContractMetadata,
+    ExecutionOutcome, ExecutionRequest, NativeResponse, QueryOutcome, TransactionId,
 };
 
 pub use crate::validation::{ValidationConflict, ValidationOutcome};

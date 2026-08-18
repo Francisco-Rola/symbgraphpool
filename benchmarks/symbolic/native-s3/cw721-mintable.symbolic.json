@@ -1,0 +1,448 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "cw721-mintable",
+  "source": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+  "analysis_provenance": {
+    "method": "llm-source-derived",
+    "source_sha256": "096cbd46cf6ec2bbc1530aa28885c8744675e1c5578bbb6773526091242c381a",
+    "source_scope": "complete native contract source",
+    "historical_trace_keys_used": false,
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+  },
+  "storage_resources": {
+    "CONFIG": {
+      "key_semantic_name": "singleton"
+    },
+    "OWNER": {
+      "key_semantic_name": "token_id"
+    },
+    "APPROVAL": {
+      "key_semantic_name": "token_id"
+    },
+    "OPERATORS": {
+      "key_semantic_name": "owner_operator"
+    },
+    "OWNER_COUNT": {
+      "key_semantic_name": "owner"
+    },
+    "TOKEN_URI": {
+      "key_semantic_name": "token_id"
+    }
+  },
+  "dependency_kinds": {
+    "input": "depends only on message/sender/environment input",
+    "state": "depends only on stored state",
+    "input_and_state": "depends on both input and stored state",
+    "none": "unconditional"
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "msg.admin",
+        "msg.name",
+        "msg.symbol"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{CONFIG.save(deps.storage,&Config{admin:deps.api.addr_validate(&msg.admin)?,name:msg.name,symbol:msg.symbol,next_token_id:1})?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Mint",
+      "input_parameters": [
+        "info.sender",
+        "owner",
+        "token_id",
+        "token_uri"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn mint(deps:DepsMut,sender:Addr,owner:String,token_id:Option<u64>,uri:Option<String>)->Result<Response,ContractError>{let mut c=CONFIG.load(deps.storage)?;if c.admin!=sender{return Err(ContractError::Unauthorized)};let id=token_id.unwrap_or(c.next_token_id);let owner=deps.api.addr_validate(&owner)?;OWNER.save(deps.storage,id,&owner)?;if let Some(uri)=uri{TOKEN_URI.save(deps.storage,id,&uri)?;}OWNER_COUNT.update(deps.storage,owner.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;if id>=c.next_token_id{c.next_token_id=id+1;CONFIG.save(deps.storage,&c)?;}Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn mint(deps:DepsMut,sender:Addr,owner:String,token_id:Option<u64>,uri:Option<String>)->Result<Response,ContractError>{let mut c=CONFIG.load(deps.storage)?;if c.admin!=sender{return Err(ContractError::Unauthorized)};let id=token_id.unwrap_or(c.next_token_id);let owner=deps.api.addr_validate(&owner)?;OWNER.save(deps.storage,id,&owner)?;if let Some(uri)=uri{TOKEN_URI.save(deps.storage,id,&uri)?;}OWNER_COUNT.update(deps.storage,owner.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;if id>=c.next_token_id{c.next_token_id=id+1;CONFIG.save(deps.storage,&c)?;}Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER_COUNT",
+          "key": {
+            "semantic_name": "owner",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "authorized",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn mint(deps:DepsMut,sender:Addr,owner:String,token_id:Option<u64>,uri:Option<String>)->Result<Response,ContractError>{let mut c=CONFIG.load(deps.storage)?;if c.admin!=sender{return Err(ContractError::Unauthorized)};let id=token_id.unwrap_or(c.next_token_id);let owner=deps.api.addr_validate(&owner)?;OWNER.save(deps.storage,id,&owner)?;if let Some(uri)=uri{TOKEN_URI.save(deps.storage,id,&uri)?;}OWNER_COUNT.update(deps.storage,owner.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;if id>=c.next_token_id{c.next_token_id=id+1;CONFIG.save(deps.storage,&c)?;}Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "TOKEN_URI",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "token_uri is Some",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "fn mint(deps:DepsMut,sender:Addr,owner:String,token_id:Option<u64>,uri:Option<String>)->Result<Response,ContractError>{let mut c=CONFIG.load(deps.storage)?;if c.admin!=sender{return Err(ContractError::Unauthorized)};let id=token_id.unwrap_or(c.next_token_id);let owner=deps.api.addr_validate(&owner)?;OWNER.save(deps.storage,id,&owner)?;if let Some(uri)=uri{TOKEN_URI.save(deps.storage,id,&uri)?;}OWNER_COUNT.update(deps.storage,owner.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;if id>=c.next_token_id{c.next_token_id=id+1;CONFIG.save(deps.storage,&c)?;}Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::TransferNft",
+      "input_parameters": [
+        "info.sender",
+        "recipient",
+        "token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn authorized(deps:Deps,sender:&Addr,id:u64)->Result<Addr,ContractError>{let owner=OWNER.may_load(deps.storage,id)?.ok_or(ContractError::NotFound)?;if owner==*sender{return Ok(owner)};if APPROVAL.may_load(deps.storage,id)?.as_ref()==Some(sender){return Ok(owner)};if OPERATORS.may_load(deps.storage,(owner.as_str(),sender.as_str()))?.unwrap_or(false){return Ok(owner)};Err(ContractError::Unauthorized)}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "APPROVAL",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "sender != owner",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn authorized(deps:Deps,sender:&Addr,id:u64)->Result<Addr,ContractError>{let owner=OWNER.may_load(deps.storage,id)?.ok_or(ContractError::NotFound)?;if owner==*sender{return Ok(owner)};if APPROVAL.may_load(deps.storage,id)?.as_ref()==Some(sender){return Ok(owner)};if OPERATORS.may_load(deps.storage,(owner.as_str(),sender.as_str()))?.unwrap_or(false){return Ok(owner)};Err(ContractError::Unauthorized)}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "OPERATORS",
+          "key": {
+            "semantic_name": "owner_operator",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, info.sender)"
+            }
+          },
+          "guard": {
+            "expression": "sender != owner",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn authorized(deps:Deps,sender:&Addr,id:u64)->Result<Addr,ContractError>{let owner=OWNER.may_load(deps.storage,id)?.ok_or(ContractError::NotFound)?;if owner==*sender{return Ok(owner)};if APPROVAL.may_load(deps.storage,id)?.as_ref()==Some(sender){return Ok(owner)};if OPERATORS.may_load(deps.storage,(owner.as_str(),sender.as_str()))?.unwrap_or(false){return Ok(owner)};Err(ContractError::Unauthorized)}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "authorized",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn transfer(deps:DepsMut,sender:Addr,recipient:String,id:u64)->Result<Response,ContractError>{let old=authorized(deps.as_ref(),&sender,id)?;let new=deps.api.addr_validate(&recipient)?;OWNER.save(deps.storage,id,&new)?;APPROVAL.remove(deps.storage,id);OWNER_COUNT.update(deps.storage,old.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default().saturating_sub(1))})?;OWNER_COUNT.update(deps.storage,new.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER_COUNT",
+          "key": {
+            "semantic_name": "owner",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "authorized",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn transfer(deps:DepsMut,sender:Addr,recipient:String,id:u64)->Result<Response,ContractError>{let old=authorized(deps.as_ref(),&sender,id)?;let new=deps.api.addr_validate(&recipient)?;OWNER.save(deps.storage,id,&new)?;APPROVAL.remove(deps.storage,id);OWNER_COUNT.update(deps.storage,old.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default().saturating_sub(1))})?;OWNER_COUNT.update(deps.storage,new.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SendOrSafeTransferNft",
+      "input_parameters": [
+        "info.sender",
+        "recipient",
+        "token_id"
+      ],
+      "accesses": [],
+      "delegates_to": {
+        "entrypoint": "execute::TransferNft",
+        "input_mapping": {
+          "recipient": "recipient",
+          "token_id": "token_id",
+          "info.sender": "info.sender"
+        }
+      }
+    },
+    {
+      "entrypoint": "execute::ApproveNft",
+      "input_parameters": [
+        "info.sender",
+        "spender",
+        "token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn authorized(deps:Deps,sender:&Addr,id:u64)->Result<Addr,ContractError>{let owner=OWNER.may_load(deps.storage,id)?.ok_or(ContractError::NotFound)?;if owner==*sender{return Ok(owner)};if APPROVAL.may_load(deps.storage,id)?.as_ref()==Some(sender){return Ok(owner)};if OPERATORS.may_load(deps.storage,(owner.as_str(),sender.as_str()))?.unwrap_or(false){return Ok(owner)};Err(ContractError::Unauthorized)}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "APPROVAL",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "sender is owner or operator",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 16,
+            "end_line": 16,
+            "code": "fn approve(deps:DepsMut,sender:Addr,spender:String,id:u64)->Result<Response,ContractError>{let owner=OWNER.may_load(deps.storage,id)?.ok_or(ContractError::NotFound)?;if owner!=sender&&!OPERATORS.may_load(deps.storage,(owner.as_str(),sender.as_str()))?.unwrap_or(false){return Err(ContractError::Unauthorized)};APPROVAL.save(deps.storage,id,&deps.api.addr_validate(&spender)?)?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ApproveAll",
+      "input_parameters": [
+        "info.sender",
+        "operator",
+        "approved"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "OPERATORS",
+          "key": {
+            "semantic_name": "owner_operator",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, operator)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Mint{owner,token_id,token_uri}=>mint(deps,info.sender,owner,token_id,token_uri),ExecuteMsg::TransferNft{recipient,token_id}|ExecuteMsg::SendOrSafeTransferNft{recipient,token_id}=>transfer(deps,info.sender,recipient,token_id),ExecuteMsg::ApproveNft{spender,token_id}=>approve(deps,info.sender,spender,token_id),ExecuteMsg::ApproveAll{operator,approved}=>{let o=deps.api.addr_validate(&operator)?;OPERATORS.save(deps.storage,(info.sender.as_str(),o.as_str()),&approved)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::OwnerOf",
+      "input_parameters": [
+        "token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 17,
+            "end_line": 17,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::OwnerOf{token_id}=>to_json_binary(&OwnerResponse{owner:OWNER.load(deps.storage,token_id)?.into_string()}),QueryMsg::TokensByOwnerCount{owner}=>to_json_binary(&CountResponse{count:OWNER_COUNT.may_load(deps.storage,&owner)?.unwrap_or_default()}),QueryMsg::Approved{token_id}=>to_json_binary(&APPROVAL.may_load(deps.storage,token_id)?.map(Addr::into_string))}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::TokensByOwnerCount",
+      "input_parameters": [
+        "owner"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "OWNER_COUNT",
+          "key": {
+            "semantic_name": "owner",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+            "start_line": 17,
+            "end_line": 17,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::OwnerOf{token_id}=>to_json_binary(&OwnerResponse{owner:OWNER.load(deps.storage,token_id)?.into_string()}),QueryMsg::TokensByOwnerCount{owner}=>to_json_binary(&CountResponse{count:OWNER_COUNT.may_load(deps.storage,&owner)?.unwrap_or_default()}),QueryMsg::Approved{token_id}=>to_json_binary(&APPROVAL.may_load(deps.storage,token_id)?.map(Addr::into_string))}}"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ]
+}

@@ -38,6 +38,9 @@ native_plan_builder = load_script("build-native-s3-plan.py")
 native_plan_validator = load_script("validate-native-s3-plan.py")
 background_gap_builder = load_script("build-native-background-gap.py")
 final_map_builder = load_script("finalize-native-s3-map.py")
+native_impl_validator = load_script("validate-native-s3-implementation.py")
+native_execution_preparer = load_script("prepare-native-s3-execution.py")
+native_fidelity = load_script("measure-native-s3-fidelity.py")
 
 
 class VegetaCorpusTests(unittest.TestCase):
@@ -938,10 +941,14 @@ class NativeS3PlanTests(unittest.TestCase):
         blocks, calls, frozen, mapping, code_cache, _, a, _ = self._small_fixture()
         resolver = native_plan_builder.FamilyResolver(frozen, code_cache, mapping)
         plan, _, _ = native_plan_builder.build_plan(blocks, calls, frozen, resolver, ROOT)
-        child = plan[0]["transactions"][0]["native_actions"][1]
+        parent, child = plan[0]["transactions"][0]["native_actions"][:2]
         self.assertEqual(child["translation_status"], "inlined-delegatecall")
         self.assertEqual(child["storage_context_address"], a)
         self.assertEqual(child["native_instance_id"], f"cw20-base:{a}")
+        # callTracer's DELEGATECALL frame.from is the proxy/current context, but the implementation
+        # observes the parent's original msg.sender.
+        self.assertEqual(child["ethereum_caller"], a)
+        self.assertEqual(child["ethereum_msg_sender"], parent["ethereum_msg_sender"])
 
     def test_background_calls_are_retained_and_concrete_accesses_never_enter_plan(self):
         blocks, calls, frozen, mapping, code_cache, _, _, _ = self._small_fixture()
@@ -958,6 +965,31 @@ class NativeS3PlanTests(unittest.TestCase):
         self.assertEqual(coverage["transaction_semantic_coverage"]["background_only_transactions"], 1)
 
 
+    def test_delegatecall_effective_msg_sender_inherits_root_sender(self):
+        blocks, calls, frozen, mapping, code_cache, _, a, _ = self._small_fixture()
+        resolver = native_plan_builder.FamilyResolver(frozen, code_cache, mapping)
+        user = "0x" + "bc" * 20
+        proxy = "0x" + "b1" * 20
+        implementation = "0x" + "2d" * 20
+        actions = native_plan_builder.translate_call_tree({
+            "type": "CALL",
+            "from": user,
+            "to": proxy,
+            "input": "0x42842e0e",
+            "value": "0x0",
+            "calls": [{
+                "type": "DELEGATECALL",
+                "from": proxy,
+                "to": implementation,
+                "input": "0x42842e0e",
+                "value": "0x0",
+            }],
+        }, resolver)
+        self.assertEqual(actions[0]["ethereum_caller"], user)
+        self.assertEqual(actions[0]["ethereum_msg_sender"], user)
+        self.assertEqual(actions[1]["ethereum_caller"], proxy)
+        self.assertEqual(actions[1]["ethereum_msg_sender"], user)
+
     def test_system_actions_map_precompile_empty_code_transfer_and_noop(self):
         blocks, calls, frozen, mapping, code_cache, _, _, _ = self._small_fixture()
         empty = "0x" + "ee" * 20
@@ -971,6 +1003,7 @@ class NativeS3PlanTests(unittest.TestCase):
         self.assertEqual(transfer["system_action_kind"], "plain-value-transfer")
         self.assertEqual(transfer["native_entrypoint"], "system::bank_send")
         self.assertEqual(transfer["arguments"]["amount_wei"], 42)
+        self.assertEqual(transfer["ethereum_caller"], "0x" + "cc" * 20)
 
         noop = native_plan_builder.translate_call_tree({
             "type": "STATICCALL", "from": "0x" + "cc" * 20, "to": empty, "input": "0xdead", "value": "0x0"
@@ -1378,6 +1411,42 @@ class NativeFinalMappingTests(unittest.TestCase):
             self.assertEqual(gate["metrics"][name]["minimum"], minimum)
 
 
+class NativeS3ImplementationArtifactTests(unittest.TestCase):
+    def test_checked_in_native_sources_and_symbolic_evidence_validate(self):
+        manifest = json.loads(
+            (ROOT / "evaluation/vegeta/s3-native-implementation-manifest.v1.json").read_text()
+        )
+        self.assertEqual(len(manifest["families"]), 10)
+        for family in manifest["families"]:
+            errors = native_impl_validator.validate_family(ROOT, family, False)
+            self.assertEqual(errors, [], family["native_code_family"])
+
+    def test_symbolic_provenance_fails_closed_after_source_change(self):
+        manifest = json.loads(
+            (ROOT / "evaluation/vegeta/s3-native-implementation-manifest.v1.json").read_text()
+        )
+        family = manifest["families"][0]
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            source = temp_root / family["source"]
+            symbolic = temp_root / family["symbolic_analysis"]
+            source.parent.mkdir(parents=True, exist_ok=True)
+            symbolic.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text((ROOT / family["source"]).read_text() + "\n// drift\n")
+            symbolic.write_text((ROOT / family["symbolic_analysis"]).read_text())
+            errors = native_impl_validator.validate_family(temp_root, family, False)
+        self.assertTrue(any("source SHA-256 mismatch" in error for error in errors))
+
+    def test_no_native_source_contains_historical_trace_oracle_arrays(self):
+        manifest = json.loads(
+            (ROOT / "evaluation/vegeta/s3-native-implementation-manifest.v1.json").read_text()
+        )
+        for family in manifest["families"]:
+            text = (ROOT / family["source"]).read_text()
+            for forbidden in native_impl_validator.FORBIDDEN:
+                self.assertNotIn(forbidden, text, family["native_code_family"])
+
+
 class EvaluationConfigTests(unittest.TestCase):
     def test_symbolic_profile_exposes_only_prediction_arrays(self):
         profile = json.loads(
@@ -1429,6 +1498,405 @@ class EvaluationConfigTests(unittest.TestCase):
             blocks.setdefault(block, set()).add(run["mode"])
         self.assertEqual(len(blocks), 3)
         self.assertTrue(all(sample_modes == modes for sample_modes in blocks.values()))
+
+
+class NativeS3ExecutionPreparationTests(unittest.TestCase):
+    def test_amount_normalization_is_bounded_and_preserves_zero(self):
+        self.assertEqual(native_execution_preparer.amount(0), 0)
+        self.assertEqual(native_execution_preparer.amount(1), 2)
+        self.assertLessEqual(native_execution_preparer.amount(2**255), 1_000_000)
+
+    def test_erc721_transfer_from_decodes_word_two_and_preserves_source_owner(self):
+        mapper = native_execution_preparer.TokenIdRemapper()
+        owner = "0x0628f16e2d1c51f6fe84d4300b63330e75e3a183"
+        recipient = "0x091ddba1cae98f1fc34349ce37ab47076ae2ae0d"
+        conduit = "0x1e0049783f008a0085193e00003d00cd54003c71"
+        def addr_word(addr):
+            return ("00" * 12) + addr[2:]
+        def calldata(token_id):
+            return "0x23b872dd" + addr_word(owner) + addr_word(recipient) + token_id.to_bytes(32, "big").hex()
+        action = {
+            "action_id": 14,
+            "native_instance_id": "cw721-mintable:0x48be0965618ed7b65e577487e1f74f12aca74ef7",
+            "ethereum_input": calldata(3210),
+            "arguments": {},
+        }
+        call = native_execution_preparer.translate(
+            "cw721-mintable", "execute::TransferNft",
+            "transferFrom(address,address,uint256)", {}, action, conduit, mapper,
+        )
+        self.assertEqual(call["source_owner"], owner)
+        self.assertEqual(call["msg"]["transfer_nft"]["recipient"], recipient)
+        self.assertEqual(call["msg"]["transfer_nft"]["token_id"], 1)
+        action2 = dict(action, action_id=17, ethereum_input=calldata(3211))
+        call2 = native_execution_preparer.translate(
+            "cw721-mintable", "execute::TransferNft",
+            "transferFrom(address,address,uint256)", {}, action2, conduit, mapper,
+        )
+        self.assertEqual(call2["msg"]["transfer_nft"]["token_id"], 2)
+
+    def test_nft_initial_owner_prefers_first_transfer_over_query_placeholder(self):
+        owners = {}
+        priorities = {}
+        iid = "cw721-mintable:collection"
+        # note_nft_initial_owner expects a defaultdict-like outer mapping; preseed the instance.
+        owners[iid] = {}
+        native_execution_preparer.note_nft_initial_owner(
+            owners, priorities, iid, 7, "native-s3-seed-owner", 1
+        )
+        native_execution_preparer.note_nft_initial_owner(
+            owners, priorities, iid, 7, "alice-owner", 3
+        )
+        native_execution_preparer.note_nft_initial_owner(
+            owners, priorities, iid, 7, "bob-owner", 3
+        )
+        self.assertEqual(owners[iid][7], "alice-owner")
+
+    def test_cw721_initial_state_resolution_uses_high_level_abi_calls(self):
+        class FakeResolver:
+            def __init__(self):
+                self.calls = []
+            def call(self, to, data):
+                self.calls.append((to, data))
+                sel = data[:10]
+                if sel == "0x6352211e":  # ownerOf
+                    return "0x" + ("00" * 12) + ("11" * 20)
+                if sel == "0x081812fc":  # getApproved
+                    return "0x" + ("00" * 12) + ("22" * 20)
+                if sel == "0xe985e9c5":  # isApprovedForAll
+                    return "0x" + ("00" * 31) + "01"
+                raise AssertionError(data)
+
+        iid = "cw721-mintable:0x" + ("aa" * 20)
+        owner = "0x" + ("11" * 20)
+        operator = "0x" + ("33" * 20)
+        resolved = native_execution_preparer.resolve_cw721_initial_state(
+            FakeResolver(),
+            {iid: {9: (1 << 200) + 7}},
+            {(iid, owner, operator)},
+        )
+        self.assertEqual(resolved["owners"][iid][9], owner)
+        self.assertEqual(resolved["approvals"][(iid, 9)], "0x" + ("22" * 20))
+        self.assertIn((iid, owner, operator), resolved["operators"])
+        self.assertEqual(resolved["statistics"]["owners_resolved"], 1)
+        self.assertEqual(resolved["statistics"]["token_approvals_resolved"], 1)
+        self.assertEqual(resolved["statistics"]["operator_approvals_true"], 1)
+
+    def test_abi_erc721_initial_state_helpers_decode_addresses_and_bool(self):
+        addr = "0x" + ("ab" * 20)
+        self.assertEqual(
+            native_execution_preparer.decode_abi_addr("0x" + ("00" * 12) + ("ab" * 20)),
+            addr,
+        )
+        self.assertTrue(native_execution_preparer.decode_abi_bool("0x" + ("00" * 31) + "01"))
+        self.assertFalse(native_execution_preparer.decode_abi_bool("0x" + ("00" * 32)))
+        self.assertEqual(len(native_execution_preparer.abi_word_uint(2**255 + 9)), 64)
+        self.assertEqual(len(native_execution_preparer.abi_word_addr(addr)), 64)
+
+    def test_source_revert_scope_uses_topmost_failed_ancestor(self):
+        by_id = {
+            0: {"action_id": 0, "parent_action_id": None, "failed_frame": False},
+            1: {"action_id": 1, "parent_action_id": 0, "failed_frame": True},
+            6: {"action_id": 6, "parent_action_id": 1, "failed_frame": True},
+            7: {"action_id": 7, "parent_action_id": 6, "failed_frame": True},
+            8: {"action_id": 8, "parent_action_id": 7, "failed_frame": False},
+        }
+        self.assertEqual(
+            native_execution_preparer.source_revert_scope_action_id(by_id[7], by_id), 1
+        )
+        # A successful child under the failed subtree still rolls back with that subtree.
+        self.assertEqual(
+            native_execution_preparer.source_revert_scope_action_id(by_id[8], by_id), 1
+        )
+        self.assertIsNone(
+            native_execution_preparer.source_revert_scope_action_id(by_id[0], by_id)
+        )
+
+    def test_attach_revert_scope_marks_call_without_changing_successful_call(self):
+        by_id = {
+            0: {"action_id": 0, "parent_action_id": None, "failed_frame": False},
+            4: {"action_id": 4, "parent_action_id": 0, "failed_frame": True},
+        }
+        failed_call = native_execution_preparer.attach_revert_scope(
+            {"kind": "noop", "origin_action_id": 4}, by_id[4], by_id
+        )
+        self.assertEqual(failed_call["source_revert_scope_action_id"], 4)
+        normal_call = native_execution_preparer.attach_revert_scope(
+            {"kind": "noop", "origin_action_id": 0}, by_id[0], by_id
+        )
+        self.assertNotIn("source_revert_scope_action_id", normal_call)
+
+    def test_exact_caller_mode_rejects_stale_native_plan_action(self):
+        tx = {"from": "0x" + ("11" * 20)}
+        action = {
+            "action_id": 1,
+            "parent_action_id": 0,
+            "call_type": "CALL",
+            "ethereum_caller": "0x" + ("33" * 20),
+            "ethereum_code_address": "0x" + ("22" * 20),
+        }
+        parent = {
+            "action_id": 0,
+            "parent_action_id": None,
+            "call_type": "CALL",
+            "storage_context_address": "0x" + ("22" * 20),
+        }
+        with self.assertRaisesRegex(ValueError, "missing exact ethereum_msg_sender"):
+            native_execution_preparer.caller_for(tx, action, {0: parent, 1: action}, "exact")
+
+    def test_exact_caller_mode_uses_effective_msg_sender_not_trace_frame_from(self):
+        tx = {"from": "0x" + ("11" * 20)}
+        parent = {
+            "action_id": 0,
+            "parent_action_id": None,
+            "call_type": "CALL",
+            "storage_context_address": "0x" + ("22" * 20),
+        }
+        action = {
+            "action_id": 1,
+            "parent_action_id": 0,
+            "call_type": "DELEGATECALL",
+            "ethereum_caller": "0x" + ("33" * 20),
+            "ethereum_msg_sender": "0x" + ("44" * 20),
+            "ethereum_code_address": "0x" + ("22" * 20),
+        }
+        caller = native_execution_preparer.caller_for(
+            tx, action, {0: parent, 1: action}, "exact"
+        )
+        self.assertEqual(caller, "0x" + ("44" * 20))
+
+    def test_heuristic_caller_mode_retains_legacy_fallback_for_diagnostics(self):
+        tx = {"from": "0x" + ("11" * 20)}
+        parent = {
+            "action_id": 0,
+            "parent_action_id": None,
+            "call_type": "CALL",
+            "storage_context_address": "0x" + ("22" * 20),
+        }
+        action = {
+            "action_id": 1,
+            "parent_action_id": 0,
+            "call_type": "CALL",
+            "ethereum_code_address": "0x" + ("44" * 20),
+        }
+        caller = native_execution_preparer.caller_for(
+            tx, action, {0: parent, 1: action}, "heuristic"
+        )
+        self.assertEqual(caller, "0x" + ("22" * 20))
+
+    def test_positive_approval_uses_large_sentinel_and_zero_stays_zero(self):
+        self.assertEqual(native_execution_preparer.approval_amount(0), 0)
+        self.assertEqual(native_execution_preparer.approval_amount(1), native_execution_preparer.SEED)
+        self.assertEqual(
+            native_execution_preparer.approval_amount((1 << 256) - 1),
+            native_execution_preparer.SEED,
+        )
+
+    def test_max_uint_approval_cannot_fold_below_following_transfer_from(self):
+        mapper = native_execution_preparer.TokenIdRemapper()
+        iid = "controlled-cw20:0x" + "aa" * 20
+        spender = "0x" + "bb" * 20
+        owner = "0x" + "cc" * 20
+        recipient = "0x" + "dd" * 20
+
+        approve = native_execution_preparer.translate(
+            "controlled-cw20",
+            "execute::increase_allowance_or_approve",
+            "approve(address,uint256)",
+            {},
+            {
+                "action_id": 1,
+                "native_instance_id": iid,
+                "arguments": {"spender": spender, "amount": (1 << 256) - 1},
+                "ethereum_input": "0x",
+            },
+            owner,
+            mapper,
+        )
+        transfer_from = native_execution_preparer.translate(
+            "controlled-cw20",
+            "execute::transfer_from",
+            "transferFrom(address,address,uint256)",
+            {},
+            {
+                "action_id": 2,
+                "native_instance_id": iid,
+                "arguments": {
+                    "owner": owner,
+                    "recipient": recipient,
+                    "amount": 51_772_863_100,
+                },
+                "ethereum_input": "0x",
+            },
+            spender,
+            mapper,
+        )
+
+        approved = int(approve["msg"]["approve"]["amount"])
+        spend = int(transfer_from["msg"]["transfer_from"]["amount"])
+        self.assertEqual(approved, native_execution_preparer.SEED)
+        self.assertGreaterEqual(approved, spend)
+        # This is the concrete regression: independent modulo folding used to produce
+        # 639,936 approval versus 863,101 spend for the S3 USDC/Curve path.
+        self.assertEqual(spend, 863_101)
+
+    def test_token_id_remapper_preserves_equality_without_uint256_truncation(self):
+        mapper = native_execution_preparer.TokenIdRemapper()
+        huge = (1 << 255) + 123456789
+        first = mapper.map("cw721-mintable:instance-a", huge)
+        self.assertEqual(first, 1)
+        self.assertEqual(mapper.map("cw721-mintable:instance-a", huge), first)
+        second = mapper.map("cw721-mintable:instance-a", huge + (1 << 64))
+        self.assertEqual(second, 2)
+        self.assertNotEqual(first, second)
+        # The namespace is per contract instance, matching native state isolation.
+        self.assertEqual(mapper.map("cw721-mintable:instance-b", huge), 1)
+        self.assertLessEqual(second, native_execution_preparer.U64_MAX)
+        self.assertTrue(mapper.summary()["collision_free"])
+
+    def test_huge_cw721_and_cw1155_ids_translate_into_u64_keys(self):
+        mapper = native_execution_preparer.TokenIdRemapper()
+        huge = (1 << 240) + 77
+        word = huge.to_bytes(32, "big").hex()
+        addr = ("00" * 12) + ("11" * 20)
+        data_721 = "0x42842e0e" + addr + addr + word
+        action_721 = {
+            "action_id": 1,
+            "native_instance_id": "cw721-mintable:0x" + "aa" * 20,
+            "ethereum_input": data_721,
+            "arguments": {},
+        }
+        call_721 = native_execution_preparer.translate(
+            "cw721-mintable", "execute::TransferNft",
+            "safeTransferFrom(address,address,uint256)",
+            {}, action_721, "0x" + "22" * 20, mapper,
+        )
+        native_721 = call_721["msg"]["transfer_nft"]["token_id"]
+        self.assertEqual(native_721, 1)
+        self.assertLessEqual(native_721, native_execution_preparer.U64_MAX)
+
+        data_1155 = "0xf242432a" + addr + addr + word + (1).to_bytes(32, "big").hex()
+        action_1155 = {
+            "action_id": 2,
+            "native_instance_id": "cw1155-like:0x" + "bb" * 20,
+            "ethereum_input": data_1155,
+            "arguments": {},
+        }
+        call_1155 = native_execution_preparer.translate(
+            "cw1155-like", "execute::SendFrom",
+            "safeTransferFrom(address,address,uint256,uint256,bytes)",
+            {}, action_1155, "0x" + "33" * 20, mapper,
+        )
+        native_1155 = call_1155["msg"]["send_from"]["token_id"]
+        self.assertEqual(native_1155, 1)
+        self.assertLessEqual(native_1155, native_execution_preparer.U64_MAX)
+
+    def test_selector_rule_matching_respects_address_scope(self):
+        family = "11" * 32
+        selector_doc = {"rules": [{
+            "runtime_family": family, "selector": "0xa9059cbb",
+            "address_scope": ["0x" + "aa" * 20],
+            "native_code_family": "cw20-base", "native_entrypoint": "execute::Transfer",
+        }]}
+        code = "60"
+        actual_family = native_execution_preparer.runtime_family(code)
+        selector_doc["rules"][0]["runtime_family"] = actual_family
+        cache = {
+            "0x" + "aa" * 20: {"code": code},
+            "0x" + "bb" * 20: {"code": code},
+        }
+        idx, by_addr = native_execution_preparer.rule_index(selector_doc, cache)
+        allowed = {"ethereum_code_address": "0x" + "aa" * 20, "selector": "0xa9059cbb"}
+        denied = {"ethereum_code_address": "0x" + "bb" * 20, "selector": "0xa9059cbb"}
+        self.assertIsNotNone(native_execution_preparer.match_rule(allowed, idx, by_addr))
+        self.assertIsNone(native_execution_preparer.match_rule(denied, idx, by_addr))
+
+    def test_native_conflict_metric_uses_bank_key_independent_of_caller_contract(self):
+        block = {"transactions": [
+            {"source_failed": False, "execution_status": "committed", "accesses": [
+                {"kind": "bank_write", "contract": "c1", "key_hex": "aa", "reverted": False}
+            ]},
+            {"source_failed": False, "execution_status": "committed", "accesses": [
+                {"kind": "bank_read", "contract": "c2", "key_hex": "aa", "reverted": False}
+            ]},
+        ]}
+        rows = native_fidelity.native_rows(block)
+        pairs, _, _ = native_fidelity.pairs_from_rw(rows)
+        self.assertEqual(pairs, {(0, 1)})
+
+    def test_reverted_native_writes_are_not_canonical_writers(self):
+        block = {"transactions": [
+            {"source_failed": True, "execution_status": "reverted", "accesses": [
+                {"kind": "storage_write", "contract": "c", "key_hex": "aa", "reverted": True}
+            ]},
+            {"source_failed": False, "execution_status": "committed", "accesses": [
+                {"kind": "storage_read", "contract": "c", "key_hex": "aa", "reverted": False}
+            ]},
+        ]}
+        rows = native_fidelity.native_rows(block)
+        pairs, _, _ = native_fidelity.pairs_from_rw(rows)
+        self.assertEqual(pairs, set())
+
+    def test_internal_reverted_native_write_in_committed_tx_is_read_like(self):
+        block = {"transactions": [
+            {"source_failed": False, "execution_status": "committed", "accesses": [
+                {"kind": "storage_write", "contract": "c", "key_hex": "aa", "reverted": True}
+            ]},
+            {"source_failed": False, "execution_status": "committed", "accesses": [
+                {"kind": "storage_read", "contract": "c", "key_hex": "aa", "reverted": False}
+            ]},
+        ]}
+        rows = native_fidelity.native_rows(block)
+        pairs, _, _ = native_fidelity.pairs_from_rw(rows)
+        self.assertEqual(pairs, set())
+        self.assertIn("storage:c:aa", rows[0][0])
+        self.assertNotIn("storage:c:aa", rows[0][1])
+
+    def test_conflict_dag_critical_path_can_chain_across_keys(self):
+        self.assertEqual(native_fidelity.critical_path(4, {(0, 1), (1, 2), (2, 3)}), 4)
+
+    def test_conflict_cause_keys_only_returns_shared_keys_with_writer(self):
+        rows = [
+            ({"r-only", "x"}, {"w"}),
+            ({"r-only", "w"}, {"x"}),
+        ]
+        self.assertEqual(native_fidelity.conflict_cause_keys(rows, 0, 1), {"x", "w"})
+        self.assertNotIn("r-only", native_fidelity.conflict_cause_keys(rows, 0, 1))
+
+    def test_critical_path_edges_identifies_edges_on_any_longest_path(self):
+        pairs = {(0, 1), (0, 2), (1, 3), (2, 3), (0, 3)}
+        edges = native_fidelity.critical_path_edges(4, pairs)
+        self.assertEqual(edges, {(0, 1), (0, 2), (1, 3), (2, 3)})
+        self.assertNotIn((0, 3), edges)
+
+    def test_storage_resource_guess_decodes_cw_storage_plus_namespace(self):
+        raw = b"\x00\x08balances" + b"alice"
+        self.assertEqual(native_fidelity.storage_resource_guess(raw.hex()), "balances")
+        self.assertEqual(native_fidelity.storage_resource_guess(b"total_supply".hex()), "total_supply")
+
+    def test_fp_fractional_pair_credit_conserves_pair_count(self):
+        src = [{"block_number": 1, "transactions": [
+            {"reads": [], "writes": []},
+            {"reads": [], "writes": []},
+            {"reads": [], "writes": []},
+        ]}]
+        nat = [{"block_number": 1, "transactions": [
+            {"execution_status": "committed", "source_failed": False, "accesses": [
+                {"kind": "storage_write", "contract": "c", "key_hex": (b"\x00\x08balancesA").hex(), "family": "cw20-base", "instance_id": "cw20-base:x", "semantic_action": "execute::transfer", "reverted": False},
+                {"kind": "storage_write", "contract": "c", "key_hex": (b"\x00\x0aallowancesA").hex(), "family": "cw20-base", "instance_id": "cw20-base:x", "semantic_action": "execute::approve", "reverted": False},
+            ]},
+            {"execution_status": "committed", "source_failed": False, "accesses": [
+                {"kind": "storage_read", "contract": "c", "key_hex": (b"\x00\x08balancesA").hex(), "family": "cw20-base", "instance_id": "cw20-base:x", "semantic_action": "query::balance", "reverted": False},
+                {"kind": "storage_read", "contract": "c", "key_hex": (b"\x00\x0aallowancesA").hex(), "family": "cw20-base", "instance_id": "cw20-base:x", "semantic_action": "query::allowance", "reverted": False},
+            ]},
+            {"execution_status": "committed", "source_failed": False, "accesses": []},
+        ]}]
+        a = native_fidelity.build_attribution(src, nat, None, 25)
+        self.assertEqual(a["summary"]["false_positive_pairs"], 1)
+        self.assertEqual(a["summary"]["false_positive_pair_key_incidences"], 2)
+        self.assertAlmostEqual(sum(x["pair_credit"] for x in a["false_positive"]["by_family"]), 1.0)
+        self.assertAlmostEqual(sum(x["pair_credit"] for x in a["false_positive"]["top_concrete_keys"]), 1.0)
+
 
 
 if __name__ == "__main__":

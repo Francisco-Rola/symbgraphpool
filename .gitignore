@@ -20,3 +20,5 @@ benchmarks/corpora/vegeta-ethereum/**/characterization/
 
 # Generated native translation plans (derived from reconstructed corpora/call caches).
 benchmarks/corpora/vegeta-ethereum/**/native-plan/
+# Generated execution bundles/concrete native traces and topology reports.
+benchmarks/corpora/vegeta-ethereum/**/native-execution/

@@ -198,6 +198,83 @@ pub enum ExecutionRequest {
 
 pub type NativeResponse = Response<Empty>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BundleCall {
+    Execute {
+        sender: Address,
+        contract: Address,
+        funds: Vec<Coin>,
+        msg: Binary,
+    },
+    Query {
+        contract: Address,
+        msg: Binary,
+    },
+    BankSend {
+        from: Address,
+        to: Address,
+        coins: Vec<Coin>,
+    },
+    Noop,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopedBundleCall {
+    pub call: BundleCall,
+    /// Top-most source callTracer frame whose state was reverted while the outer transaction
+    /// continued successfully. Calls sharing one scope ID are executed on one nested overlay.
+    pub source_revert_scope: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleQueryResult {
+    pub call_index: usize,
+    pub contract: Address,
+    pub data: Binary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleCallFailure {
+    pub call_index: usize,
+    pub error: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleCallAccessSpan {
+    pub call_index: usize,
+    /// Inclusive index into BundleExecutionOutcome::accesses.
+    pub access_start: usize,
+    /// Exclusive index into BundleExecutionOutcome::accesses.
+    pub access_end: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleRevertedScopeOutcome {
+    pub scope_id: u64,
+    pub first_call_index: usize,
+    pub last_call_index: usize,
+    pub failure: Option<BundleCallFailure>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleExecutionOutcome {
+    pub transaction_id: TransactionId,
+    pub events: Vec<Event>,
+    pub query_results: Vec<BundleQueryResult>,
+    pub accesses: Vec<AccessRecord>,
+    /// Access ranges produced by each top-level bundle call. Nested CosmWasm accesses remain
+    /// inside the originating call's span.
+    pub call_access_spans: Vec<BundleCallAccessSpan>,
+    pub created_contracts: Vec<Address>,
+    pub committed: bool,
+    /// Present only for tolerant top-level reverted execution. Canonical/strict bundle execution
+    /// still returns the original EngineError immediately.
+    pub failure: Option<BundleCallFailure>,
+    /// Nested source call-frame scopes that reverted while an otherwise successful transaction
+    /// continued. Their writes are discarded but their accesses are retained with reverted=true.
+    pub reverted_scopes: Vec<BundleRevertedScopeOutcome>,
+}
+
 impl ExecutionRequest {
     pub fn transaction_id(&self) -> TransactionId {
         match self {

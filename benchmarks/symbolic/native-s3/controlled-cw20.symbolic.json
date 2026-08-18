@@ -1,0 +1,577 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "controlled-cw20",
+  "source": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+  "analysis_provenance": {
+    "method": "llm-source-derived",
+    "source_sha256": "126f4a262420eaa6cefe28e94e0161197e8851a0f045e5a04546611aff753eff",
+    "source_scope": "complete native contract source",
+    "historical_trace_keys_used": false,
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+  },
+  "storage_resources": {
+    "CONFIG": {
+      "key_semantic_name": "singleton"
+    },
+    "TOTAL_SUPPLY": {
+      "key_semantic_name": "singleton"
+    },
+    "BALANCES": {
+      "key_semantic_name": "address"
+    },
+    "ALLOWANCES": {
+      "key_semantic_name": "owner_spender"
+    },
+    "BLACKLIST": {
+      "key_semantic_name": "address"
+    }
+  },
+  "dependency_kinds": {
+    "input": "depends only on message/sender/environment input",
+    "state": "depends only on stored state",
+    "input_and_state": "depends on both input and stored state",
+    "none": "unconditional"
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "msg.admin",
+        "msg.initial_balances"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "#[entry_point] pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{let admin=deps.api.addr_validate(&msg.admin)?;CONFIG.save(deps.storage,&Config{admin,paused:false})?;let mut total=Uint128::zero();for b in msg.initial_balances{let a=deps.api.addr_validate(&b.address)?;BALANCES.save(deps.storage,a.as_str(),&b.amount)?;total=total.checked_add(b.amount).map_err(StdError::overflow)?;}TOTAL_SUPPLY.save(deps.storage,&total)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "msg.initial_balances[i].address"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "#[entry_point] pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{let admin=deps.api.addr_validate(&msg.admin)?;CONFIG.save(deps.storage,&Config{admin,paused:false})?;let mut total=Uint128::zero();for b in msg.initial_balances{let a=deps.api.addr_validate(&b.address)?;BALANCES.save(deps.storage,a.as_str(),&b.amount)?;total=total.checked_add(b.amount).map_err(StdError::overflow)?;}TOTAL_SUPPLY.save(deps.storage,&total)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "TOTAL_SUPPLY",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 13,
+            "end_line": 13,
+            "code": "#[entry_point] pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{let admin=deps.api.addr_validate(&msg.admin)?;CONFIG.save(deps.storage,&Config{admin,paused:false})?;let mut total=Uint128::zero();for b in msg.initial_balances{let a=deps.api.addr_validate(&b.address)?;BALANCES.save(deps.storage,a.as_str(),&b.amount)?;total=total.checked_add(b.amount).map_err(StdError::overflow)?;}TOTAL_SUPPLY.save(deps.storage,&total)?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Transfer",
+      "input_parameters": [
+        "info.sender",
+        "recipient",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 16,
+            "end_line": 16,
+            "code": "fn ensure_active(deps:Deps,address:&str)->Result<(),ContractError>{if CONFIG.load(deps.storage)?.paused{return Err(ContractError::Paused)}if BLACKLIST.may_load(deps.storage,address)?.unwrap_or(false){return Err(ContractError::Blacklisted)}Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BLACKLIST",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 16,
+            "end_line": 16,
+            "code": "fn ensure_active(deps:Deps,address:&str)->Result<(),ContractError>{if CONFIG.load(deps.storage)?.paused{return Err(ContractError::Paused)}if BLACKLIST.may_load(deps.storage,address)?.unwrap_or(false){return Err(ContractError::Blacklisted)}Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 21,
+            "end_line": 21,
+            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "BALANCES[sender] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 21,
+            "end_line": 21,
+            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 22,
+            "end_line": 22,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::TransferFrom",
+      "input_parameters": [
+        "info.sender",
+        "owner",
+        "recipient",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, info.sender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 18,
+            "end_line": 18,
+            "code": "fn transfer_from(deps:DepsMut,spender:Addr,owner:String,recipient:String,amount:Uint128)->Result<Response,ContractError>{let o=deps.api.addr_validate(&owner)?;let r=deps.api.addr_validate(&recipient)?;ensure_active(deps.as_ref(),o.as_str())?;ensure_active(deps.as_ref(),r.as_str())?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),spender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),spender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;debit(deps.storage,o.as_str(),amount)?;credit(deps.storage,r.as_str(),amount)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, info.sender)"
+            }
+          },
+          "guard": {
+            "expression": "ALLOWANCES >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 18,
+            "end_line": 18,
+            "code": "fn transfer_from(deps:DepsMut,spender:Addr,owner:String,recipient:String,amount:Uint128)->Result<Response,ContractError>{let o=deps.api.addr_validate(&owner)?;let r=deps.api.addr_validate(&recipient)?;ensure_active(deps.as_ref(),o.as_str())?;ensure_active(deps.as_ref(),r.as_str())?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),spender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),spender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;debit(deps.storage,o.as_str(),amount)?;credit(deps.storage,r.as_str(),amount)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "BALANCES[owner] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 21,
+            "end_line": 21,
+            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 22,
+            "end_line": 22,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Approve",
+      "input_parameters": [
+        "info.sender",
+        "spender",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, spender)"
+            }
+          },
+          "guard": {
+            "expression": "contract active",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 19,
+            "end_line": 19,
+            "code": "fn approve(deps:DepsMut,owner:Addr,spender:String,amount:Uint128)->Result<Response,ContractError>{ensure_active(deps.as_ref(),owner.as_str())?;let s=deps.api.addr_validate(&spender)?;ALLOWANCES.save(deps.storage,(owner.as_str(),s.as_str()),&amount)?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Mint",
+      "input_parameters": [
+        "info.sender",
+        "recipient",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn ensure_admin(deps:Deps,sender:&Addr)->Result<(),ContractError>{if CONFIG.load(deps.storage)?.admin!=*sender{return Err(ContractError::Unauthorized)}Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "authorized",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 22,
+            "end_line": 22,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Pause",
+      "input_parameters": [
+        "info.sender"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 20,
+            "end_line": 20,
+            "code": "fn set_pause(deps:DepsMut,sender:Addr,value:bool)->Result<Response,ContractError>{ensure_admin(deps.as_ref(),&sender)?;CONFIG.update(deps.storage,|mut c|->StdResult<_>{c.paused=value;Ok(c)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Unpause",
+      "input_parameters": [
+        "info.sender"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 20,
+            "end_line": 20,
+            "code": "fn set_pause(deps:DepsMut,sender:Addr,value:bool)->Result<Response,ContractError>{ensure_admin(deps.as_ref(),&sender)?;CONFIG.update(deps.storage,|mut c|->StdResult<_>{c.paused=value;Ok(c)})?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SetBlacklisted",
+      "input_parameters": [
+        "info.sender",
+        "address",
+        "blacklisted"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "BLACKLIST",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "address"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "#[entry_point] pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Transfer{recipient,amount}=>transfer(deps,info.sender,recipient,amount),ExecuteMsg::TransferFrom{owner,recipient,amount}=>transfer_from(deps,info.sender,owner,recipient,amount),ExecuteMsg::Approve{spender,amount}=>approve(deps,info.sender,spender,amount),ExecuteMsg::Mint{recipient,amount}=>{ensure_admin(deps.as_ref(),&info.sender)?;let r=deps.api.addr_validate(&recipient)?;credit(deps.storage,r.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_add(amount).map_err(StdError::overflow))?;Ok(Response::new())},ExecuteMsg::Burn{amount}=>{ensure_active(deps.as_ref(),info.sender.as_str())?;debit(deps.storage,info.sender.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_sub(amount).map_err(StdError::overflow))?;Ok(Response::new())},ExecuteMsg::Pause{}=>set_pause(deps,info.sender,true),ExecuteMsg::Unpause{}=>set_pause(deps,info.sender,false),ExecuteMsg::SetBlacklisted{address,blacklisted}=>{ensure_admin(deps.as_ref(),&info.sender)?;let a=deps.api.addr_validate(&address)?;BLACKLIST.save(deps.storage,a.as_str(),&blacklisted)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Balance",
+      "input_parameters": [
+        "address"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "address"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 23,
+            "end_line": 23,
+            "code": "#[entry_point] pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(owner.as_str(),spender.as_str()))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>to_json_binary(&AmountResponse{amount:TOTAL_SUPPLY.load(deps.storage)?}),QueryMsg::Paused{}=>to_json_binary(&BoolResponse{value:CONFIG.load(deps.storage)?.paused}),QueryMsg::Blacklisted{address}=>to_json_binary(&BoolResponse{value:BLACKLIST.may_load(deps.storage,&address)?.unwrap_or(false)})}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Allowance",
+      "input_parameters": [
+        "owner",
+        "spender"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, spender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 23,
+            "end_line": 23,
+            "code": "#[entry_point] pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(owner.as_str(),spender.as_str()))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>to_json_binary(&AmountResponse{amount:TOTAL_SUPPLY.load(deps.storage)?}),QueryMsg::Paused{}=>to_json_binary(&BoolResponse{value:CONFIG.load(deps.storage)?.paused}),QueryMsg::Blacklisted{address}=>to_json_binary(&BoolResponse{value:BLACKLIST.may_load(deps.storage,&address)?.unwrap_or(false)})}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::TotalSupply",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "TOTAL_SUPPLY",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+            "start_line": 23,
+            "end_line": 23,
+            "code": "#[entry_point] pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(owner.as_str(),spender.as_str()))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>to_json_binary(&AmountResponse{amount:TOTAL_SUPPLY.load(deps.storage)?}),QueryMsg::Paused{}=>to_json_binary(&BoolResponse{value:CONFIG.load(deps.storage)?.paused}),QueryMsg::Blacklisted{address}=>to_json_binary(&BoolResponse{value:BLACKLIST.may_load(deps.storage,&address)?.unwrap_or(false)})}}"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ]
+}

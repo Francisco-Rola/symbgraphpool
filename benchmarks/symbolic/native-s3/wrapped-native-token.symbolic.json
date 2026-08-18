@@ -1,0 +1,411 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "wrapped-native-token",
+  "source": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+  "analysis_provenance": {
+    "method": "llm-source-derived",
+    "source_sha256": "b60666c5e782ece150e1a595eeaa1aa4b57e263d1c4202733a2442224a43b9b3",
+    "source_scope": "complete native contract source",
+    "historical_trace_keys_used": false,
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+  },
+  "storage_resources": {
+    "DENOM": {
+      "key_semantic_name": "singleton"
+    },
+    "TOTAL_SUPPLY": {
+      "key_semantic_name": "singleton"
+    },
+    "BALANCES": {
+      "key_semantic_name": "address"
+    },
+    "ALLOWANCES": {
+      "key_semantic_name": "owner_spender"
+    }
+  },
+  "dependency_kinds": {
+    "input": "depends only on message/sender/environment input",
+    "state": "depends only on stored state",
+    "input_and_state": "depends on both input and stored state",
+    "none": "unconditional"
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "msg.denom"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "DENOM",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 9,
+            "end_line": 9,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{DENOM.save(deps.storage,&msg.denom)?;TOTAL_SUPPLY.save(deps.storage,&Uint128::zero())?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "TOTAL_SUPPLY",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 9,
+            "end_line": 9,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{DENOM.save(deps.storage,&msg.denom)?;TOTAL_SUPPLY.save(deps.storage,&Uint128::zero())?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Deposit",
+      "input_parameters": [
+        "info.sender",
+        "info.funds"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "DENOM",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_add(amount).map_err(StdError::overflow))?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "matching nonzero denom funds",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 16,
+            "end_line": 16,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "TOTAL_SUPPLY",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "matching nonzero denom funds",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_add(amount).map_err(StdError::overflow))?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Withdraw",
+      "input_parameters": [
+        "info.sender",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "BALANCES[sender] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "TOTAL_SUPPLY",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "TOTAL_SUPPLY >= amount",
+            "dependency_kind": "state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "fn withdraw(deps:DepsMut,sender:Addr,amount:Uint128)->Result<Response,ContractError>{debit(deps.storage,sender.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_sub(amount).map_err(StdError::overflow))?;let denom=DENOM.load(deps.storage)?;Ok(Response::new().add_message(BankMsg::Send{to_address:sender.into_string(),amount:vec![Coin{denom,amount}]}))}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "DENOM",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 11,
+            "end_line": 11,
+            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_add(amount).map_err(StdError::overflow))?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Transfer",
+      "input_parameters": [
+        "info.sender",
+        "recipient",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "BALANCES[sender] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 15,
+            "end_line": 15,
+            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 16,
+            "end_line": 16,
+            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::TransferFrom",
+      "input_parameters": [
+        "info.sender",
+        "owner",
+        "recipient",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, info.sender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn transfer_from(deps:DepsMut,spender:Addr,owner:String,recipient:String,amount:Uint128)->Result<Response,ContractError>{let o=deps.api.addr_validate(&owner)?;let r=deps.api.addr_validate(&recipient)?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),spender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),spender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;debit(deps.storage,o.as_str(),amount)?;credit(deps.storage,r.as_str(),amount)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, info.sender)"
+            }
+          },
+          "guard": {
+            "expression": "ALLOWANCES >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "fn transfer_from(deps:DepsMut,spender:Addr,owner:String,recipient:String,amount:Uint128)->Result<Response,ContractError>{let o=deps.api.addr_validate(&owner)?;let r=deps.api.addr_validate(&recipient)?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),spender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),spender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;debit(deps.storage,o.as_str(),amount)?;credit(deps.storage,r.as_str(),amount)?;Ok(Response::new())}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::Approve",
+      "input_parameters": [
+        "info.sender",
+        "spender",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, spender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 10,
+            "end_line": 10,
+            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Deposit{}=>deposit(deps,info),ExecuteMsg::Withdraw{amount}=>withdraw(deps,info.sender,amount),ExecuteMsg::Transfer{recipient,amount}=>transfer(deps,info.sender,recipient,amount),ExecuteMsg::TransferFrom{owner,recipient,amount}=>transfer_from(deps,info.sender,owner,recipient,amount),ExecuteMsg::Approve{spender,amount}=>{let s=deps.api.addr_validate(&spender)?;ALLOWANCES.save(deps.storage,(info.sender.as_str(),s.as_str()),&amount)?;Ok(Response::new())}}}"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Balance",
+      "input_parameters": [
+        "address"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "address"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 17,
+            "end_line": 17,
+            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(&owner,&spender))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>to_json_binary(&AmountResponse{amount:TOTAL_SUPPLY.load(deps.storage)?})}}"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ]
+}

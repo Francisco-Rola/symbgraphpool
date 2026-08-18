@@ -16,10 +16,18 @@ bash -n scripts/run-vegeta-s3-native-plan.sh
 bash -n scripts/run-vegeta-s3-background-gap.sh
 bash -n scripts/run-vegeta-s3-finalize-native-map.sh
 bash -n scripts/run-vegeta-s3-native-translation-evaluation.sh
+bash -n scripts/run-vegeta-s3-native-implementation-validation.sh
+
+python3 scripts/vegeta/validate-native-s3-implementation.py --repo-root .
 
 cargo test \
   --manifest-path benchmarks/Cargo.toml \
-  -p acg-benchmark-vegeta-trace
+  --workspace
+
+cargo test \
+  --manifest-path Cargo.toml \
+  -p acg-symbolic-json \
+  native_s3_artifacts
 
 cargo test \
   --manifest-path runtime/Cargo.toml \

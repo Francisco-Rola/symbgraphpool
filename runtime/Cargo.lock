@@ -198,6 +198,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "acg-vegeta-native-s3-executor"
+version = "0.1.0"
+dependencies = [
+ "acg-cosmwasm-engine",
+ "cosmwasm-std",
+ "hex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
