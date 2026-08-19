@@ -21,7 +21,8 @@ def main():
  if not fidelity.exists(): errors.append(f'missing {fidelity}')
  else:
   d=json.loads(fidelity.read_text());
-  for path in [('conflict_pairs','precision'),('conflict_pairs','recall'),('critical_chain_fidelity','ratio'),('vegeta_hot_key_chain_fidelity','ratio')]:
+  if d.get('comparison_scope')!='contract-storage-only': errors.append(f"unexpected fidelity comparison scope {d.get('comparison_scope')!r}")
+  for path in [('conflict_pairs','precision'),('conflict_pairs','recall'),('critical_chain_fidelity','ratio'),('vegeta_hot_key_chain_fidelity','ratio'),('full_native_augmentation','full_native_pairs'),('full_native_augmentation','additional_pairs_from_bank_ledger')]:
    x=d
    for k in path: x=x.get(k) if isinstance(x,dict) else None
    if x is None: errors.append('missing metric '+'.'.join(path))

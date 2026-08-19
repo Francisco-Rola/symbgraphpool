@@ -50,23 +50,29 @@ def native_identity(a:dict)->str:
     # Bank conflict identity is account/denom encoded in the engine key, independent of caller contract.
     return f"bank:{key}"
 
-def native_rows(block):
+def native_rows(block, include_bank:bool=False):
     rows=[]
     for tx in block.get('transactions') or []:
         r=set(); w=set(); reverted=bool(tx.get('source_failed')) or tx.get('execution_status')=='reverted'
         for a in tx.get('accesses') or []:
+            kind=str(a.get('kind') or '')
+            if kind.startswith('bank_') and not include_bank:
+                continue
             ident=native_identity(a)
-            is_write=a['kind'] in {'storage_write','storage_remove','bank_write'} and not reverted and not a.get('reverted')
+            is_write=kind in {'storage_write','storage_remove','bank_write'} and not reverted and not a.get('reverted')
             (w if is_write else r).add(ident)
         rows.append((r,w))
     return rows
 
-def native_provenance(block):
+def native_provenance(block, include_bank:bool=False):
     """Per-transaction, per-concrete-key provenance for post-hoc attribution."""
     rows=[]
     for tx in block.get('transactions') or []:
         by_key=defaultdict(list)
         for a in tx.get('accesses') or []:
+            kind=str(a.get('kind') or '')
+            if kind.startswith('bank_') and not include_bank:
+                continue
             ident=native_identity(a)
             by_key[ident].append({
                 'kind':a.get('kind'),
@@ -204,7 +210,7 @@ def _split_credit(labels:set[str], credit:float):
     each=credit/len(labels)
     return [(x,each) for x in sorted(labels)]
 
-def build_attribution(src_blocks:list[dict], nat_blocks:list[dict], plan_path:Path|None=None, top:int=25):
+def build_attribution(src_blocks:list[dict], nat_blocks:list[dict], plan_path:Path|None=None, top:int=25, include_bank:bool=False):
     sm={b['block_number']:b for b in src_blocks}; nm={b['block_number']:b for b in nat_blocks}
     profile_idx=owner_profile_index(plan_path)
     fp_family={}; fp_instance={}; fp_resource={}; fp_action={}; fp_key={}
@@ -220,7 +226,7 @@ def build_attribution(src_blocks:list[dict], nat_blocks:list[dict], plan_path:Pa
     fn_key_meta={}
 
     for bn in sorted(sm):
-        sb,nb=sm[bn],nm[bn]; srows=source_rows(sb); nrows=native_rows(nb); prov=native_provenance(nb)
+        sb,nb=sm[bn],nm[bn]; srows=source_rows(sb); nrows=native_rows(nb,include_bank=include_bank); prov=native_provenance(nb,include_bank=include_bank)
         sp,_,_=pairs_from_rw(srows); np,_,_=pairs_from_rw(nrows)
         fp=np-sp; fn=sp-np; tp=np&sp
         native_critical=critical_path_edges(len(nrows),np)
@@ -323,6 +329,7 @@ def build_attribution(src_blocks:list[dict], nat_blocks:list[dict], plan_path:Pa
             'top_blocks_by_false_positive_inflation':cp_blocks[:top],
         },
         'methodology':{
+            'comparison_scope':'storage+bank' if include_bank else 'contract-storage-only',
             'false_positive_cause':'a concrete native key shared by the pair with at least one committed native writer',
             'false_negative_cause':'a concrete source EVM storage key shared by the pair with at least one source writer',
             'fractional_pair_credit':'when multiple keys cause one pair, one pair of credit is divided equally across those keys; family/instance/resource/action credit is then divided across labels observed on that key, so aggregate credit remains comparable to pair counts',
@@ -331,6 +338,25 @@ def build_attribution(src_blocks:list[dict], nat_blocks:list[dict], plan_path:Pa
             'source_profile_family':'joined post hoc from native-plan storage-context metadata; source concrete read/write keys are never consumed by execution or planning',
         },
     }
+
+def full_native_augmentation(src_blocks:list[dict], nat_blocks:list[dict]):
+    sm={b['block_number']:b for b in src_blocks}; nm={b['block_number']:b for b in nat_blocks}
+    source_all=set(); storage_all=set(); full_all=set()
+    source_cp=storage_cp=full_cp=0
+    source_hot=storage_hot=full_hot=0
+    per=[]
+    for bn in sorted(sm):
+        srows=source_rows(sm[bn]); storage_rows=native_rows(nm[bn],include_bank=False); full_rows=native_rows(nm[bn],include_bank=True)
+        sp,_,_=pairs_from_rw(srows); stp,_,_=pairs_from_rw(storage_rows); fp,_,_=pairs_from_rw(full_rows)
+        source_all|={(bn,i,j) for i,j in sp}; storage_all|={(bn,i,j) for i,j in stp}; full_all|={(bn,i,j) for i,j in fp}
+        scp=critical_path(len(srows),sp); stcp=critical_path(len(storage_rows),stp); fcp=critical_path(len(full_rows),fp)
+        source_cp+=scp; storage_cp+=stcp; full_cp+=fcp
+        source_hot+=hot_key_chain(srows); storage_hot+=hot_key_chain(storage_rows); full_hot+=hot_key_chain(full_rows)
+        per.append({'block_number':bn,'storage_only_pairs':len(stp),'full_native_pairs':len(fp),'additional_pairs_from_bank_ledger':len(fp-stp),'storage_only_critical_path':stcp,'full_native_critical_path':fcp,'critical_path_delta_from_bank_ledger':fcp-stcp})
+    inter=len(source_all&full_all)
+    p=ratio(inter,len(full_all)); r=ratio(inter,len(source_all))
+    per.sort(key=lambda x:(-x['critical_path_delta_from_bank_ledger'],-x['additional_pairs_from_bank_ledger'],x['block_number']))
+    return {'definition':'full native topology includes contract storage plus native bank-ledger accesses; source S3 precision/recall remains storage-only because the source corpus contains EVM storage keys rather than account-balance keys','source_pairs':len(source_all),'storage_only_native_pairs':len(storage_all),'full_native_pairs':len(full_all),'additional_pairs_from_bank_ledger':len(full_all-storage_all),'intersection_with_source':inter,'precision_against_storage_source':p,'recall_against_storage_source':r,'false_positive_against_storage_source':len(full_all-source_all),'false_negative_against_storage_source':len(source_all-full_all),'critical_path_sum':{'source':source_cp,'storage_only_native':storage_cp,'full_native':full_cp,'bank_delta':full_cp-storage_cp},'hot_key_chain_sum':{'source':source_hot,'storage_only_native':storage_hot,'full_native':full_hot,'bank_delta':full_hot-storage_hot},'top_blocks_by_bank_critical_path_delta':per[:25]}
 
 def _fmt_rank(title, rows, field='pair_credit', n=12):
     lines=[title]
@@ -377,36 +403,24 @@ def attribution_text(a:dict)->str:
     return '\n'.join(lines)+'\n'
 
 def main(argv=None):
-    ap=argparse.ArgumentParser()
-    ap.add_argument('--corpus',type=Path,default=DEFAULT_CORPUS)
-    ap.add_argument('--native-accesses',type=Path,default=DEFAULT_NATIVE)
-    ap.add_argument('--native-plan',type=Path,default=DEFAULT_PLAN)
-    ap.add_argument('--output-dir',type=Path,default=DEFAULT_OUT)
-    ap.add_argument('--attribution-top',type=int,default=25)
-    ns=ap.parse_args(argv)
+    ap=argparse.ArgumentParser(); ap.add_argument('--corpus',type=Path,default=DEFAULT_CORPUS); ap.add_argument('--native-accesses',type=Path,default=DEFAULT_NATIVE); ap.add_argument('--native-plan',type=Path,default=DEFAULT_PLAN); ap.add_argument('--output-dir',type=Path,default=DEFAULT_OUT); ap.add_argument('--attribution-top',type=int,default=25); ns=ap.parse_args(argv)
     src=read_jsonl(ns.corpus); nat=read_jsonl(ns.native_accesses); sm={b['block_number']:b for b in src}; nm={b['block_number']:b for b in nat}
     if set(sm)!=set(nm): raise SystemExit(f"block set mismatch: source={len(sm)} native={len(nm)}")
     src_pairs_all=set(); nat_pairs_all=set(); per=[]; src_cp=nat_cp=src_hot=nat_hot=0; tx_total=0
     for bn in sorted(sm):
-        sb,nb=sm[bn],nm[bn]; srows=source_rows(sb); nrows=native_rows(nb)
+        sb,nb=sm[bn],nm[bn]; srows=source_rows(sb); nrows=native_rows(nb,include_bank=False)
         if len(srows)!=len(nrows): raise SystemExit(f"tx count mismatch block {bn}: source={len(srows)} native={len(nrows)}")
         sp,_,_=pairs_from_rw(srows); np,_,_=pairs_from_rw(nrows)
-        spg={(bn,i,j) for i,j in sp}; npg={(bn,i,j) for i,j in np}; src_pairs_all|=spg; nat_pairs_all|=npg
+        src_pairs_all|={(bn,i,j) for i,j in sp}; nat_pairs_all|={(bn,i,j) for i,j in np}
         inter=len(sp&np); precision=ratio(inter,len(np)); recall=ratio(inter,len(sp))
         sc=critical_path(len(srows),sp); nc=critical_path(len(nrows),np); sh=hot_key_chain(srows); nh=hot_key_chain(nrows)
         src_cp+=sc; nat_cp+=nc; src_hot+=sh; nat_hot+=nh; tx_total+=len(srows)
         per.append({'block_number':bn,'transactions':len(srows),'source_conflict_pairs':len(sp),'native_conflict_pairs':len(np),'intersection_conflict_pairs':inter,'precision':precision,'recall':recall,'source_conflict_dag_critical_path':sc,'native_conflict_dag_critical_path':nc,'source_hot_key_chain':sh,'native_hot_key_chain':nh})
     inter=len(src_pairs_all&nat_pairs_all); p=ratio(inter,len(nat_pairs_all)); r=ratio(inter,len(src_pairs_all)); f1=(2*p*r/(p+r)) if p is not None and r is not None and p+r else None
-    attribution=build_attribution(src,nat,ns.native_plan,max(1,ns.attribution_top))
-    report={'schema_version':1,'dataset':'vegeta-s3-native','blocks':len(sm),'transactions':tx_total,'conflict_pairs':{'source':len(src_pairs_all),'native':len(nat_pairs_all),'intersection':inter,'precision':p,'recall':r,'f1':f1,'false_positive':len(nat_pairs_all-src_pairs_all),'false_negative':len(src_pairs_all-nat_pairs_all)},'critical_chain_fidelity':{'definition':'sum over blocks of longest path in the canonical-order transaction conflict DAG','source_sum':src_cp,'native_sum':nat_cp,'ratio':ratio(nat_cp,src_cp),'relative_error':abs(nat_cp-src_cp)/src_cp if src_cp else None},'vegeta_hot_key_chain_fidelity':{'definition':'sum over blocks of maximum transactions touching one concrete key','source_sum':src_hot,'native_sum':nat_hot,'ratio':ratio(nat_hot,src_hot),'relative_error':abs(nat_hot-src_hot)/src_hot if src_hot else None},'attribution':{'json':'native-topology-attribution.json','text':'native-topology-attribution.txt','false_positive_edges_on_any_native_longest_path':attribution['summary']['false_positive_edges_on_any_native_longest_path'],'native_true_positive_only_critical_path_sum':attribution['critical_path_attribution']['true_positive_only_native_sum']},'per_block':per,'methodology':{'source_conflicts':'public-RPC touched-storage reads plus changed-storage writes from corpus; conflict requires common key with at least one writer','native_conflicts':'concrete CosmWasm engine storage/bank accesses from atomic serial bundle execution; top-level source reverts and caught internal reverted scopes retain accesses but contribute no committed writes','topology_unit':'transaction pair within the same block','warning':'metrics measure the translated native workload fidelity; they do not imply byte-for-byte EVM semantic equivalence'}}
-    out=ns.output_dir; out.mkdir(parents=True,exist_ok=True)
-    (out/'native-topology-fidelity.json').write_text(json.dumps(report,indent=2,sort_keys=True)+'\n')
-    (out/'native-topology-attribution.json').write_text(json.dumps(attribution,indent=2,sort_keys=True)+'\n')
-    attr_text=attribution_text(attribution); (out/'native-topology-attribution.txt').write_text(attr_text)
-    conflict_blocks=[x for x in per if x['source_conflict_pairs']]
-    medp=statistics.median([x['precision'] for x in conflict_blocks if x['precision'] is not None]) if conflict_blocks else None; medr=statistics.median([x['recall'] for x in conflict_blocks if x['recall'] is not None]) if conflict_blocks else None
-    lines=['Vegeta S3 native CosmWasm topology fidelity','',f"blocks: {len(sm)}",f"transactions: {tx_total}",'',f"source conflict pairs: {len(src_pairs_all)}",f"native conflict pairs: {len(nat_pairs_all)}",f"intersection: {inter}",f"precision: {pct(p)}",f"recall: {pct(r)}",f"F1: {pct(f1)}",f"false positives: {len(nat_pairs_all-src_pairs_all)}",f"false negatives: {len(src_pairs_all-nat_pairs_all)}",'',f"ordered conflict-DAG critical-path sum: source={src_cp} native={nat_cp} ratio={report['critical_chain_fidelity']['ratio']:.4f} relative_error={pct(report['critical_chain_fidelity']['relative_error'])}",f"Vegeta hot-key chain sum: source={src_hot} native={nat_hot} ratio={report['vegeta_hot_key_chain_fidelity']['ratio']:.4f} relative_error={pct(report['vegeta_hot_key_chain_fidelity']['relative_error'])}",'',f"median per-conflict-block precision: {pct(medp)}",f"median per-conflict-block recall: {pct(medr)}",'',f"FP edges on any native longest path: {attribution['summary']['false_positive_edges_on_any_native_longest_path']}",f"native true-positive-only critical-path sum: {attribution['critical_path_attribution']['true_positive_only_native_sum']}",'', 'Important: this compares source trace topology to concrete native CosmWasm accesses after executing the translated bundles.','It is not a claim of byte-for-byte EVM equivalence.','See native-topology-attribution.txt/json for post-execution FP/FN diagnosis.']
-    (out/'native-topology-fidelity.txt').write_text('\n'.join(lines)+'\n')
-    print('\n'.join(lines)); print(); print('wrote native-topology-attribution.txt/json')
-    return 0
+    attribution=build_attribution(src,nat,ns.native_plan,max(1,ns.attribution_top),include_bank=False); augmentation=full_native_augmentation(src,nat)
+    report={'schema_version':2,'dataset':'vegeta-s3-native','blocks':len(sm),'transactions':tx_total,'comparison_scope':'contract-storage-only','conflict_pairs':{'source':len(src_pairs_all),'native':len(nat_pairs_all),'intersection':inter,'precision':p,'recall':r,'f1':f1,'false_positive':len(nat_pairs_all-src_pairs_all),'false_negative':len(src_pairs_all-nat_pairs_all)},'critical_chain_fidelity':{'definition':'sum over blocks of longest path in canonical-order conflict DAG using source EVM storage and native contract storage only','source_sum':src_cp,'native_sum':nat_cp,'ratio':ratio(nat_cp,src_cp),'relative_error':abs(nat_cp-src_cp)/src_cp if src_cp else None},'vegeta_hot_key_chain_fidelity':{'definition':'sum over blocks of maximum transactions touching one comparable contract-storage key','source_sum':src_hot,'native_sum':nat_hot,'ratio':ratio(nat_hot,src_hot),'relative_error':abs(nat_hot-src_hot)/src_hot if src_hot else None},'full_native_augmentation':augmentation,'attribution':{'json':'native-topology-attribution.json','text':'native-topology-attribution.txt','comparison_scope':'contract-storage-only','false_positive_edges_on_any_native_longest_path':attribution['summary']['false_positive_edges_on_any_native_longest_path'],'native_true_positive_only_critical_path_sum':attribution['critical_path_attribution']['true_positive_only_native_sum']},'per_block':per,'methodology':{'source_conflicts':'public-RPC touched-storage reads plus changed-storage writes from corpus; conflict requires common EVM storage key with at least one writer','native_conflicts':'primary fidelity uses concrete CosmWasm contract-storage accesses; native bank-ledger accesses are reported separately because no like-for-like EVM account-balance key exists in this source corpus','topology_unit':'transaction pair within the same block','warning':'full native performance may still include additional bank-ledger dependencies'}}
+    out=ns.output_dir; out.mkdir(parents=True,exist_ok=True); (out/'native-topology-fidelity.json').write_text(json.dumps(report,indent=2,sort_keys=True)+'\n'); (out/'native-topology-attribution.json').write_text(json.dumps(attribution,indent=2,sort_keys=True)+'\n'); (out/'native-topology-attribution.txt').write_text(attribution_text(attribution))
+    conflict_blocks=[x for x in per if x['source_conflict_pairs']]; medp=statistics.median([x['precision'] for x in conflict_blocks if x['precision'] is not None]) if conflict_blocks else None; medr=statistics.median([x['recall'] for x in conflict_blocks if x['recall'] is not None]) if conflict_blocks else None; aug=augmentation
+    lines=['Vegeta S3 native CosmWasm topology fidelity','',f"blocks: {len(sm)}",f"transactions: {tx_total}",'','PRIMARY COMPARISON: source EVM storage vs native CosmWasm contract storage',f"source conflict pairs: {len(src_pairs_all)}",f"native storage conflict pairs: {len(nat_pairs_all)}",f"intersection: {inter}",f"precision: {pct(p)}",f"recall: {pct(r)}",f"F1: {pct(f1)}",f"false positives: {len(nat_pairs_all-src_pairs_all)}",f"false negatives: {len(src_pairs_all-nat_pairs_all)}",'',f"ordered storage conflict-DAG critical-path sum: source={src_cp} native={nat_cp} ratio={report['critical_chain_fidelity']['ratio']:.4f} relative_error={pct(report['critical_chain_fidelity']['relative_error'])}",f"storage hot-key chain sum: source={src_hot} native={nat_hot} ratio={report['vegeta_hot_key_chain_fidelity']['ratio']:.4f} relative_error={pct(report['vegeta_hot_key_chain_fidelity']['relative_error'])}",'',f"median per-conflict-block precision: {pct(medp)}",f"median per-conflict-block recall: {pct(medr)}",'',f"FP edges on any native storage longest path: {attribution['summary']['false_positive_edges_on_any_native_longest_path']}",f"native storage true-positive-only critical-path sum: {attribution['critical_path_attribution']['true_positive_only_native_sum']}",'','FULL NATIVE AUGMENTATION: contract storage + native bank ledger',f"full native conflict pairs: {aug['full_native_pairs']}",f"additional pairs introduced by bank ledger: {aug['additional_pairs_from_bank_ledger']}",f"full-native precision against storage-only source: {pct(aug['precision_against_storage_source'])}",f"full-native recall against storage-only source: {pct(aug['recall_against_storage_source'])}",f"critical-path sum: storage-only-native={aug['critical_path_sum']['storage_only_native']} full-native={aug['critical_path_sum']['full_native']} bank_delta={aug['critical_path_sum']['bank_delta']}",'','Important: the source S3 corpus contains EVM storage keys, not account-balance keys.','Precision/recall are therefore storage-to-storage. Native bank dependencies remain real execution','dependencies and are reported separately rather than mislabeled as storage-topology false positives.','See native-topology-attribution.txt/json for storage FP/FN diagnosis.']
+    (out/'native-topology-fidelity.txt').write_text('\n'.join(lines)+'\n'); print('\n'.join(lines)); print(); print('wrote native-topology-attribution.txt/json'); return 0
 if __name__=='__main__': raise SystemExit(main())

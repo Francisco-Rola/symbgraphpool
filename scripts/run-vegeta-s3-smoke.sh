@@ -23,7 +23,10 @@ CORPUS="$ROOT/benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl"
 if [[ ! -s "$CORPUS" ]]; then
   echo "Vegeta S3 corpus missing: $CORPUS" >&2
   echo "reconstruct it first, e.g.:" >&2
-  echo "  ETH_RPC_URL=https://YOUR_ETHEREUM_RPC python3 scripts/vegeta/extract-vegeta-ethereum.py --trace-mode public-rpc --output-dir benchmarks/corpora/vegeta-ethereum/s3 --resume" >&2
+  echo "  hosted/reproducible fallback:" >&2
+  echo "    ETH_RPC_URL=https://YOUR_ETHEREUM_RPC python3 scripts/vegeta/extract-vegeta-ethereum.py --trace-mode public-rpc --output-dir benchmarks/corpora/vegeta-ethereum/s3 --resume" >&2
+  echo "  exact SLOAD/SSTORE publication ground truth (transaction-level, resumable):" >&2
+  echo "    ETH_RPC_URL=https://YOUR_ETHEREUM_RPC bash scripts/run-vegeta-s3-exact-trace.sh" >&2
   exit 2
 fi
 

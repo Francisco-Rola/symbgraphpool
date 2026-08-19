@@ -23,6 +23,18 @@ The smoke deliberately keeps admission/regime bypass disabled so it remains a me
 comparison aligned with the existing baseline smoke. Production-control-plane experiments should
 use a separate grid.
 
+### Frozen exact-trace exceptions
+
+The exact S3 reconstruction has a versioned exception list at
+`evaluation/vegeta/s3-exact-trace-fallbacks.v1.txt`. Transactions in this file are not dropped:
+the extractor substitutes their already-frozen `public-rpc`/`prestateTracer` access record and
+records each exception in `manifest.json::trace_semantics_exceptions`. All other transactions
+continue to use exact transaction-level SLOAD/SSTORE tracing.
+
+The wrapper merges this frozen list with any additional comma-separated hashes supplied via
+`VEGETA_S3_EXACT_FALLBACK_TXS`, with deduplication. This makes the known exceptions reproducible
+without requiring a long shell environment value on every resume.
+
 ## S3 contract/code-family characterization
 
 Before treating the trace replay as a faithful SymbGraph workload, characterize how much of S3 is
@@ -574,3 +586,59 @@ the Ethereum profile family using native-plan storage-context metadata.  All sou
 attribution happens only after native execution; it is diagnostic and is never fed into the native
 planner, executor, initial-state priming, or symbolic profiles.  Decoded CosmWasm resource names are
 best-effort namespace labels, not semantic ground truth.
+
+
+### Storage-comparable fidelity and native bank augmentation
+
+The S3 source corpus used by this evaluation records EVM storage keys (touched storage as reads,
+changed storage as writes). It does not provide a like-for-like account-balance key for native
+CosmWasm bank state. Consequently, topology precision/recall use a strict storage-to-storage
+comparison: source EVM storage versus native contract storage. Native bank accesses are not removed
+from execution; they remain concrete dependencies and are reported separately as
+`full_native_augmentation`, including additional pair count and critical-path delta.
+
+This split was prompted by the first FP attribution run, where bank-ledger edges dominated the
+reported false positives. Counting those edges as storage false positives conflates a measurement
+domain mismatch with semantic translation error.
+
+The wrapped-native-token implementation also no longer manufactures a contract-local
+`TOTAL_SUPPLY` singleton. Its `total_supply` query derives supply from the contract's native
+collateral balance, while deposit/withdraw mutate per-account wrapped balances and the native bank
+ledger. The source-derived symbolic artifact is refreshed and explicitly notes that bank-ledger
+dependencies are outside the current contract-local symbolic JSON schema.
+
+
+### Exact SLOAD/SSTORE source ground truth via transaction-level tracing
+
+Hosted RPCs may time out on `debug_traceBlockByNumber` with the JavaScript SLOAD/SSTORE tracer even
+when the same tracer succeeds through `debug_traceTransaction`. The extractor therefore supports
+`--trace-mode custom-js-tx`: it traces transactions sequentially in canonical block order, writes an
+atomic checkpoint after every successful transaction, and reuses checkpoints only when both the
+transaction hash and tracer-source SHA-256 match.
+
+For publication ground truth, reconstruct into a separate directory rather than overwriting the
+public-prestate corpus:
+
+```bash
+ETH_RPC_URL=https://YOUR_ARCHIVE_RPC \
+bash scripts/run-vegeta-s3-exact-trace.sh
+```
+
+The default exact output is
+`benchmarks/corpora/vegeta-ethereum/s3-exact-sload-sstore/`. A failed/rate-limited run can simply be
+rerun; completed transaction traces are reused. `VEGETA_S3_EXACT_TX_DELAY` can pace requests for
+hosted-provider limits.
+
+The exact corpus records actual executed SLOAD/SSTORE keys (`evm-storage-sload-sstore-v1`) and
+opcode-step counts. The existing `public-rpc` corpus remains a reproducibility fallback with
+prestate-touched/state-changing semantics. Native execution can be re-evaluated against the exact
+corpus without changing the frozen native family mapping:
+
+```bash
+VEGETA_S3_CORPUS=benchmarks/corpora/vegeta-ethereum/s3-exact-sload-sstore/corpus.jsonl \
+ETH_RPC_URL="$ETH_RPC_URL" \
+bash scripts/run-vegeta-s3-native-execution.sh
+```
+
+Source concrete keys remain evaluation-only ground truth; they are not consumed by symbolic
+analysis, native planning, initial-state priming, or execution.

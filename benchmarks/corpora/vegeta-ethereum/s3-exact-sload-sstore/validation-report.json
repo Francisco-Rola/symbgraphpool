@@ -1,0 +1,38 @@
+{
+  "accepted": true,
+  "canonical_reconstruction": {
+    "block_range": [
+      16774645,
+      16774745
+    ],
+    "blocks": 101,
+    "transactions": 13783
+  },
+  "errors": [],
+  "instrumentation_note": "Block identity and transaction count are validated against the canonical Ethereum mainnet reconstruction of the stated S3 range. Vegeta does not publish its exact internal read/write corpus, so longest-chain/WETH checks remain optional instrumentation-equivalence diagnostics.",
+  "observed": {
+    "blocks": 101,
+    "dominant_longest_chain_contract": "dac17f958d2ee523a2206206994597c13d831ec7",
+    "dominant_longest_chain_contribution": 1262,
+    "hot_contract_by_transactions": "c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "hot_contract_transaction_count": 2310,
+    "longest_chain_sum": 1594,
+    "max_single_block_chain": 130,
+    "max_single_block_chain_key": "evm/dac17f958d2ee523a2206206994597c13d831ec7/0000000000000000000000000000000000000000000000000000000000000000",
+    "ratio": 8.646800501882058,
+    "transactions": 13783,
+    "weth_access_count": 10045,
+    "weth_longest_chain_contribution": 6,
+    "weth_transaction_count": 2310
+  },
+  "paper": {
+    "blocks": 101,
+    "longest_chain_sum": 1779,
+    "ratio": 8.5,
+    "transactions": 15129,
+    "weth_hotspot_reported": true
+  },
+  "warnings": [
+    "Vegeta paper metadata reports 15129 transactions for blocks 16774645..16774745; canonical Ethereum reconstruction of that exact range contains 13783. The canonical count is used for corpus identity; the paper count is retained for provenance only."
+  ]
+}

@@ -1,0 +1,6 @@
+# Vegeta S3 exact-trace exceptions
+# These transactions are retained in the corpus using the frozen public-rpc/prestateTracer
+# record because repeated custom-js debug_traceTransaction attempts exceeded/faulted on the
+# public RPC used for reconstruction. They are explicit methodology exceptions, not dropped txs.
+0xa03a556bbb78776012cc22dcac9d096c48ce766b5aa81b95aaedb364541ee857
+0x03a5c50661028f2c2fe005a882e857433a385317bc175c0d65dd1f3227a86701

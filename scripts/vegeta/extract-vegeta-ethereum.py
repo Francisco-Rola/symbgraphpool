@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Extract Vegeta's Ethereum block corpus from archive-capable Ethereum RPC endpoints.
 
-Two trace modes are supported:
+Three trace modes are supported:
 
-* ``custom-js`` uses Geth's arbitrary JavaScript tracer interface and records exact EVM
-  ``SLOAD``/``SSTORE`` accesses plus opcode-step counts. This is the highest-fidelity mode, but
-  many hosted/public RPC providers disable custom tracers.
+* ``custom-js`` uses Geth's arbitrary JavaScript tracer interface at block granularity and records
+  exact EVM ``SLOAD``/``SSTORE`` accesses plus opcode-step counts.
+* ``custom-js-tx`` uses the same exact JavaScript tracer via ``debug_traceTransaction`` one
+  transaction at a time. This avoids hosted-provider block-trace timeouts and durably checkpoints
+  every completed transaction so long S3 reconstructions are resumable.
 * ``public-rpc`` uses only Geth's built-in ``prestateTracer``. A normal prestate trace gives every
   storage slot touched while executing a transaction; a second trace with ``diffMode`` identifies
   storage slots whose values changed. The resulting ``reads`` are conservative touched-storage
@@ -20,6 +22,7 @@ without silently pretending that built-in tracing is identical to the custom SLO
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -45,6 +48,7 @@ from vegeta_corpus import (  # noqa: E402
 )
 
 TRACE_MODE_CUSTOM_JS = "custom-js"
+TRACE_MODE_CUSTOM_JS_TX = "custom-js-tx"
 TRACE_MODE_PUBLIC_RPC = "public-rpc"
 
 
@@ -328,6 +332,179 @@ def trace_block_custom_js(client: RpcClient, tag: str, tracer: str, timeout: int
     )
 
 
+def _tx_trace_cache_path(cache_dir: Path, block_number: int, index: int, tx_hash: str) -> Path:
+    short_hash = tx_hash.lower().removeprefix("0x")[:16]
+    return cache_dir / str(block_number) / f"{index:04d}-{short_hash}.json"
+
+
+def _load_cached_tx_trace(path: Path, tx_hash: str, tracer_sha256: str) -> dict | None:
+    try:
+        item = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if item.get("tx_hash", "").lower() != tx_hash.lower():
+        return None
+    if item.get("tracer_sha256") != tracer_sha256:
+        return None
+    result = item.get("result")
+    return result if isinstance(result, dict) else None
+
+
+def _write_cached_tx_trace(
+    path: Path,
+    tx_hash: str,
+    tracer_sha256: str,
+    result: dict,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "trace_mode": TRACE_MODE_CUSTOM_JS_TX,
+        "tx_hash": tx_hash.lower(),
+        "tracer_sha256": tracer_sha256,
+        "result": result,
+    }
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
+def load_fallback_transactions(
+    corpus_path: Path,
+    tx_hashes: set[str],
+) -> tuple[dict[str, dict], dict]:
+    """Load explicitly named fallback transactions from a previously frozen corpus.
+
+    Every requested hash must exist exactly once. The sibling manifest is required so a hybrid
+    corpus records the fallback semantics instead of silently presenting those accesses as exact
+    SLOAD/SSTORE observations.
+    """
+
+    wanted = {h.lower() for h in tx_hashes}
+    if not wanted:
+        return {}, {}
+
+    manifest_path = corpus_path.parent / "manifest.json"
+    if not corpus_path.exists():
+        raise RuntimeError(f"fallback corpus does not exist: {corpus_path}")
+    if not manifest_path.exists():
+        raise RuntimeError(
+            f"fallback corpus manifest does not exist: {manifest_path}; "
+            "fallback semantics must be explicit"
+        )
+
+    fallback_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    found: dict[str, dict] = {}
+    provenance: dict[str, dict] = {}
+
+    for line in corpus_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        block = json.loads(line)
+        block_number = int(block["block_number"])
+        for tx in block.get("transactions") or []:
+            tx_hash = str(tx.get("tx_hash") or "").lower()
+            if tx_hash not in wanted:
+                continue
+            if tx_hash in found:
+                raise RuntimeError(f"fallback transaction appears more than once: {tx_hash}")
+            found[tx_hash] = {
+                "reads": sorted(set(tx.get("reads") or [])),
+                "writes": sorted(set(tx.get("writes") or [])),
+                "steps": int(tx.get("opcode_steps") or tx.get("gas_used") or 0),
+                "gasUsed": int(tx.get("gas_used") or 0),
+                "error": "reverted" if bool(tx.get("failed")) else "",
+            }
+            provenance[tx_hash] = {
+                "tx_hash": tx_hash,
+                "block_number": block_number,
+                "tx_index": int(tx.get("tx_index", -1)),
+                "source_corpus": str(corpus_path),
+                "source_manifest": str(manifest_path),
+                "access_semantics": fallback_manifest.get("access_semantics"),
+                "trace_mode": fallback_manifest.get("trace_mode"),
+                "compute_proxy": fallback_manifest.get("compute_proxy"),
+            }
+
+    missing = sorted(wanted - set(found))
+    if missing:
+        raise RuntimeError(
+            "fallback transaction hash(es) not found in corpus: " + ", ".join(missing)
+        )
+    return found, provenance
+
+
+def trace_block_custom_js_transactions(
+    client: RpcClient,
+    block: dict,
+    tracer: str,
+    timeout: int,
+    cache_dir: Path | None = None,
+    resume: bool = False,
+    tx_delay: float = 0.0,
+    fallback_traces: dict[str, dict] | None = None,
+) -> list[dict]:
+    """Trace one block transaction-by-transaction with exact SLOAD/SSTORE semantics.
+
+    Each successful transaction is atomically checkpointed before the next RPC request. If a hosted
+    provider times out or rate-limits later in the block, rerunning with ``--resume`` reuses only
+    cache entries generated by the same tracer source hash.
+    """
+
+    transactions = block.get("transactions", [])
+    block_number = parse_quantity(block.get("number", 0))
+    tracer_sha256 = hashlib.sha256(tracer.encode("utf-8")).hexdigest()
+    traces: list[dict] = []
+    fallback_traces = fallback_traces or {}
+
+    for index, tx in enumerate(transactions):
+        tx_hash = tx["hash"].lower()
+        cache_path = (
+            _tx_trace_cache_path(cache_dir, block_number, index, tx_hash)
+            if cache_dir is not None
+            else None
+        )
+        result = None
+        if resume and cache_path is not None and cache_path.exists():
+            result = _load_cached_tx_trace(cache_path, tx_hash, tracer_sha256)
+            if result is not None:
+                print(
+                    f"[{block_number}] tx {index + 1}/{len(transactions)} reuse {tx_hash}",
+                    flush=True,
+                )
+
+        if result is None and tx_hash in fallback_traces:
+            result = fallback_traces[tx_hash]
+            print(
+                f"[{block_number}] tx {index + 1}/{len(transactions)} "
+                f"fallback frozen-corpus {tx_hash}",
+                flush=True,
+            )
+
+        if result is None:
+            print(
+                f"[{block_number}] tx {index + 1}/{len(transactions)} trace {tx_hash}",
+                flush=True,
+            )
+            result = client.call(
+                "debug_traceTransaction",
+                [tx_hash, {"tracer": tracer, "timeout": f"{timeout}s"}],
+            )
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    f"block {block_number} tx {index}: debug_traceTransaction returned "
+                    f"{type(result).__name__}, expected object"
+                )
+            if cache_path is not None:
+                _write_cached_tx_trace(cache_path, tx_hash, tracer_sha256, result)
+            if tx_delay:
+                time.sleep(tx_delay)
+
+        traces.append({"txHash": tx_hash, "result": result})
+
+    return traces
+
+
 def trace_block_public_rpc(client: RpcClient, tag: str, block: dict) -> list[dict]:
     # Built-in tracers are accepted by hosted providers that reject arbitrary JavaScript tracers.
     # Disable code to reduce response size; storage must stay enabled.
@@ -368,6 +545,12 @@ def manifest_trace_metadata(trace_mode: str) -> tuple[str, str, str]:
             "geth debug_traceBlockByNumber + custom JavaScript SLOAD/SSTORE tracer",
             "opcode_steps",
         )
+    if trace_mode == TRACE_MODE_CUSTOM_JS_TX:
+        return (
+            "evm-storage-sload-sstore-v1",
+            "geth debug_traceTransaction + custom JavaScript SLOAD/SSTORE tracer",
+            "opcode_steps",
+        )
     if trace_mode == TRACE_MODE_PUBLIC_RPC:
         return (
             "evm-storage-prestate-touched+state-changing-writes-v1",
@@ -385,16 +568,47 @@ def main() -> int:
     parser.add_argument("--end-block", type=int, default=S3_END_BLOCK)
     parser.add_argument(
         "--trace-mode",
-        choices=[TRACE_MODE_CUSTOM_JS, TRACE_MODE_PUBLIC_RPC],
+        choices=[TRACE_MODE_CUSTOM_JS, TRACE_MODE_CUSTOM_JS_TX, TRACE_MODE_PUBLIC_RPC],
         default=TRACE_MODE_PUBLIC_RPC,
         help=(
             "public-rpc uses hosted-provider-compatible built-in prestateTracer calls; "
-            "custom-js uses the exact Geth JavaScript SLOAD/SSTORE tracer"
+            "custom-js uses an exact block-level JavaScript SLOAD/SSTORE tracer; "
+            "custom-js-tx uses the same exact tracer one transaction at a time with checkpointing"
         ),
     )
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--rpc-retries", type=int, default=5)
     parser.add_argument("--retry-backoff", type=float, default=1.5)
+    parser.add_argument(
+        "--tx-delay",
+        type=float,
+        default=0.0,
+        help="seconds to sleep after each fresh custom-js-tx RPC call (useful for hosted rate limits)",
+    )
+    parser.add_argument(
+        "--tx-cache-dir",
+        type=Path,
+        default=None,
+        help="custom-js-tx checkpoint directory (default: <output-dir>/tx-traces)",
+    )
+    parser.add_argument(
+        "--fallback-corpus",
+        type=Path,
+        default=None,
+        help=(
+            "previously frozen corpus used only for explicitly named --fallback-tx-hash "
+            "transactions"
+        ),
+    )
+    parser.add_argument(
+        "--fallback-tx-hash",
+        action="append",
+        default=[],
+        help=(
+            "transaction hash to source from --fallback-corpus instead of custom tracing; "
+            "repeat for multiple explicit exceptions"
+        ),
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--probe-only",
@@ -410,15 +624,32 @@ def main() -> int:
         parser.error("--rpc-retries must be >= 0")
     if args.retry_backoff < 0:
         parser.error("--retry-backoff must be >= 0")
+    if args.tx_delay < 0:
+        parser.error("--tx-delay must be >= 0")
 
     tracer = None
-    if args.trace_mode == TRACE_MODE_CUSTOM_JS:
+    if args.trace_mode in {TRACE_MODE_CUSTOM_JS, TRACE_MODE_CUSTOM_JS_TX}:
         tracer = (SCRIPT_DIR / "geth-rw-tracer.js").read_text(encoding="utf-8")
     client = RpcClient(
         args.rpc_url,
         args.timeout,
         retries=args.rpc_retries,
         retry_backoff=args.retry_backoff,
+    )
+    tx_cache_dir = (
+        args.tx_cache_dir
+        if args.tx_cache_dir is not None
+        else args.output_dir / "tx-traces"
+    )
+    fallback_hashes = {h.lower() for h in args.fallback_tx_hash}
+    if fallback_hashes and args.trace_mode != TRACE_MODE_CUSTOM_JS_TX:
+        parser.error("--fallback-tx-hash is supported only with --trace-mode custom-js-tx")
+    if fallback_hashes and args.fallback_corpus is None:
+        parser.error("--fallback-corpus is required when --fallback-tx-hash is used")
+    fallback_traces, fallback_provenance = (
+        load_fallback_transactions(args.fallback_corpus, fallback_hashes)
+        if fallback_hashes
+        else ({}, {})
     )
 
     if args.probe_only:
@@ -429,6 +660,17 @@ def main() -> int:
             raise RuntimeError(f"Ethereum RPC has no block {args.start_block}")
         if args.trace_mode == TRACE_MODE_CUSTOM_JS:
             traces = trace_block_custom_js(client, tag, tracer, args.timeout)
+        elif args.trace_mode == TRACE_MODE_CUSTOM_JS_TX:
+            traces = trace_block_custom_js_transactions(
+                client,
+                block,
+                tracer,
+                args.timeout,
+                cache_dir=tx_cache_dir,
+                resume=args.resume,
+                tx_delay=args.tx_delay,
+                fallback_traces=fallback_traces,
+            )
         else:
             traces = trace_block_public_rpc(client, tag, block)
         record = build_block_record(block, traces)
@@ -464,6 +706,17 @@ def main() -> int:
             raise RuntimeError(f"Ethereum RPC has no block {number}")
         if args.trace_mode == TRACE_MODE_CUSTOM_JS:
             traces = trace_block_custom_js(client, tag, tracer, args.timeout)
+        elif args.trace_mode == TRACE_MODE_CUSTOM_JS_TX:
+            traces = trace_block_custom_js_transactions(
+                client,
+                block,
+                tracer,
+                args.timeout,
+                cache_dir=tx_cache_dir,
+                resume=args.resume,
+                tx_delay=args.tx_delay,
+                fallback_traces=fallback_traces,
+            )
         else:
             traces = trace_block_public_rpc(client, tag, block)
         record = build_block_record(block, traces)
@@ -492,14 +745,48 @@ def main() -> int:
             "block_range": [args.start_block, args.end_block],
         },
         "trace_mode": args.trace_mode,
-        "access_semantics": access_semantics,
-        "extractor": extractor,
-        "compute_proxy": compute_proxy,
+        "trace_granularity": (
+            "transaction" if args.trace_mode == TRACE_MODE_CUSTOM_JS_TX else "block"
+        ),
+        "access_semantics": (
+            access_semantics
+            if not fallback_provenance
+            else access_semantics + "+explicit-fallback-exceptions"
+        ),
+        "extractor": (
+            extractor
+            if not fallback_provenance
+            else extractor + " + explicit frozen-corpus transaction fallback(s)"
+        ),
+        "compute_proxy": (
+            compute_proxy
+            if not fallback_provenance
+            else compute_proxy + "+explicit-fallback-exceptions"
+        ),
+        "trace_semantics_exceptions": [
+            fallback_provenance[h] for h in sorted(fallback_provenance)
+        ],
+        "custom_tracer_sha256": (
+            hashlib.sha256(tracer.encode("utf-8")).hexdigest() if tracer is not None else None
+        ),
+        "transaction_trace_cache": (
+            str(tx_cache_dir.relative_to(args.output_dir))
+            if args.trace_mode == TRACE_MODE_CUSTOM_JS_TX
+            and tx_cache_dir.is_relative_to(args.output_dir)
+            else str(tx_cache_dir) if args.trace_mode == TRACE_MODE_CUSTOM_JS_TX else None
+        ),
         "public_rpc_caveat": (
             "reads are all storage slots touched by prestateTracer; writes are storage slots whose "
             "state changed in diffMode. This is conservative and is not byte-for-byte equivalent "
             "to the custom SLOAD/SSTORE tracer."
             if args.trace_mode == TRACE_MODE_PUBLIC_RPC
+            else None
+        ),
+        "fallback_caveat": (
+            "The listed trace_semantics_exceptions are explicit transaction-level fallbacks from "
+            "the frozen fallback corpus. They are retained rather than dropped or fabricated and "
+            "must not be described as exact SLOAD/SSTORE observations."
+            if fallback_provenance
             else None
         ),
         "paper_targets": {

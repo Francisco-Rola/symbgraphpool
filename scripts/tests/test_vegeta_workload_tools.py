@@ -252,6 +252,83 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(compute, "gas_used")
 
 
+    def test_custom_js_tx_manifest_records_exact_transaction_tracing(self):
+        access, source, compute = extractor.manifest_trace_metadata("custom-js-tx")
+        self.assertEqual(access, "evm-storage-sload-sstore-v1")
+        self.assertIn("debug_traceTransaction", source)
+        self.assertEqual(compute, "opcode_steps")
+
+    def test_custom_js_tx_traces_in_block_order_and_checkpoints(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+            def call(self, method, params):
+                self.calls.append((method, params))
+                tx_hash = params[0]
+                return {
+                    "reads": [f"evm/{'aa'*20}/{'01'*32}"],
+                    "writes": [f"evm/{'aa'*20}/{'02'*32}"],
+                    "steps": 10,
+                    "gasUsed": 20,
+                    "error": "",
+                    "tx": tx_hash,
+                }
+
+        block = {
+            "number": "0x64",
+            "transactions": [
+                {"hash": "0x" + "11" * 32},
+                {"hash": "0x" + "22" * 32},
+            ],
+        }
+        tracer = "{ result: function(){ return {}; } }"
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            client = FakeClient()
+            traces = extractor.trace_block_custom_js_transactions(
+                client, block, tracer, 60, cache_dir=cache, resume=True
+            )
+            self.assertEqual([x["txHash"] for x in traces], [x["hash"] for x in block["transactions"]])
+            self.assertEqual(len(client.calls), 2)
+            self.assertTrue(all(method == "debug_traceTransaction" for method, _ in client.calls))
+            cached = sorted((cache / "100").glob("*.json"))
+            self.assertEqual(len(cached), 2)
+            first = json.loads(cached[0].read_text())
+            self.assertEqual(
+                first["tracer_sha256"],
+                __import__("hashlib").sha256(tracer.encode("utf-8")).hexdigest(),
+            )
+
+            # A second run with the same tracer must be fully cache-backed.
+            client2 = FakeClient()
+            traces2 = extractor.trace_block_custom_js_transactions(
+                client2, block, tracer, 60, cache_dir=cache, resume=True
+            )
+            self.assertEqual(traces2, traces)
+            self.assertEqual(client2.calls, [])
+
+    def test_custom_js_tx_cache_is_invalidated_when_tracer_changes(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = 0
+            def call(self, method, params):
+                self.calls += 1
+                return {"reads": [], "writes": [], "steps": self.calls, "gasUsed": 1, "error": ""}
+
+        block = {"number": "0x1", "transactions": [{"hash": "0x" + "33" * 32}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            first = FakeClient()
+            extractor.trace_block_custom_js_transactions(
+                first, block, "tracer-v1", 60, cache_dir=cache, resume=True
+            )
+            self.assertEqual(first.calls, 1)
+            second = FakeClient()
+            extractor.trace_block_custom_js_transactions(
+                second, block, "tracer-v2", 60, cache_dir=cache, resume=True
+            )
+            self.assertEqual(second.calls, 1)
+
 class CharacterizationTests(unittest.TestCase):
     def synthetic_blocks(self):
         a = "0x" + "aa" * 20
@@ -1820,9 +1897,12 @@ class NativeS3ExecutionPreparationTests(unittest.TestCase):
                 {"kind": "bank_read", "contract": "c2", "key_hex": "aa", "reverted": False}
             ]},
         ]}
-        rows = native_fidelity.native_rows(block)
+        rows = native_fidelity.native_rows(block, include_bank=True)
         pairs, _, _ = native_fidelity.pairs_from_rw(rows)
         self.assertEqual(pairs, {(0, 1)})
+        storage_rows = native_fidelity.native_rows(block)
+        storage_pairs, _, _ = native_fidelity.pairs_from_rw(storage_rows)
+        self.assertEqual(storage_pairs, set())
 
     def test_reverted_native_writes_are_not_canonical_writers(self):
         block = {"transactions": [
@@ -1873,6 +1953,20 @@ class NativeS3ExecutionPreparationTests(unittest.TestCase):
         raw = b"\x00\x08balances" + b"alice"
         self.assertEqual(native_fidelity.storage_resource_guess(raw.hex()), "balances")
         self.assertEqual(native_fidelity.storage_resource_guess(b"total_supply".hex()), "total_supply")
+
+    def test_native_rows_excludes_bank_from_primary_storage_comparison(self):
+        block={"transactions":[{"execution_status":"committed","source_failed":False,"accesses":[{"kind":"storage_write","contract":"c","key_hex":"aa","reverted":False},{"kind":"bank_write","contract":"c","key_hex":"bb","reverted":False}]}]}
+        self.assertEqual(native_fidelity.native_rows(block)[0][1],{"storage:c:aa"})
+        self.assertEqual(native_fidelity.native_rows(block,include_bank=True)[0][1],{"storage:c:aa","bank:bb"})
+
+    def test_full_native_augmentation_counts_bank_added_pair(self):
+        src=[{"block_number":1,"transactions":[{"reads":[],"writes":[]},{"reads":[],"writes":[]}]}]
+        nat=[{"block_number":1,"transactions":[{"execution_status":"committed","source_failed":False,"accesses":[{"kind":"bank_write","contract":"c","key_hex":"01","reverted":False}]},{"execution_status":"committed","source_failed":False,"accesses":[{"kind":"bank_read","contract":"c","key_hex":"01","reverted":False}]}]}]
+        aug=native_fidelity.full_native_augmentation(src,nat)
+        self.assertEqual(aug["storage_only_native_pairs"],0)
+        self.assertEqual(aug["full_native_pairs"],1)
+        self.assertEqual(aug["additional_pairs_from_bank_ledger"],1)
+        self.assertEqual(aug["critical_path_sum"]["bank_delta"],1)
 
     def test_fp_fractional_pair_credit_conserves_pair_count(self):
         src = [{"block_number": 1, "transactions": [

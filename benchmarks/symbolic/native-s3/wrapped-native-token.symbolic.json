@@ -4,16 +4,13 @@
   "source": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
   "analysis_provenance": {
     "method": "llm-source-derived",
-    "source_sha256": "b60666c5e782ece150e1a595eeaa1aa4b57e263d1c4202733a2442224a43b9b3",
+    "source_sha256": "ee3e84bb321a5430436453f33ca622d7693d935343756852338361b3cedeb34e",
     "source_scope": "complete native contract source",
     "historical_trace_keys_used": false,
-    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs. The current symbolic schema covers contract-local storage only; native bank-ledger accesses are external to that schema and are reported separately by the native fidelity analysis."
   },
   "storage_resources": {
     "DENOM": {
-      "key_semantic_name": "singleton"
-    },
-    "TOTAL_SUPPLY": {
       "key_semantic_name": "singleton"
     },
     "BALANCES": {
@@ -51,26 +48,7 @@
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
             "start_line": 9,
             "end_line": 9,
-            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{DENOM.save(deps.storage,&msg.denom)?;TOTAL_SUPPLY.save(deps.storage,&Uint128::zero())?;Ok(Response::new())}"
-          },
-          "notes": []
-        },
-        {
-          "kind": "write",
-          "resource": "TOTAL_SUPPLY",
-          "key": {
-            "semantic_name": "singleton",
-            "depends_on": null
-          },
-          "guard": {
-            "expression": "true",
-            "dependency_kind": "none"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 9,
-            "end_line": 9,
-            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{DENOM.save(deps.storage,&msg.denom)?;TOTAL_SUPPLY.save(deps.storage,&Uint128::zero())?;Ok(Response::new())}"
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{DENOM.save(deps.storage,&msg.denom)?;Ok(Response::new())}"
           },
           "notes": []
         }
@@ -98,7 +76,7 @@
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
             "start_line": 11,
             "end_line": 11,
-            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_add(amount).map_err(StdError::overflow))?;Ok(Response::new())}"
+            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;Ok(Response::new())}"
           },
           "notes": []
         },
@@ -121,25 +99,6 @@
             "start_line": 16,
             "end_line": 16,
             "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
-          },
-          "notes": []
-        },
-        {
-          "kind": "write",
-          "resource": "TOTAL_SUPPLY",
-          "key": {
-            "semantic_name": "singleton",
-            "depends_on": null
-          },
-          "guard": {
-            "expression": "matching nonzero denom funds",
-            "dependency_kind": "input_and_state"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 11,
-            "end_line": 11,
-            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_add(amount).map_err(StdError::overflow))?;Ok(Response::new())}"
           },
           "notes": []
         }
@@ -197,25 +156,6 @@
           "notes": []
         },
         {
-          "kind": "write",
-          "resource": "TOTAL_SUPPLY",
-          "key": {
-            "semantic_name": "singleton",
-            "depends_on": null
-          },
-          "guard": {
-            "expression": "TOTAL_SUPPLY >= amount",
-            "dependency_kind": "state"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 12,
-            "end_line": 12,
-            "code": "fn withdraw(deps:DepsMut,sender:Addr,amount:Uint128)->Result<Response,ContractError>{debit(deps.storage,sender.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_sub(amount).map_err(StdError::overflow))?;let denom=DENOM.load(deps.storage)?;Ok(Response::new().add_message(BankMsg::Send{to_address:sender.into_string(),amount:vec![Coin{denom,amount}]}))}"
-          },
-          "notes": []
-        },
-        {
           "kind": "read",
           "resource": "DENOM",
           "key": {
@@ -230,7 +170,7 @@
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
             "start_line": 11,
             "end_line": 11,
-            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;TOTAL_SUPPLY.update(deps.storage,|x|x.checked_add(amount).map_err(StdError::overflow))?;Ok(Response::new())}"
+            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;Ok(Response::new())}"
           },
           "notes": []
         }
@@ -401,9 +341,38 @@
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
             "start_line": 17,
             "end_line": 17,
-            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(&owner,&spender))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>to_json_binary(&AmountResponse{amount:TOTAL_SUPPLY.load(deps.storage)?})}}"
+            "code": "#[entry_point]pub fn query(deps:Deps,env:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(&owner,&spender))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>{let denom=DENOM.load(deps.storage)?;let balance=deps.querier.query_balance(env.contract.address,denom)?;to_json_binary(&AmountResponse{amount:balance.amount})}}}"
           },
           "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::TotalSupply",
+      "input_parameters": [
+        "env.contract.address"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "DENOM",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 17,
+            "end_line": 17,
+            "code": "#[entry_point]pub fn query(deps:Deps,env:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(&owner,&spender))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>{let denom=DENOM.load(deps.storage)?;let balance=deps.querier.query_balance(env.contract.address,denom)?;to_json_binary(&AmountResponse{amount:balance.amount})}}}"
+          },
+          "notes": [
+            "The subsequent bank-balance query is external to the current contract-local symbolic schema."
+          ]
         }
       ]
     }

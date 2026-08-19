@@ -79,7 +79,8 @@
         "execute::Transfer",
         "execute::TransferFrom",
         "execute::Approve",
-        "query::Balance"
+        "query::Balance",
+        "query::TotalSupply"
       ],
       "implementation_status": "implemented",
       "symbolic_status": "llm-source-derived"
