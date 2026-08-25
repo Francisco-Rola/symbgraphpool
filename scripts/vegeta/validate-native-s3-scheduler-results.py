@@ -88,7 +88,8 @@ def validate(records: list[dict], config: dict, freeze: dict, topology: dict | N
             "reconciliation_nanos", "post_consensus_nanos", "cutoff_overrun_nanos",
             "pre_consensus_nanos", "consensus_bottleneck_nanos", "feedback_nanos",
             "transactions", "prepared_receipts", "reused_receipts", "replayed_transactions",
-            "canonical_transactions", "dependency_edges", "waves", "max_wave_width",
+            "canonical_transactions", "discovered_conflicts", "reference_conflicts",
+            "dependency_edges", "waves", "max_wave_width",
         ):
             if int(row.get(field, -1)) < 0:
                 errors.append(f"line {row.get('_lineno', '?')}: negative/missing {field}")

@@ -206,6 +206,7 @@ struct Record {
     replayed_transactions: u64,
     canonical_transactions: u64,
     discovered_conflicts: u64,
+    reference_conflicts: u64,
     dependency_edges: usize,
     waves: usize,
     max_wave_width: usize,
@@ -341,7 +342,7 @@ fn build_call(spec: &CallSpec, addresses: &BTreeMap<String, Address>) -> Result<
 
 fn read_execution_blocks(path: &Path) -> Result<Vec<ExecutionBlock>, AnyError> {
     let reader = BufReader::new(fs::File::open(path)?);
-    let mut blocks = Vec::new();
+    let mut blocks: Vec<ExecutionBlock> = Vec::new();
     for line in reader.lines() {
         let line = line?;
         if !line.trim().is_empty() {

@@ -181,6 +181,19 @@ class SchedulerValidatorTests(unittest.TestCase):
         self.assertFalse(report["accepted"])
         self.assertTrue(any("not serial-equivalent" in error for error in report["errors"]))
 
+
+    def test_rust_benchmark_record_schema_matches_emitted_reference_conflicts(self):
+        source = (
+            ROOT
+            / "runtime/crates/acg-vegeta-native-s3-executor/src/bin/acg-vegeta-native-s3-benchmark.rs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("let mut blocks: Vec<ExecutionBlock> = Vec::new();", source)
+        record_start = source.index("struct Record {")
+        record_end = source.index("\n}", record_start)
+        record_body = source[record_start:record_end]
+        self.assertIn("reference_conflicts: u64,", record_body)
+        self.assertIn("reference_conflicts:reference_conflicts.len() as u64,", source)
+
     def test_adaptive_current_block_feedback_label_is_rejected(self):
         rows, config = frozen_fixture_records()
         row = next(r for r in rows if r["strategy"] == "cost-aware")
