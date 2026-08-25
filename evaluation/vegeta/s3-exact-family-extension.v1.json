@@ -1,0 +1,115 @@
+{
+  "schema_version": "1-exact-ground-truth-marketplace-router-extension",
+  "dataset": "vegeta-s3",
+  "status": "reviewed-family-extension",
+  "purpose": "Document why four dominant exact-ground-truth FN owners are assigned to the pre-declared marketplace-router native family without importing concrete trace keys.",
+  "selection_policy": {
+    "motivated_by": "exact SLOAD/SSTORE owner-level false-negative attribution after replacing prestateTracer ground truth",
+    "performance_results_used": false,
+    "historical_concrete_storage_keys_used": false,
+    "per_transaction_access_sets_used_for_semantic_derivation": false,
+    "family_was_predeclared_before_exact_extension": true,
+    "frozen_thresholds_changed": false
+  },
+  "sources": {
+    "seaport_official": "https://github.com/ProjectOpenSea/seaport",
+    "universal_router_official": "https://github.com/Uniswap/universal-router",
+    "universal_router_mainnet_deployments": "https://github.com/Uniswap/universal-router/blob/main/deploy-addresses/mainnet.json",
+    "blur_foundation_contracts": "https://docs.blur.foundation/contracts",
+    "blur_verified_implementation": "https://etherscan.io/address/0x983e96c26782a8db500a6fb8ab47a52e1b44862d#code"
+  },
+  "extensions": [
+    {
+      "storage_owner": "0x00000000000001ad428e4906ae43d8f9852d0dd6",
+      "profile_family": "fadfcfe6593c02018bbb951d5f28e0541684eade287b32a0d41e7d283a38a163",
+      "identifier": "Seaport 1.4",
+      "native_code_family": "marketplace-router",
+      "exact_fn_pair_credit": 1052.9,
+      "exact_fn_critical_path_credit": 35.25,
+      "reviewed_selectors": {
+        "0x00000000": "execute::settle_order",
+        "0x87201b41": "execute::settle_order",
+        "0xf2d12b12": "execute::settle_order",
+        "0xfd9f1e10": "execute::cancel_order",
+        "0xe7acab24": "execute::settle_order",
+        "0xfb0f3ee1": "execute::settle_order",
+        "0xb3a34c4c": "execute::settle_order",
+        "0xed98a574": "execute::settle_order",
+        "0x5b34b966": "execute::increment_counter"
+      },
+      "unreviewed_observed_selectors": [
+        "0x46423aa7",
+        "0xf07ec373",
+        "0x79df72bd"
+      ],
+      "note": "Unreviewed selectors remain opaque rather than being guessed."
+    },
+    {
+      "storage_owner": "0xef1c6e67703c7bd7107eed8303fbe6ec2554bf6b",
+      "profile_family": "1473855ce1b22d4c0da2c64c807beedf0698bc44e9e272abaee9b4ed85e3c23d",
+      "identifier": "Uniswap UniversalRouterV1",
+      "native_code_family": "marketplace-router",
+      "exact_fn_pair_credit": 833.91,
+      "exact_fn_critical_path_credit": 147.67,
+      "reviewed_selectors": {
+        "0x3593564c": "execute::execute_route",
+        "0x24856bc3": "execute::execute_route",
+        "0xfa461e33": "execute::v3_swap_callback"
+      },
+      "unreviewed_observed_selectors": [
+        "0x"
+      ],
+      "note": "The native ROUTER_LOCK models the source-reviewed execution lock/msg-sender context as an execution-time singleton dependency; empty receive/fallback frames stay opaque."
+    },
+    {
+      "storage_owner": "0x000000000000ad05ccc4f10045630fb830b95127",
+      "profile_family": "593f1950bcc35516cc41b8c5e012f883050182a10ab79bbdcb59acc58d11432f",
+      "identifier": "Blur Exchange Proxy",
+      "native_code_family": "marketplace-router",
+      "exact_fn_pair_credit": 328.28,
+      "exact_fn_critical_path_credit": 11.38,
+      "reviewed_selectors": {
+        "0xe04d94ae": "execute::blur_settle",
+        "0x9a1fc3a7": "execute::blur_settle",
+        "0xb3be57f8": "execute::blur_settle",
+        "0x627cdcb9": "execute::increment_counter"
+      },
+      "unreviewed_observed_selectors": [
+        "0x9c7bf938",
+        "0xab7e8cba",
+        "0xf4acd740"
+      ],
+      "note": "Reviewed Blur storage classes are order cancelled/filled state, trader nonces, and the isInternal execution guard. Unknown observed selectors remain opaque."
+    },
+    {
+      "storage_owner": "0x00000000006c3852cbef3e08e8df289169ede581",
+      "profile_family": "b576eb61c2dfd35404f209ebe93f8371b9d2cb58f915730a4d4aca38368a98c6",
+      "identifier": "Seaport 1.1",
+      "native_code_family": "marketplace-router",
+      "exact_fn_pair_credit": 205.15,
+      "exact_fn_critical_path_credit": 6.25,
+      "reviewed_selectors": {
+        "0xfb0f3ee1": "execute::settle_order",
+        "0x87201b41": "execute::settle_order",
+        "0xe7acab24": "execute::settle_order",
+        "0x5b34b966": "execute::increment_counter",
+        "0xfd9f1e10": "execute::cancel_order",
+        "0x55944a42": "execute::settle_order",
+        "0xed98a574": "execute::settle_order",
+        "0x88147732": "execute::validate_order"
+      },
+      "unreviewed_observed_selectors": [
+        "0x46423aa7",
+        "0x79df72bd",
+        "0xf07ec373"
+      ],
+      "note": "Unreviewed selectors remain opaque rather than being guessed."
+    }
+  ],
+  "native_key_derivation": {
+    "marketplace_order_id": "sha256 of public transaction calldata, used as a deterministic semantic input fingerprint; it is not an EVM storage key and may conservatively under-alias logically identical orders encoded differently",
+    "counter_key": "effective EVM msg.sender translated to the native sender namespace",
+    "router_lock": "per-native-instance singleton derived from reviewed Universal Router execution-lock semantics",
+    "blur_execution_guard": "per-native-instance singleton derived from Blur isInternal/setup-execution semantics"
+  }
+}

@@ -166,9 +166,13 @@
       "required_profiles": [
         "instantiate",
         "execute::RegisterOrder",
-        "execute::FulfillOrder",
+        "execute::SettleOrder",
+        "execute::ValidateOrder",
         "execute::CancelOrder",
         "execute::IncrementCounter",
+        "execute::ExecuteRoute",
+        "execute::V3SwapCallback",
+        "execute::BlurSettle",
         "query::GetOrderStatus",
         "query::GetCounter"
       ],

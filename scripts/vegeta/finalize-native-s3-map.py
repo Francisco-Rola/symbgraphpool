@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PLAN_DIR = ROOT / "benchmarks/corpora/vegeta-ethereum/s3/native-plan"
 DEFAULT_CHARACTERIZATION = ROOT / "benchmarks/corpora/vegeta-ethereum/s3/characterization"
 DEFAULT_GATE = ROOT / "evaluation/vegeta/s3-native-preexecution-gates.v1.json"
-DEFAULT_BASE_MAP = ROOT / "evaluation/vegeta/s3-native-family-map.v1.json"
+DEFAULT_BASE_MAP = ROOT / "evaluation/vegeta/s3-native-family-map.v2.json"
 
 # Vegeta S3 rank-1 background runtime. The source is not verified, so this is deliberately not an
 # ABI-derived contract fold. Its three observed root call shapes are independently audited below
@@ -475,7 +475,7 @@ def classify_archetype(summary: dict | None) -> str | None:
     identifier = str(summary.get("contract_identifier") or "").lower()
     if "operatorfilterregistry" in identifier:
         return "operator-filter-helper"
-    if "seaport" in identifier:
+    if "seaport" in identifier or "universalrouter" in identifier or "blurexchange" in identifier:
         return "marketplace-router"
     if "erc1155" in identifier or "safeTransferFrom(address,address,uint256,uint256,bytes)" in signatures or "balanceOf(address,uint256)" in signatures:
         return "cw1155-like"
@@ -556,9 +556,31 @@ def entrypoint_for_signature(archetype: str, signature: str) -> str | None:
             "isOperatorAllowed(address,address)": "query::IsOperatorAllowed",
         }.get(signature)
     if archetype == "marketplace-router":
+        name = signature.split("(", 1)[0]
+        # Complex Seaport/Blur tuple signatures intentionally map by reviewed function name;
+        # calldata is not decoded into historical storage keys.
+        if name in {
+            "fulfillOrder", "fulfillAdvancedOrder", "fulfillAvailableOrders",
+            "fulfillAvailableAdvancedOrders", "fulfillBasicOrder", "matchOrders",
+            "matchAdvancedOrders",
+        }:
+            return "execute::SettleOrder"
+        if name in {"cancel", "cancelOrder", "cancelOrders"}:
+            return "execute::CancelOrder"
+        if name == "validate":
+            return "execute::ValidateOrder"
+        if name in {"incrementCounter", "incrementNonce"}:
+            return "execute::IncrementCounter"
+        if name == "execute":
+            if signature in {"execute(bytes,bytes[])", "execute(bytes,bytes[],uint256)"}:
+                return "execute::ExecuteRoute"
+            return "execute::BlurSettle"
+        if name in {"_execute", "bulkExecute"}:
+            return "execute::BlurSettle"
+        if name == "uniswapV3SwapCallback":
+            return "execute::V3SwapCallback"
         return {
             "getOrderStatus(bytes32)": "query::GetOrderStatus",
-            "incrementCounter()": "execute::IncrementCounter",
             "getCounter(address)": "query::GetCounter",
         }.get(signature)
     return None
@@ -1025,7 +1047,7 @@ def render_simulation(report: dict) -> str:
         f"all enforced gates pass in simulation: {'yes' if report['all_enforced_gates_pass'] else 'no'}",
         "",
         "Important: selector-granular reuse is a pre-execution semantic-coverage simulation, not native conflict-topology fidelity.",
-        "Candidate archetypes still require real CosmWasm implementations and genuine source-derived symbolic analyses.",
+        "Additional archetypes are executable only when the native implementation validator confirms real CosmWasm code and source-derived symbolic analyses.",
     ])
     return "\n".join(lines) + "\n"
 
@@ -1139,7 +1161,7 @@ def main() -> int:
             "storage namespaces are never merged across Ethereum addresses",
             "reuse is selector-granular; unsupported custom selectors remain fallback",
             "proxy-family rules may be address-scoped when implementations differ",
-            "candidate archetypes are not executable until real CosmWasm code and genuine LLM symbolic analysis exist",
+            "additional archetypes are executable only when the native implementation manifest and validator confirm real CosmWasm code and genuine source-derived symbolic analysis",
             "address-scoped system/composition rules with unverified source model only audited public call shapes and do not claim full contract equivalence",
         ],
     }

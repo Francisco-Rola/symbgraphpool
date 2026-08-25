@@ -5,7 +5,7 @@ Validation checks exact block/transaction retention, order/hash identity, absenc
 historical read/write sets from the native plan, and the frozen pre-execution fidelity policy. The
 aggregate/block-balanced conflict metrics come from ``translation-coverage.json``. Semantic
 transaction/frame gates come from ``final-mapping-simulation.json`` once the selector-granular
-background finalization pass has run. ``--require-execution-ready`` additionally requires all seven
+background finalization pass has run. ``--require-execution-ready`` additionally requires all reviewed
 base native contract sources and genuine LLM symbolic analyses to exist.
 """
 
@@ -21,7 +21,7 @@ from vegeta_corpus import load_blocks
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = ROOT / "benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl"
 DEFAULT_PLAN_DIR = ROOT / "benchmarks/corpora/vegeta-ethereum/s3/native-plan"
-DEFAULT_MAP = ROOT / "evaluation/vegeta/s3-native-family-map.v1.json"
+DEFAULT_MAP = ROOT / "evaluation/vegeta/s3-native-family-map.v2.json"
 DEFAULT_GATE = ROOT / "evaluation/vegeta/s3-native-preexecution-gates.v1.json"
 
 
@@ -192,10 +192,16 @@ def validate_plan(
 
     profile_mappings = frozen_map.get("profile_mappings") or []
     native_families = frozen_map.get("native_code_families") or {}
-    if len(profile_mappings) != 11:
-        errors.append(f"frozen family map has {len(profile_mappings)} profile mappings; expected 11")
-    if len(native_families) != 7:
-        errors.append(f"frozen family map has {len(native_families)} native code families; expected 7")
+    expected_mappings = int(frozen_map.get("expected_profile_mappings", 11))
+    expected_families = int(frozen_map.get("expected_native_code_families", 7))
+    if len(profile_mappings) != expected_mappings:
+        errors.append(
+            f"family map has {len(profile_mappings)} profile mappings; expected {expected_mappings}"
+        )
+    if len(native_families) != expected_families:
+        errors.append(
+            f"family map has {len(native_families)} native code families; expected {expected_families}"
+        )
 
     conflict = coverage.get("source_conflict_coverage") or {}
     measured = float(conflict.get("coverage", 0.0))
@@ -226,7 +232,7 @@ def validate_plan(
         )
     elif not execution_ready:
         warnings.append(
-            "translation integrity passes, but native execution is intentionally gated until all seven contract sources and genuine LLM symbolic analyses exist"
+            "translation integrity passes, but native execution is intentionally gated until all reviewed contract sources and genuine LLM symbolic analyses exist"
         )
 
     background = int((coverage.get("calls") or {}).get("background_fallback_frames", 0))

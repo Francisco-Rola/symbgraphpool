@@ -4,10 +4,10 @@
   "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
   "analysis_provenance": {
     "method": "llm-source-derived",
-    "source_sha256": "860628e328c03dec3c58ebb7e0e16c92d529d046d47d57f0816b9237c4a319c2",
+    "source_sha256": "ce5b368327ffa7e0c4d20e305ab84bba909c87736d5b18b11f396a109a744809",
     "source_scope": "complete native contract source",
     "historical_trace_keys_used": false,
-    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+    "note": "Profiles were derived from the checked-in native contract source after source/interface review of Seaport, Universal Router V1, and Blur Exchange semantics. Exact S3 attribution selected the pre-declared family extension, but no historical concrete EVM storage keys or per-transaction access sets were used as symbolic inputs."
   },
   "storage_resources": {
     "ORDERS": {
@@ -16,7 +16,10 @@
     "COUNTERS": {
       "key_semantic_name": "address"
     },
-    "TOTAL_FULFILLED": {
+    "ROUTER_LOCK": {
+      "key_semantic_name": "singleton"
+    },
+    "BLUR_EXECUTION_GUARD": {
       "key_semantic_name": "singleton"
     }
   },
@@ -33,7 +36,7 @@
       "accesses": [
         {
           "kind": "write",
-          "resource": "TOTAL_FULFILLED",
+          "resource": "ROUTER_LOCK",
           "key": {
             "semantic_name": "singleton",
             "depends_on": null
@@ -44,9 +47,28 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 11,
-            "end_line": 11,
-            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,_:InstantiateMsg)->Result<Response,ContractError>{TOTAL_FULFILLED.save(deps.storage,&0)?;Ok(Response::new())}"
+            "start_line": 71,
+            "end_line": 71,
+            "code": "ROUTER_LOCK.save(deps.storage, &false)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BLUR_EXECUTION_GUARD",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+            "start_line": 72,
+            "end_line": 72,
+            "code": "BLUR_EXECUTION_GUARD.save(deps.storage, &false)?;"
           },
           "notes": []
         }
@@ -55,8 +77,7 @@
     {
       "entrypoint": "execute::RegisterOrder",
       "input_parameters": [
-        "order_id",
-        "maker"
+        "order_id"
       ],
       "accesses": [
         {
@@ -75,23 +96,22 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 12,
-            "end_line": 12,
-            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::RegisterOrder{order_id,maker}=>{let maker=deps.api.addr_validate(&maker)?;ORDERS.save(deps.storage,&order_id,&Order{maker,active:true,fulfiller:None})?;Ok(Response::new())},ExecuteMsg::FulfillOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;o.active=false;o.fulfiller=Some(info.sender);Ok(o)})?;TOTAL_FULFILLED.update(deps.storage,|x|->StdResult<_>{Ok(x+1)})?;Ok(Response::new())},ExecuteMsg::CancelOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;if o.maker!=info.sender{return Err(ContractError::Unauthorized)};o.active=false;Ok(o)})?;Ok(Response::new())},ExecuteMsg::IncrementCounter{}=>{COUNTERS.update(deps.storage,info.sender.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;Ok(Response::new())}}}"
+            "start_line": 81,
+            "end_line": 81,
+            "code": "ORDERS.save(deps.storage, order_id, &state)?;"
           },
           "notes": []
         }
       ]
     },
     {
-      "entrypoint": "execute::FulfillOrder",
+      "entrypoint": "execute::SettleOrder",
       "input_parameters": [
-        "info.sender",
         "order_id"
       ],
       "accesses": [
         {
-          "kind": "read",
+          "kind": "write",
           "resource": "ORDERS",
           "key": {
             "semantic_name": "order_id",
@@ -106,12 +126,20 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 12,
-            "end_line": 12,
-            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::RegisterOrder{order_id,maker}=>{let maker=deps.api.addr_validate(&maker)?;ORDERS.save(deps.storage,&order_id,&Order{maker,active:true,fulfiller:None})?;Ok(Response::new())},ExecuteMsg::FulfillOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;o.active=false;o.fulfiller=Some(info.sender);Ok(o)})?;TOTAL_FULFILLED.update(deps.storage,|x|->StdResult<_>{Ok(x+1)})?;Ok(Response::new())},ExecuteMsg::CancelOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;if o.maker!=info.sender{return Err(ContractError::Unauthorized)};o.active=false;Ok(o)})?;Ok(Response::new())},ExecuteMsg::IncrementCounter{}=>{COUNTERS.update(deps.storage,info.sender.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;Ok(Response::new())}}}"
+            "start_line": 81,
+            "end_line": 81,
+            "code": "ORDERS.save(deps.storage, order_id, &state)?;"
           },
           "notes": []
-        },
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ValidateOrder",
+      "input_parameters": [
+        "order_id"
+      ],
+      "accesses": [
         {
           "kind": "write",
           "resource": "ORDERS",
@@ -123,33 +151,14 @@
             }
           },
           "guard": {
-            "expression": "order exists",
-            "dependency_kind": "input_and_state"
+            "expression": "true",
+            "dependency_kind": "none"
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 12,
-            "end_line": 12,
-            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::RegisterOrder{order_id,maker}=>{let maker=deps.api.addr_validate(&maker)?;ORDERS.save(deps.storage,&order_id,&Order{maker,active:true,fulfiller:None})?;Ok(Response::new())},ExecuteMsg::FulfillOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;o.active=false;o.fulfiller=Some(info.sender);Ok(o)})?;TOTAL_FULFILLED.update(deps.storage,|x|->StdResult<_>{Ok(x+1)})?;Ok(Response::new())},ExecuteMsg::CancelOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;if o.maker!=info.sender{return Err(ContractError::Unauthorized)};o.active=false;Ok(o)})?;Ok(Response::new())},ExecuteMsg::IncrementCounter{}=>{COUNTERS.update(deps.storage,info.sender.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;Ok(Response::new())}}}"
-          },
-          "notes": []
-        },
-        {
-          "kind": "write",
-          "resource": "TOTAL_FULFILLED",
-          "key": {
-            "semantic_name": "singleton",
-            "depends_on": null
-          },
-          "guard": {
-            "expression": "order exists",
-            "dependency_kind": "input_and_state"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 12,
-            "end_line": 12,
-            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::RegisterOrder{order_id,maker}=>{let maker=deps.api.addr_validate(&maker)?;ORDERS.save(deps.storage,&order_id,&Order{maker,active:true,fulfiller:None})?;Ok(Response::new())},ExecuteMsg::FulfillOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;o.active=false;o.fulfiller=Some(info.sender);Ok(o)})?;TOTAL_FULFILLED.update(deps.storage,|x|->StdResult<_>{Ok(x+1)})?;Ok(Response::new())},ExecuteMsg::CancelOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;if o.maker!=info.sender{return Err(ContractError::Unauthorized)};o.active=false;Ok(o)})?;Ok(Response::new())},ExecuteMsg::IncrementCounter{}=>{COUNTERS.update(deps.storage,info.sender.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;Ok(Response::new())}}}"
+            "start_line": 81,
+            "end_line": 81,
+            "code": "ORDERS.save(deps.storage, order_id, &state)?;"
           },
           "notes": []
         }
@@ -158,12 +167,11 @@
     {
       "entrypoint": "execute::CancelOrder",
       "input_parameters": [
-        "info.sender",
         "order_id"
       ],
       "accesses": [
         {
-          "kind": "read",
+          "kind": "write",
           "resource": "ORDERS",
           "key": {
             "semantic_name": "order_id",
@@ -178,31 +186,9 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 12,
-            "end_line": 12,
-            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::RegisterOrder{order_id,maker}=>{let maker=deps.api.addr_validate(&maker)?;ORDERS.save(deps.storage,&order_id,&Order{maker,active:true,fulfiller:None})?;Ok(Response::new())},ExecuteMsg::FulfillOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;o.active=false;o.fulfiller=Some(info.sender);Ok(o)})?;TOTAL_FULFILLED.update(deps.storage,|x|->StdResult<_>{Ok(x+1)})?;Ok(Response::new())},ExecuteMsg::CancelOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;if o.maker!=info.sender{return Err(ContractError::Unauthorized)};o.active=false;Ok(o)})?;Ok(Response::new())},ExecuteMsg::IncrementCounter{}=>{COUNTERS.update(deps.storage,info.sender.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;Ok(Response::new())}}}"
-          },
-          "notes": []
-        },
-        {
-          "kind": "write",
-          "resource": "ORDERS",
-          "key": {
-            "semantic_name": "order_id",
-            "depends_on": {
-              "dependency_kind": "input",
-              "origin_input": "order_id"
-            }
-          },
-          "guard": {
-            "expression": "info.sender == ORDERS[order_id].maker",
-            "dependency_kind": "input_and_state"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 12,
-            "end_line": 12,
-            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::RegisterOrder{order_id,maker}=>{let maker=deps.api.addr_validate(&maker)?;ORDERS.save(deps.storage,&order_id,&Order{maker,active:true,fulfiller:None})?;Ok(Response::new())},ExecuteMsg::FulfillOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;o.active=false;o.fulfiller=Some(info.sender);Ok(o)})?;TOTAL_FULFILLED.update(deps.storage,|x|->StdResult<_>{Ok(x+1)})?;Ok(Response::new())},ExecuteMsg::CancelOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;if o.maker!=info.sender{return Err(ContractError::Unauthorized)};o.active=false;Ok(o)})?;Ok(Response::new())},ExecuteMsg::IncrementCounter{}=>{COUNTERS.update(deps.storage,info.sender.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;Ok(Response::new())}}}"
+            "start_line": 81,
+            "end_line": 81,
+            "code": "ORDERS.save(deps.storage, order_id, &state)?;"
           },
           "notes": []
         }
@@ -230,12 +216,178 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 12,
-            "end_line": 12,
-            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::RegisterOrder{order_id,maker}=>{let maker=deps.api.addr_validate(&maker)?;ORDERS.save(deps.storage,&order_id,&Order{maker,active:true,fulfiller:None})?;Ok(Response::new())},ExecuteMsg::FulfillOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;o.active=false;o.fulfiller=Some(info.sender);Ok(o)})?;TOTAL_FULFILLED.update(deps.storage,|x|->StdResult<_>{Ok(x+1)})?;Ok(Response::new())},ExecuteMsg::CancelOrder{order_id}=>{ORDERS.update(deps.storage,&order_id,|x|->Result<_,ContractError>{let mut o=x.ok_or(ContractError::MissingOrder)?;if o.maker!=info.sender{return Err(ContractError::Unauthorized)};o.active=false;Ok(o)})?;Ok(Response::new())},ExecuteMsg::IncrementCounter{}=>{COUNTERS.update(deps.storage,info.sender.as_str(),|x|->StdResult<_>{Ok(x.unwrap_or_default()+1)})?;Ok(Response::new())}}}"
+            "start_line": 115,
+            "end_line": 115,
+            "code": "COUNTERS.update(deps.storage, info.sender.as_str(), |old| -> StdResult<_> {"
           },
           "notes": []
         }
+      ]
+    },
+    {
+      "entrypoint": "execute::ExecuteRoute",
+      "input_parameters": [
+        "route_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ROUTER_LOCK",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+            "start_line": 89,
+            "end_line": 89,
+            "code": "let value = guard.may_load(storage)?.unwrap_or(false);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ROUTER_LOCK",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+            "start_line": 91,
+            "end_line": 91,
+            "code": "guard.save(storage, &value)"
+          },
+          "notes": []
+        }
+      ],
+      "notes": [
+        "route_id is provenance only; Universal Router execution serialization is modeled by the per-instance execution-lock singleton."
+      ]
+    },
+    {
+      "entrypoint": "execute::V3SwapCallback",
+      "input_parameters": [
+        "route_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ROUTER_LOCK",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+            "start_line": 89,
+            "end_line": 89,
+            "code": "let value = guard.may_load(storage)?.unwrap_or(false);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ROUTER_LOCK",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+            "start_line": 91,
+            "end_line": 91,
+            "code": "guard.save(storage, &value)"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::BlurSettle",
+      "input_parameters": [
+        "order_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "BLUR_EXECUTION_GUARD",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+            "start_line": 89,
+            "end_line": 89,
+            "code": "let value = guard.may_load(storage)?.unwrap_or(false);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BLUR_EXECUTION_GUARD",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+            "start_line": 91,
+            "end_line": 91,
+            "code": "guard.save(storage, &value)"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ORDERS",
+          "key": {
+            "semantic_name": "order_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "order_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+            "start_line": 126,
+            "end_line": 126,
+            "code": "ORDERS.save(deps.storage, &order_id, &OrderState::Fulfilled)?;"
+          },
+          "notes": []
+        }
+      ],
+      "notes": [
+        "The order_id is derived from public calldata by the execution adapter; it is not a historical EVM storage key."
       ]
     },
     {
@@ -260,9 +412,9 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 13,
-            "end_line": 13,
-            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::GetOrderStatus{order_id}=>{let o=ORDERS.may_load(deps.storage,&order_id)?;to_json_binary(&OrderStatus{active:o.as_ref().map(|x|x.active).unwrap_or(false),fulfilled:o.and_then(|x|x.fulfiller).is_some()})},QueryMsg::GetCounter{address}=>to_json_binary(&CounterResponse{value:COUNTERS.may_load(deps.storage,&address)?.unwrap_or_default()})}}"
+            "start_line": 136,
+            "end_line": 136,
+            "code": "state: ORDERS.may_load(deps.storage, &order_id)?,"
           },
           "notes": []
         }
@@ -290,9 +442,9 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 13,
-            "end_line": 13,
-            "code": "#[entry_point]pub fn query(deps:Deps,_:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::GetOrderStatus{order_id}=>{let o=ORDERS.may_load(deps.storage,&order_id)?;to_json_binary(&OrderStatus{active:o.as_ref().map(|x|x.active).unwrap_or(false),fulfilled:o.and_then(|x|x.fulfiller).is_some()})},QueryMsg::GetCounter{address}=>to_json_binary(&CounterResponse{value:COUNTERS.may_load(deps.storage,&address)?.unwrap_or_default()})}}"
+            "start_line": 140,
+            "end_line": 140,
+            "code": ".may_load(deps.storage, &address)?"
           },
           "notes": []
         }

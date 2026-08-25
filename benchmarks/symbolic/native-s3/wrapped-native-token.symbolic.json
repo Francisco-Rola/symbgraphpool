@@ -4,15 +4,12 @@
   "source": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
   "analysis_provenance": {
     "method": "llm-source-derived",
-    "source_sha256": "ee3e84bb321a5430436453f33ca622d7693d935343756852338361b3cedeb34e",
+    "source_sha256": "48b90e2d883d2075950f7712d90f421edd17e371765de2ccd8c07a2f10cd245c",
     "source_scope": "complete native contract source",
     "historical_trace_keys_used": false,
-    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs. The current symbolic schema covers contract-local storage only; native bank-ledger accesses are external to that schema and are reported separately by the native fidelity analysis."
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs. The wrapped denomination is immutable code configuration, eliminating the prior artificial DENOM storage dependency. Native bank-ledger accesses remain external to this contract-local schema and are measured separately."
   },
   "storage_resources": {
-    "DENOM": {
-      "key_semantic_name": "singleton"
-    },
     "BALANCES": {
       "key_semantic_name": "address"
     },
@@ -32,26 +29,9 @@
       "input_parameters": [
         "msg.denom"
       ],
-      "accesses": [
-        {
-          "kind": "write",
-          "resource": "DENOM",
-          "key": {
-            "semantic_name": "singleton",
-            "depends_on": null
-          },
-          "guard": {
-            "expression": "true",
-            "dependency_kind": "none"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 9,
-            "end_line": 9,
-            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{DENOM.save(deps.storage,&msg.denom)?;Ok(Response::new())}"
-          },
-          "notes": []
-        }
+      "accesses": [],
+      "notes": [
+        "NATIVE_DENOM is immutable code configuration; instantiate validates it but writes no contract storage."
       ]
     },
     {
@@ -61,25 +41,6 @@
         "info.funds"
       ],
       "accesses": [
-        {
-          "kind": "read",
-          "resource": "DENOM",
-          "key": {
-            "semantic_name": "singleton",
-            "depends_on": null
-          },
-          "guard": {
-            "expression": "true",
-            "dependency_kind": "none"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 11,
-            "end_line": 11,
-            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;Ok(Response::new())}"
-          },
-          "notes": []
-        },
         {
           "kind": "write",
           "resource": "BALANCES",
@@ -91,14 +52,14 @@
             }
           },
           "guard": {
-            "expression": "matching nonzero denom funds",
+            "expression": "matching nonzero NATIVE_DENOM funds",
             "dependency_kind": "input_and_state"
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 16,
-            "end_line": 16,
-            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
+            "start_line": 176,
+            "end_line": 176,
+            "code": "BALANCES.save("
           },
           "notes": []
         }
@@ -111,28 +72,6 @@
         "amount"
       ],
       "accesses": [
-        {
-          "kind": "read",
-          "resource": "BALANCES",
-          "key": {
-            "semantic_name": "address",
-            "depends_on": {
-              "dependency_kind": "input",
-              "origin_input": "info.sender"
-            }
-          },
-          "guard": {
-            "expression": "true",
-            "dependency_kind": "none"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 15,
-            "end_line": 15,
-            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
-          },
-          "notes": []
-        },
         {
           "kind": "write",
           "resource": "BALANCES",
@@ -149,31 +88,15 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 15,
-            "end_line": 15,
-            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
-          },
-          "notes": []
-        },
-        {
-          "kind": "read",
-          "resource": "DENOM",
-          "key": {
-            "semantic_name": "singleton",
-            "depends_on": null
-          },
-          "guard": {
-            "expression": "true",
-            "dependency_kind": "none"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 11,
-            "end_line": 11,
-            "code": "fn deposit(deps:DepsMut,info:MessageInfo)->Result<Response,ContractError>{let denom=DENOM.load(deps.storage)?;let amount=info.funds.iter().find(|c|c.denom==denom).map(|c|c.amount).unwrap_or_default();if amount.is_zero()||info.funds.iter().any(|c|c.denom!=denom){return Err(ContractError::InvalidFunds)};credit(deps.storage,info.sender.as_str(),amount)?;Ok(Response::new())}"
+            "start_line": 176,
+            "end_line": 176,
+            "code": "BALANCES.save("
           },
           "notes": []
         }
+      ],
+      "notes": [
+        "The BankMsg::Send ledger dependency is external to contract-local symbolic storage and is measured separately."
       ]
     },
     {
@@ -200,9 +123,9 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 15,
-            "end_line": 15,
-            "code": "fn debit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->Result<(),ContractError>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();if x<n{return Err(ContractError::InsufficientFunds)};BALANCES.save(s,a,&x.checked_sub(n).map_err(StdError::overflow)?)?;Ok(())}"
+            "start_line": 176,
+            "end_line": 176,
+            "code": "BALANCES.save("
           },
           "notes": []
         },
@@ -222,9 +145,9 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 16,
-            "end_line": 16,
-            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
+            "start_line": 176,
+            "end_line": 176,
+            "code": "BALANCES.save("
           },
           "notes": []
         }
@@ -255,9 +178,9 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 14,
-            "end_line": 14,
-            "code": "fn transfer_from(deps:DepsMut,spender:Addr,owner:String,recipient:String,amount:Uint128)->Result<Response,ContractError>{let o=deps.api.addr_validate(&owner)?;let r=deps.api.addr_validate(&recipient)?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),spender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),spender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;debit(deps.storage,o.as_str(),amount)?;credit(deps.storage,r.as_str(),amount)?;Ok(Response::new())}"
+            "start_line": 152,
+            "end_line": 152,
+            "code": ".may_load(deps.storage, (owner.as_str(), spender.as_str()))?"
           },
           "notes": []
         },
@@ -277,9 +200,53 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 14,
-            "end_line": 14,
-            "code": "fn transfer_from(deps:DepsMut,spender:Addr,owner:String,recipient:String,amount:Uint128)->Result<Response,ContractError>{let o=deps.api.addr_validate(&owner)?;let r=deps.api.addr_validate(&recipient)?;let a=ALLOWANCES.may_load(deps.storage,(o.as_str(),spender.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(o.as_str(),spender.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;debit(deps.storage,o.as_str(),amount)?;credit(deps.storage,r.as_str(),amount)?;Ok(Response::new())}"
+            "start_line": 91,
+            "end_line": 91,
+            "code": "ALLOWANCES.save("
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "BALANCES[owner] >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 176,
+            "end_line": 176,
+            "code": "BALANCES.save("
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 176,
+            "end_line": 176,
+            "code": "BALANCES.save("
           },
           "notes": []
         }
@@ -309,9 +276,9 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 10,
-            "end_line": 10,
-            "code": "#[entry_point]pub fn execute(deps:DepsMut,_:Env,info:MessageInfo,msg:ExecuteMsg)->Result<Response,ContractError>{match msg{ExecuteMsg::Deposit{}=>deposit(deps,info),ExecuteMsg::Withdraw{amount}=>withdraw(deps,info.sender,amount),ExecuteMsg::Transfer{recipient,amount}=>transfer(deps,info.sender,recipient,amount),ExecuteMsg::TransferFrom{owner,recipient,amount}=>transfer_from(deps,info.sender,owner,recipient,amount),ExecuteMsg::Approve{spender,amount}=>{let s=deps.api.addr_validate(&spender)?;ALLOWANCES.save(deps.storage,(info.sender.as_str(),s.as_str()),&amount)?;Ok(Response::new())}}}"
+            "start_line": 91,
+            "end_line": 91,
+            "code": "ALLOWANCES.save("
           },
           "notes": []
         }
@@ -339,9 +306,40 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 17,
-            "end_line": 17,
-            "code": "#[entry_point]pub fn query(deps:Deps,env:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(&owner,&spender))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>{let denom=DENOM.load(deps.storage)?;let balance=deps.querier.query_balance(env.contract.address,denom)?;to_json_binary(&AmountResponse{amount:balance.amount})}}}"
+            "start_line": 201,
+            "end_line": 201,
+            "code": "amount: BALANCES.may_load(deps.storage, &address)?.unwrap_or_default(),"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Allowance",
+      "input_parameters": [
+        "owner",
+        "spender"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, spender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+            "start_line": 205,
+            "end_line": 205,
+            "code": ".may_load(deps.storage, (&owner, &spender))?"
           },
           "notes": []
         }
@@ -352,28 +350,9 @@
       "input_parameters": [
         "env.contract.address"
       ],
-      "accesses": [
-        {
-          "kind": "read",
-          "resource": "DENOM",
-          "key": {
-            "semantic_name": "singleton",
-            "depends_on": null
-          },
-          "guard": {
-            "expression": "true",
-            "dependency_kind": "none"
-          },
-          "evidence": {
-            "file": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
-            "start_line": 17,
-            "end_line": 17,
-            "code": "#[entry_point]pub fn query(deps:Deps,env:Env,msg:QueryMsg)->StdResult<Binary>{match msg{QueryMsg::Balance{address}=>to_json_binary(&AmountResponse{amount:BALANCES.may_load(deps.storage,&address)?.unwrap_or_default()}),QueryMsg::Allowance{owner,spender}=>to_json_binary(&AmountResponse{amount:ALLOWANCES.may_load(deps.storage,(&owner,&spender))?.unwrap_or_default()}),QueryMsg::TotalSupply{}=>{let denom=DENOM.load(deps.storage)?;let balance=deps.querier.query_balance(env.contract.address,denom)?;to_json_binary(&AmountResponse{amount:balance.amount})}}}"
-          },
-          "notes": [
-            "The subsequent bank-balance query is external to the current contract-local symbolic schema."
-          ]
-        }
+      "accesses": [],
+      "notes": [
+        "Total supply is the native bank collateral balance for immutable NATIVE_DENOM; there is no contract-local configuration access."
       ]
     }
   ]

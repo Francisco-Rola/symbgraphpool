@@ -1342,7 +1342,7 @@ fn collect_canonical_queries<'a>(
                         ConflictLabExecuteMsg::ResetAllBalances {} => {}
                     }
                 }
-                ExecutionRequest::Execute { .. } => {}
+                ExecutionRequest::Execute { .. } | ExecutionRequest::Bundle { .. } => {}
             }
         }
     }

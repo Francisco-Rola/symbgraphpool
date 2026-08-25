@@ -6,7 +6,7 @@ cd "$ROOT"
 
 PLAN_DIR="${VEGETA_S3_NATIVE_PLAN_DIR:-benchmarks/corpora/vegeta-ethereum/s3/native-plan}"
 CHAR_DIR="${VEGETA_S3_CHARACTERIZATION:-benchmarks/corpora/vegeta-ethereum/s3/characterization}"
-FAMILY_MAP="${VEGETA_S3_NATIVE_FAMILY_MAP:-evaluation/vegeta/s3-native-family-map.v1.json}"
+FAMILY_MAP="${VEGETA_S3_NATIVE_FAMILY_MAP:-evaluation/vegeta/s3-native-family-map.v2.json}"
 GATE_CONFIG="${VEGETA_S3_NATIVE_GATE_CONFIG:-evaluation/vegeta/s3-native-preexecution-gates.v1.json}"
 
 python3 scripts/vegeta/finalize-native-s3-map.py \

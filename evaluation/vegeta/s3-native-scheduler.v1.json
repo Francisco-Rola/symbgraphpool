@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "experiment_id": "vegeta-s3-native-scheduler-v1",
+  "dataset": "Vegeta S3 translated native CosmWasm workload",
+  "block_start": 16774645,
+  "block_end": 16774745,
+  "block_count": 101,
+  "transaction_count": 13783,
+  "workers": 6,
+  "samples": 3,
+  "consensus_cutoff_ms": 5000,
+  "probability_threshold": 0.5,
+  "cost_bypass_speedup": 1.05,
+  "strategy_order_seed": 2026082501,
+  "strategies": [
+    "serial",
+    "aria-fb",
+    "vegeta",
+    "exact-access",
+    "static",
+    "probability-only",
+    "cost-aware"
+  ],
+  "measurement_policy": {
+    "matched_serial": "fresh matched serial engine per strategy/sample; same translated blocks and predecessor state",
+    "state_correctness": "strategy engine world state must equal matched serial after every block",
+    "static_visibility": "checked-in source-derived symbolic profiles plus public translated call inputs only",
+    "adaptive_feedback": "strictly prior blocks only; canonical concrete conflicts and transaction service cost become visible after the prior block",
+    "exact_access": "evaluation-only information oracle using matched-serial current-block concrete conflict edges",
+    "aria_fb": "same-VM post-consensus speculative discovery plus Aria Rule-2-like fallback",
+    "vegeta": "same-VM pre-consensus concrete discovery adaptation followed by dependency replay",
+    "bank_dependencies": "included because performance executes the full native CosmWasm workload; storage-only filtering is used only for source-topology fidelity"
+  },
+  "threshold_policy": "No performance outcome threshold is defined. This file freezes evaluation parameters before observing scheduler results."
+}

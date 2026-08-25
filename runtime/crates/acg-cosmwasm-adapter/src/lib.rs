@@ -218,6 +218,9 @@ impl CosmWasmCandidateAdapter {
                 let bindings = execute_bindings(sender, funds, decoded.payload, block)?;
                 (profile_id, instance_id, bindings)
             }
+            ExecutionRequest::Bundle { .. } => {
+                return Err(AdapterError::UnsupportedBundleRequest);
+            }
         };
 
         Ok(CandidateTransaction {
@@ -364,6 +367,8 @@ pub enum AdapterError {
     EmptyExecuteVariant,
     #[error("unsupported execute variant name {0:?}")]
     InvalidExecuteVariant(String),
+    #[error("atomic bundle requests require a workload-specific symbolic adapter")]
+    UnsupportedBundleRequest,
     #[error("failed to serialize runtime context: {source}")]
     SerializeRuntimeContext {
         #[source]

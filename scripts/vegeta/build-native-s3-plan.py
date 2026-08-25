@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build a pre-execution native CosmWasm translation plan for Vegeta S3.
 
-This tool is deliberately a *planner*, not an executor.  It freezes the reviewed mapping from eleven
-high-impact Ethereum profile families to seven native CosmWasm code-family slots, preserves all S3
+This tool is deliberately a *planner*, not an executor.  It freezes the reviewed mapping from a reviewed set of
+high-impact Ethereum profile families to native CosmWasm code-family slots, preserves all S3
 transactions in their original block/order, translates recognized callTracer frames into semantic
 native actions, and keeps every unsupported frame as an explicit background fallback.
 
@@ -26,7 +26,7 @@ from vegeta_corpus import load_blocks, storage_contract, write_jsonl
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = ROOT / "benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl"
 DEFAULT_CHARACTERIZATION = ROOT / "benchmarks/corpora/vegeta-ethereum/s3/characterization"
-DEFAULT_MAP = ROOT / "evaluation/vegeta/s3-native-family-map.v1.json"
+DEFAULT_MAP = ROOT / "evaluation/vegeta/s3-native-family-map.v2.json"
 DEFAULT_OUTPUT = ROOT / "benchmarks/corpora/vegeta-ethereum/s3/native-plan"
 
 DELEGATE_TYPES = {"DELEGATECALL", "CALLCODE"}
@@ -117,6 +117,32 @@ ENTRYPOINTS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
         "0x70a08231": ("query::balance", [("address", "address")]),
         "0x23b872dd": ("execute::transfer_from", [("owner", "address"), ("recipient", "address"), ("amount", "uint256")]),
     },
+    # Source-reviewed marketplace/router selectors. Complex tuple payloads are intentionally not
+    # ABI-decoded here: the executable adapter derives a deterministic calldata fingerprint as a
+    # semantic order/route identifier. Unknown observed selectors remain mapped-opaque.
+    "marketplace-router": {
+        # Seaport 1.1 / 1.4 settlement, cancellation, validation, and counter actions.
+        "0x00000000": ("execute::settle_order", []),
+        "0x87201b41": ("execute::settle_order", []),
+        "0xf2d12b12": ("execute::settle_order", []),
+        "0xe7acab24": ("execute::settle_order", []),
+        "0xfb0f3ee1": ("execute::settle_order", []),
+        "0xb3a34c4c": ("execute::settle_order", []),
+        "0xed98a574": ("execute::settle_order", []),
+        "0x55944a42": ("execute::settle_order", []),
+        "0xfd9f1e10": ("execute::cancel_order", []),
+        "0x88147732": ("execute::validate_order", []),
+        "0x5b34b966": ("execute::increment_counter", []),
+        # Uniswap Universal Router V1.
+        "0x3593564c": ("execute::execute_route", []),
+        "0x24856bc3": ("execute::execute_route", []),
+        "0xfa461e33": ("execute::v3_swap_callback", []),
+        # Blur Exchange execute/_execute/bulkExecute and trader nonce.
+        "0xe04d94ae": ("execute::blur_settle", []),
+        "0x9a1fc3a7": ("execute::blur_settle", []),
+        "0xb3be57f8": ("execute::blur_settle", []),
+        "0x627cdcb9": ("execute::increment_counter", []),
+    },
 }
 
 
@@ -205,6 +231,20 @@ class FamilyResolver:
             str(item["ethereum_profile_family"]): str(item["native_code_family"])
             for item in frozen_map.get("profile_mappings", [])
         }
+        self.explicit_owner_to_profile: dict[str, str] = {}
+        for item in frozen_map.get("profile_mappings", []):
+            profile = str(item.get("ethereum_profile_family") or "")
+            for raw_owner in item.get("storage_owner_scope") or []:
+                owner = normalize_address(raw_owner)
+                if owner is None or not profile:
+                    continue
+                previous = self.explicit_owner_to_profile.get(owner)
+                if previous is not None and previous != profile:
+                    raise ValueError(
+                        f"family map assigns storage owner {owner} to multiple profiles: "
+                        f"{previous}, {profile}"
+                    )
+                self.explicit_owner_to_profile[owner] = profile
         self.code_cache = code_cache
         self.resolution_by_owner = {
             normalize_address(item.get("storage_owner")): item
@@ -228,6 +268,9 @@ class FamilyResolver:
         address = normalize_address(address)
         if address is None:
             return None
+        explicit = self.explicit_owner_to_profile.get(address)
+        if explicit is not None:
+            return explicit
         resolution = self.resolution_by_owner.get(address)
         if resolution is not None:
             return str(resolution.get("recommended_profile_family") or "") or None
@@ -874,10 +917,18 @@ def build_plan(
 def validate_frozen_map(frozen_map: dict) -> None:
     mappings = frozen_map.get("profile_mappings") or []
     families = frozen_map.get("native_code_families") or {}
-    if len(mappings) != 11:
-        raise ValueError(f"frozen map must contain exactly 11 reviewed profile mappings, got {len(mappings)}")
-    if len(families) != 7:
-        raise ValueError(f"frozen map must contain exactly 7 native code families, got {len(families)}")
+    expected_mappings = int(frozen_map.get("expected_profile_mappings", 11))
+    expected_families = int(frozen_map.get("expected_native_code_families", 7))
+    if len(mappings) != expected_mappings:
+        raise ValueError(
+            f"family map must contain exactly {expected_mappings} reviewed profile mappings, "
+            f"got {len(mappings)}"
+        )
+    if len(families) != expected_families:
+        raise ValueError(
+            f"family map must contain exactly {expected_families} native code families, "
+            f"got {len(families)}"
+        )
     profiles = [item.get("ethereum_profile_family") for item in mappings]
     if len(set(profiles)) != len(profiles):
         raise ValueError("frozen map contains duplicate Ethereum profile families")
@@ -929,7 +980,7 @@ def main() -> int:
         "plan": "native-plan.jsonl",
         "translation_coverage": "translation-coverage.json",
         "instance_catalog": "native-instance-catalog.json",
-        "execution_gate": "requires all seven native source slots and genuine symbolic-analysis files",
+        "execution_gate": "requires all reviewed native source slots and genuine symbolic-analysis files",
         "oracle_accesses_embedded_in_plan": False,
     })
     print(render_coverage_text(coverage), end="")

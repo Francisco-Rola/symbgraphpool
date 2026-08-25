@@ -201,10 +201,7 @@ dependencies = [
 name = "acg-vegeta-native-s3-executor"
 version = "0.1.0"
 dependencies = [
- "acg-core",
  "acg-cosmwasm-engine",
- "acg-runtime-feedback",
- "acg-validator-sim",
  "cosmwasm-std",
  "hex",
  "serde",

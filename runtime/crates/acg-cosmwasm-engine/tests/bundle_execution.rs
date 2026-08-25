@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use acg_cosmwasm_engine::{
-    Address, BlockContext, BundleCall, CosmWasmEngine, EngineConfig, NativeCallContext,
-    NativeContract, ScopedBundleCall, TransactionId,
+    Address, BlockContext, BundleCall, CanonicalTransaction, CosmWasmEngine, EngineConfig,
+    ExecutionRequest, NativeCallContext, NativeContract, ScopedBundleCall, TransactionId,
 };
 use cosmwasm_std::{to_json_binary, Binary, Empty, Env, MessageInfo, Reply, Response};
 use serde::{Deserialize, Serialize};
@@ -441,4 +441,205 @@ fn reverted_scope_observes_prior_outer_write_without_committing_inner_write() {
         .accesses
         .iter()
         .any(|a| a.key == b"discard" && a.reverted));
+}
+
+
+#[test]
+fn bundle_request_speculation_reuses_successful_atomic_write_set() {
+    let (engine, contract) = setup();
+    let block = BlockContext::default();
+    let request = ExecutionRequest::Bundle {
+        transaction_id: TransactionId(100),
+        calls: vec![ScopedBundleCall {
+            source_revert_scope: None,
+            call: BundleCall::Execute {
+                sender: Address::new("alice"),
+                contract: contract.clone(),
+                funds: vec![],
+                msg: to_json_binary(&ExecuteMsg::Set {
+                    key: "speculative".to_owned(),
+                    value: "committed".to_owned(),
+                })
+                .unwrap(),
+            },
+        }],
+        source_failed: false,
+    };
+
+    let snapshot = engine.snapshot();
+    let receipt = engine
+        .execute_speculative(&snapshot, block.clone(), request.clone())
+        .unwrap();
+    assert!(receipt.is_success());
+    assert!(!receipt.write_set.is_empty());
+    assert_eq!(engine.raw_storage(&contract, b"speculative"), None);
+
+    let outcome = engine
+        .execute_canonical_with_speculation(
+            vec![CanonicalTransaction::new(block, request)],
+            vec![receipt],
+        )
+        .unwrap();
+    assert_eq!(outcome.metrics.reused_results, 1);
+    assert_eq!(outcome.metrics.replayed_transactions, 0);
+    assert_eq!(
+        engine.raw_storage(&contract, b"speculative"),
+        Some(b"committed".to_vec())
+    );
+}
+
+#[test]
+fn source_failed_bundle_request_has_no_commit_ready_speculative_writes() {
+    let (engine, contract) = setup();
+    let block = BlockContext::default();
+    let request = ExecutionRequest::Bundle {
+        transaction_id: TransactionId(101),
+        calls: vec![
+            ScopedBundleCall {
+                source_revert_scope: None,
+                call: BundleCall::Execute {
+                    sender: Address::new("alice"),
+                    contract: contract.clone(),
+                    funds: vec![],
+                    msg: to_json_binary(&ExecuteMsg::Set {
+                        key: "before_failure".to_owned(),
+                        value: "rolled-back".to_owned(),
+                    })
+                    .unwrap(),
+                },
+            },
+            ScopedBundleCall {
+                source_revert_scope: None,
+                call: BundleCall::Execute {
+                    sender: Address::new("alice"),
+                    contract: contract.clone(),
+                    funds: vec![],
+                    msg: to_json_binary(&ExecuteMsg::Fail {}).unwrap(),
+                },
+            },
+        ],
+        source_failed: true,
+    };
+
+    let receipt = engine
+        .execute_speculative(&engine.snapshot(), block.clone(), request.clone())
+        .unwrap();
+    assert!(receipt.is_success());
+    assert!(receipt.write_set.is_empty());
+    assert!(!receipt.accesses.is_empty());
+    assert!(receipt.accesses.iter().all(|access| access.reverted));
+    assert!(receipt
+        .accesses
+        .iter()
+        .any(|access| access.key == b"failure-guard"));
+
+    let outcome = engine
+        .execute_canonical_with_speculation(
+            vec![CanonicalTransaction::new(block, request)],
+            vec![receipt],
+        )
+        .unwrap();
+    assert_eq!(outcome.metrics.reused_results, 1);
+    assert_eq!(engine.raw_storage(&contract, b"before_failure"), None);
+}
+
+#[test]
+fn bundle_request_speculation_discards_caught_internal_scope_only() {
+    let (engine, contract) = setup();
+    let block = BlockContext::default();
+    let request = ExecutionRequest::Bundle {
+        transaction_id: TransactionId(102),
+        calls: vec![
+            ScopedBundleCall {
+                source_revert_scope: None,
+                call: BundleCall::Execute {
+                    sender: Address::new("alice"),
+                    contract: contract.clone(),
+                    funds: vec![],
+                    msg: to_json_binary(&ExecuteMsg::Set {
+                        key: "outer_before_spec".to_owned(),
+                        value: "committed".to_owned(),
+                    })
+                    .unwrap(),
+                },
+            },
+            ScopedBundleCall {
+                source_revert_scope: Some(77),
+                call: BundleCall::Execute {
+                    sender: Address::new("alice"),
+                    contract: contract.clone(),
+                    funds: vec![],
+                    msg: to_json_binary(&ExecuteMsg::Set {
+                        key: "inner_spec".to_owned(),
+                        value: "rolled-back".to_owned(),
+                    })
+                    .unwrap(),
+                },
+            },
+            ScopedBundleCall {
+                source_revert_scope: Some(77),
+                call: BundleCall::Execute {
+                    sender: Address::new("alice"),
+                    contract: contract.clone(),
+                    funds: vec![],
+                    msg: to_json_binary(&ExecuteMsg::Fail {}).unwrap(),
+                },
+            },
+            ScopedBundleCall {
+                source_revert_scope: None,
+                call: BundleCall::Execute {
+                    sender: Address::new("alice"),
+                    contract: contract.clone(),
+                    funds: vec![],
+                    msg: to_json_binary(&ExecuteMsg::Set {
+                        key: "outer_after_spec".to_owned(),
+                        value: "committed".to_owned(),
+                    })
+                    .unwrap(),
+                },
+            },
+        ],
+        source_failed: false,
+    };
+
+    let receipt = engine
+        .execute_speculative(&engine.snapshot(), block.clone(), request.clone())
+        .unwrap();
+    assert!(receipt.is_success());
+    assert!(receipt
+        .accesses
+        .iter()
+        .any(|access| access.key == b"inner_spec" && access.reverted));
+    assert!(receipt
+        .write_set
+        .storage
+        .iter()
+        .any(|write| write.key == b"outer_before_spec"));
+    assert!(receipt
+        .write_set
+        .storage
+        .iter()
+        .any(|write| write.key == b"outer_after_spec"));
+    assert!(!receipt
+        .write_set
+        .storage
+        .iter()
+        .any(|write| write.key == b"inner_spec"));
+
+    let outcome = engine
+        .execute_canonical_with_speculation(
+            vec![CanonicalTransaction::new(block, request)],
+            vec![receipt],
+        )
+        .unwrap();
+    assert_eq!(outcome.metrics.reused_results, 1);
+    assert_eq!(
+        engine.raw_storage(&contract, b"outer_before_spec"),
+        Some(b"committed".to_vec())
+    );
+    assert_eq!(engine.raw_storage(&contract, b"inner_spec"), None);
+    assert_eq!(
+        engine.raw_storage(&contract, b"outer_after_spec"),
+        Some(b"committed".to_vec())
+    );
 }

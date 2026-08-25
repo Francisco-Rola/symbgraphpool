@@ -194,6 +194,18 @@ pub enum ExecutionRequest {
         funds: Vec<Coin>,
         msg: Binary,
     },
+    /// One canonical transaction translated into an ordered atomic bundle of native calls.
+    ///
+    /// This request form exists so the same split-phase speculative executor used by the common
+    /// benchmark harness can execute the real Vegeta S3 multi-call CosmWasm translation without
+    /// collapsing a source transaction into independent child transactions. `source_failed` means
+    /// the source transaction reverted: attempted accesses are retained as reverted evidence, no
+    /// writes are committed, and the first translated native call failure is tolerated.
+    Bundle {
+        transaction_id: TransactionId,
+        calls: Vec<ScopedBundleCall>,
+        source_failed: bool,
+    },
 }
 
 pub type NativeResponse = Response<Empty>;
@@ -278,9 +290,9 @@ pub struct BundleExecutionOutcome {
 impl ExecutionRequest {
     pub fn transaction_id(&self) -> TransactionId {
         match self {
-            Self::Instantiate { transaction_id, .. } | Self::Execute { transaction_id, .. } => {
-                *transaction_id
-            }
+            Self::Instantiate { transaction_id, .. }
+            | Self::Execute { transaction_id, .. }
+            | Self::Bundle { transaction_id, .. } => *transaction_id,
         }
     }
 }

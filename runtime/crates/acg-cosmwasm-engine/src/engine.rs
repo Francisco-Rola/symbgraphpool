@@ -1615,12 +1615,147 @@ impl CosmWasmEngine {
                 funds,
                 msg,
             ),
+            ExecutionRequest::Bundle {
+                calls,
+                source_failed,
+                ..
+            } => self.execute_scoped_bundle_in_transaction(
+                tx.clone(),
+                transaction_id,
+                block,
+                &calls,
+                source_failed,
+            ),
         };
 
         if commit && result.is_ok() {
             tx.lock().commit();
         }
         (result, tx)
+    }
+
+    fn execute_scoped_bundle_in_transaction(
+        &self,
+        tx: SharedTx,
+        transaction_id: TransactionId,
+        block: BlockContext,
+        calls: &[ScopedBundleCall],
+        source_failed: bool,
+    ) -> EngineResult<ExecutionOutcome> {
+        let synthetic_contract = Address::new("native-s3-atomic-bundle");
+        let mut events = Vec::new();
+        let mut query_results = Vec::new();
+
+        if source_failed {
+            for (call_index, scoped) in calls.iter().enumerate() {
+                if self
+                    .execute_bundle_call(
+                        tx.clone(),
+                        transaction_id,
+                        block.clone(),
+                        call_index,
+                        &scoped.call,
+                        &mut events,
+                        &mut query_results,
+                    )
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            let mut state = tx.lock();
+            for access in &mut state.accesses {
+                access.reverted = true;
+            }
+            // A top-level reverted source transaction must never contribute commit-ready state to
+            // speculative reconciliation. Read dependencies remain intact so a changed predecessor
+            // can still invalidate the receipt and force canonical re-execution.
+            state.storage_writes.clear();
+            state.balance_writes.clear();
+            state.created_contracts.clear();
+            return Ok(ExecutionOutcome {
+                transaction_id,
+                contract: synthetic_contract,
+                events: Vec::new(),
+                data: None,
+                accesses: state.accesses.clone(),
+                created_contracts: Vec::new(),
+            });
+        }
+
+        let mut closed_scopes = BTreeSet::new();
+        let mut index = 0usize;
+        while index < calls.len() {
+            let Some(scope_id) = calls[index].source_revert_scope else {
+                self.execute_bundle_call(
+                    tx.clone(),
+                    transaction_id,
+                    block.clone(),
+                    index,
+                    &calls[index].call,
+                    &mut events,
+                    &mut query_results,
+                )
+                .map_err(|error| EngineError::BundleCallFailed {
+                    call_index: index,
+                    error: error.to_string(),
+                })?;
+                index += 1;
+                continue;
+            };
+
+            if closed_scopes.contains(&scope_id) {
+                return Err(EngineError::Internal(format!(
+                    "source revert scope {scope_id} is non-contiguous in bundle"
+                )));
+            }
+            let first = index;
+            let mut end = index + 1;
+            while end < calls.len() && calls[end].source_revert_scope == Some(scope_id) {
+                end += 1;
+            }
+
+            let outer_access_start = tx.lock().accesses.len();
+            let child_state = tx.lock().clone();
+            let child_access_start = child_state.accesses.len();
+            let child = Arc::new(parking_lot::Mutex::new(child_state));
+            let mut child_events = Vec::new();
+            let mut child_queries = Vec::new();
+            for call_index in first..end {
+                let result = self.execute_bundle_call(
+                    child.clone(),
+                    transaction_id,
+                    block.clone(),
+                    call_index,
+                    &calls[call_index].call,
+                    &mut child_events,
+                    &mut child_queries,
+                );
+                if result.is_err() {
+                    break;
+                }
+            }
+            let child_state = child.lock();
+            let mut reverted_accesses = child_state.accesses[child_access_start..].to_vec();
+            drop(child_state);
+            for access in &mut reverted_accesses {
+                access.reverted = true;
+            }
+            debug_assert_eq!(tx.lock().accesses.len(), outer_access_start);
+            tx.lock().accesses.extend(reverted_accesses);
+            closed_scopes.insert(scope_id);
+            index = end;
+        }
+
+        let state = tx.lock();
+        Ok(ExecutionOutcome {
+            transaction_id,
+            contract: synthetic_contract,
+            events,
+            data: None,
+            accesses: state.accesses.clone(),
+            created_contracts: state.created_addresses(),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

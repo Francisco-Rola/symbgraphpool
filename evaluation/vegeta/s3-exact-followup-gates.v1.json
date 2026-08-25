@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s3",
+  "purpose": "Re-encode previously frozen Vegeta S3 pre-execution coverage gates for exact-ground-truth re-evaluation. This file introduces no new performance or topology-fidelity thresholds.",
+  "policy_note": "Do not relax these thresholds based on exact-ground-truth performance. Aggregate conflict and block-balanced conflict coverage are recomputed on the exact source corpus; semantic transaction/frame coverage is read from the already-frozen translation coverage report.",
+  "gates": {
+    "aggregate_source_conflict_coverage": {
+      "minimum": 0.95,
+      "enforced": true,
+      "basis": "previously frozen source conflict-pair coverage gate"
+    },
+    "median_conflict_bearing_block_coverage": {
+      "minimum": 0.80,
+      "enforced": true,
+      "basis": "previously frozen block-balanced source conflict coverage gate"
+    },
+    "semantic_transaction_coverage": {
+      "minimum": 0.75,
+      "enforced": true,
+      "basis": "previously frozen semantic transaction coverage gate"
+    },
+    "semantic_call_frame_coverage": {
+      "minimum": 0.50,
+      "enforced": true,
+      "basis": "previously frozen semantic call-frame coverage gate"
+    }
+  }
+}

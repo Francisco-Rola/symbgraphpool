@@ -7,7 +7,7 @@ cd "$ROOT"
 CORPUS="${VEGETA_S3_CORPUS:-benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl}"
 CHAR_DIR="${VEGETA_S3_CHARACTERIZATION:-benchmarks/corpora/vegeta-ethereum/s3/characterization}"
 OUTPUT_DIR="${VEGETA_S3_NATIVE_PLAN_DIR:-benchmarks/corpora/vegeta-ethereum/s3/native-plan}"
-FAMILY_MAP="${VEGETA_S3_NATIVE_FAMILY_MAP:-evaluation/vegeta/s3-native-family-map.v1.json}"
+FAMILY_MAP="${VEGETA_S3_NATIVE_FAMILY_MAP:-evaluation/vegeta/s3-native-family-map.v2.json}"
 GATE_CONFIG="${VEGETA_S3_NATIVE_GATE_CONFIG:-evaluation/vegeta/s3-native-preexecution-gates.v1.json}"
 
 python3 scripts/vegeta/build-native-s3-plan.py \
@@ -72,5 +72,5 @@ printf '  %s/validation-report.txt\n' "$OUTPUT_DIR"
 printf '\nFrozen fidelity gates: aggregate conflict >=95%%, median conflict-bearing-block >=80%%, semantic tx >=75%%, semantic call frames >=50%%.\n'
 printf 'To structurally resolve high-impact background proxies and source-resolve new implementations, run:\n'
 printf '  ETH_RPC_URL=<archive-rpc> VEGETA_S3_BACKGROUND_FETCH_SOURCE=1 VEGETA_S3_FINAL_FETCH_PROXY=1 bash scripts/run-vegeta-s3-native-translation-evaluation.sh\n'
-printf '\nTo require all seven base native contracts and genuine symbolic analyses later, run:\n'
+printf '\nTo require all reviewed base native contracts and genuine symbolic analyses later, run:\n'
 printf '  python3 scripts/vegeta/validate-native-s3-plan.py --corpus %q --plan-dir %q --family-map %q --gate-config %q --simulation %q --require-execution-ready\n' "$CORPUS" "$OUTPUT_DIR" "$FAMILY_MAP" "$GATE_CONFIG" "$OUTPUT_DIR/final-mapping-simulation.json"

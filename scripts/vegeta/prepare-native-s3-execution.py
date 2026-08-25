@@ -103,6 +103,18 @@ def amount(v: Any) -> int:
     x=intv(v)
     return 0 if x==0 else 1 + (x % 1_000_000)
 
+def calldata_fingerprint(data: Any) -> str:
+    """Return a deterministic semantic input identifier without importing EVM storage keys."""
+    text = str(data or "0x").lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    try:
+        raw = bytes.fromhex(text) if text else b""
+    except ValueError:
+        raw = str(data or "").encode("utf-8")
+    return "calldata-sha256:" + hashlib.sha256(raw).hexdigest()
+
+
 def approval_amount(v: Any) -> int:
     """Normalize ERC20-style approvals without breaking successful transferFrom paths.
 
@@ -421,9 +433,25 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
             return contract_call('execute',family,iid,caller,{'send_from':{'from':abi_addr(data,0),'to':abi_addr(data,1),'token_id':token_ids.map(iid,abi_uint(data,2)),'amount':str(max(amount(abi_uint(data,3)),1))}},a)
         if 'balance' in e: return contract_call('query',family,iid,None,{'balance':{'address':abi_addr(data,0),'token_id':token_ids.map(iid,abi_uint(data,1))}},a)
     if family=='marketplace-router':
-        if 'incrementcounter' in ec: return contract_call('execute',family,iid,caller,{'increment_counter':{}},a)
-        if 'getcounter' in ec: return contract_call('query',family,iid,None,{'get_counter':{'address':abi_addr(data,0)}},a)
-        if 'getorderstatus' in ec: return contract_call('query',family,iid,None,{'get_order_status':{'order_id':abi_bytes32(data,0)}},a)
+        semantic_id=calldata_fingerprint(data)
+        if 'incrementcounter' in ec or 'incrementnonce' in ec:
+            return contract_call('execute',family,iid,caller,{'increment_counter':{}},a)
+        if 'executeroute' in ec:
+            return contract_call('execute',family,iid,caller,{'execute_route':{'route_id':semantic_id}},a)
+        if 'v3swapcallback' in ec:
+            return contract_call('execute',family,iid,caller,{'v3_swap_callback':{'route_id':semantic_id}},a)
+        if 'blursettle' in ec:
+            return contract_call('execute',family,iid,caller,{'blur_settle':{'order_id':semantic_id}},a)
+        if 'validateorder' in ec:
+            return contract_call('execute',family,iid,caller,{'validate_order':{'order_id':semantic_id}},a)
+        if 'cancelorder' in ec:
+            return contract_call('execute',family,iid,caller,{'cancel_order':{'order_id':semantic_id}},a)
+        if 'settleorder' in ec or 'fulfillorder' in ec:
+            return contract_call('execute',family,iid,caller,{'settle_order':{'order_id':semantic_id}},a)
+        if 'getcounter' in ec:
+            return contract_call('query',family,iid,None,{'get_counter':{'address':abi_addr(data,0)}},a)
+        if 'getorderstatus' in ec:
+            return contract_call('query',family,iid,None,{'get_order_status':{'order_id':abi_bytes32(data,0)}},a)
     if family=='operator-filter-helper':
         if 'registerandsubscribe' in ec: return contract_call('execute',family,iid,caller,{'register_and_subscribe':{'registrant':abi_addr(data,0),'subscription':abi_addr(data,1)}},a)
         if 'isoperatorallowed' in ec: return contract_call('query',family,iid,None,{'is_operator_allowed':{'registrant':abi_addr(data,0),'operator':abi_addr(data,1)}},a)
@@ -557,7 +585,7 @@ def build(argv=None):
     out=ns.output_dir; out.mkdir(parents=True,exist_ok=True)
     with (out/'execution-plan.jsonl').open('w') as f:
         for b in blocks: f.write(json.dumps(b,separators=(',',':'))+'\n')
-    man={'schema_version':1,'dataset':'vegeta-s3-native','source_plan':str(ns.plan),'selector_map':str(ns.selector_map),'wasm_artifacts':wasm,'instances':manifest_instances,'bank_seeds':[{'address':a,'denom':'unative','amount':str(SEED*4)} for a in sorted(bank_senders) if a],'priming_calls':prime,'normalization':{'amount_policy':'positive EVM transfer amounts mapped to 1+(amount mod 1,000,000); zero remains zero','approval_policy':'zero approval remains zero; every positive ERC20-style approval maps to SEED so normalization cannot invert allowance>=spend for canonically successful transferFrom calls','nft_authorization_policy':'RPC mode reconstructs predecessor-block ERC721 ownerOf/getApproved/isApprovedForAll via high-level eth_call and primes only that logical state; heuristic mode remains an explicit non-publication fallback','caller_provenance':{'mode':ns.caller_mode,'source':'derived-geth-callTracer-effective-msg.sender' if ns.caller_mode=='exact' else 'legacy-frame-from-or-parent-context-fallback','delegatecall_rule':'inherit parent execution-scope msg.sender (EIP-7)' if ns.caller_mode=='exact' else None,'explicit_actions':stats.get('explicit_msg_senders',0),'missing_actions':stats.get('missing_msg_senders',0)},'initial_state':initial_state_meta,'token_ids':token_ids.summary(),'seed_balance':str(SEED),'pair_reserve':str(PAIR_RESERVE),'purpose':'preserve storage/control-path key topology while avoiding uint256/u128, allowance-ordering, historical-state availability, and caught-internal-revert artifacts'},'statistics':dict(stats)}
+    man={'schema_version':1,'dataset':'vegeta-s3-native','source_plan':str(ns.plan),'selector_map':str(ns.selector_map),'wasm_artifacts':wasm,'instances':manifest_instances,'bank_seeds':[{'address':a,'denom':'unative','amount':str(SEED*4)} for a in sorted(bank_senders) if a],'priming_calls':prime,'normalization':{'amount_policy':'positive EVM transfer amounts mapped to 1+(amount mod 1,000,000); zero remains zero','approval_policy':'zero approval remains zero; every positive ERC20-style approval maps to SEED so normalization cannot invert allowance>=spend for canonically successful transferFrom calls','nft_authorization_policy':'RPC mode reconstructs predecessor-block ERC721 ownerOf/getApproved/isApprovedForAll via high-level eth_call and primes only that logical state; heuristic mode remains an explicit non-publication fallback','caller_provenance':{'mode':ns.caller_mode,'source':'derived-geth-callTracer-effective-msg.sender' if ns.caller_mode=='exact' else 'legacy-frame-from-or-parent-context-fallback','delegatecall_rule':'inherit parent execution-scope msg.sender (EIP-7)' if ns.caller_mode=='exact' else None,'explicit_actions':stats.get('explicit_msg_senders',0),'missing_actions':stats.get('missing_msg_senders',0)},'initial_state':initial_state_meta,'token_ids':token_ids.summary(),'seed_balance':str(SEED),'pair_reserve':str(PAIR_RESERVE),'marketplace_order_key_policy':'sha256 of public calldata only; never source trace storage keys','purpose':'preserve storage/control-path key topology while avoiding uint256/u128, allowance-ordering, historical-state availability, caught-internal-revert artifacts, and trace-key leakage'},'statistics':dict(stats)}
     (out/'execution-manifest.json').write_text(json.dumps(man,indent=2,sort_keys=True)+'\n')
     print(f"wrote {out/'execution-plan.jsonl'}")
     print(f"instances={len(manifest_instances)} priming_calls={len(prime)} tx={stats['transactions']} contract_calls={stats['contract_calls']} skipped_actions={stats['skipped_actions']}")

@@ -8,7 +8,7 @@ EXEC_DIR="${VEGETA_S3_NATIVE_EXECUTION_DIR:-benchmarks/corpora/vegeta-ethereum/s
 CORPUS="${VEGETA_S3_CORPUS:-benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl}"
 CHAR_DIR="${VEGETA_S3_CHARACTERIZATION:-benchmarks/corpora/vegeta-ethereum/s3/characterization}"
 
-FAMILY_MAP="${VEGETA_S3_NATIVE_FAMILY_MAP:-evaluation/vegeta/s3-native-family-map.v1.json}"
+FAMILY_MAP="${VEGETA_S3_NATIVE_FAMILY_MAP:-evaluation/vegeta/s3-native-family-map.v2.json}"
 for path in "$PLAN_DIR/selector-semantic-map.json" "$CHAR_DIR/code-cache.json" "$CHAR_DIR/native-family-mapping-candidates.json" "$CORPUS" "$FAMILY_MAP"; do
   if [[ ! -s "$path" ]]; then echo "missing required Vegeta S3 input: $path" >&2; exit 2; fi
 done
