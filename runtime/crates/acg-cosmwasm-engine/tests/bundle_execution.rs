@@ -643,3 +643,19 @@ fn bundle_request_speculation_discards_caught_internal_scope_only() {
         Some(b"committed".to_vec())
     );
 }
+
+#[test]
+fn deterministic_compute_bundle_call_has_no_state_accesses() {
+    let (engine, _) = setup();
+    let before = engine.snapshot();
+    let outcome = engine
+        .execute_bundle(
+            TransactionId(9_999),
+            BlockContext::default(),
+            &[BundleCall::DeterministicCompute { iterations: 10_000 }],
+        )
+        .unwrap();
+    assert!(outcome.accesses.is_empty());
+    assert!(outcome.created_contracts.is_empty());
+    assert!(engine.snapshot().same_world_state(&before));
+}

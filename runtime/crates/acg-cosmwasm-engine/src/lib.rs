@@ -19,11 +19,12 @@ mod types;
 mod validation;
 
 pub use crate::cache::{WasmCacheConfig, WasmCacheMetrics};
-pub use crate::engine::{CosmWasmEngine, EngineConfig, WasmInstanceLifecycle};
+pub use crate::engine::{deterministic_compute, CosmWasmEngine, EngineConfig, WasmInstanceLifecycle};
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::native::{NativeCallContext, NativeContract};
 pub use crate::parallel::{
-    ContractExecutionDiagnostics, DependencyPreexecutionDiagnostics, ParallelExecutionConfig,
+    CanonicalCommitDiagnostics, ContractExecutionDiagnostics, DependencyPreexecutionDiagnostics,
+    ParallelExecutionConfig,
     ParallelSpeculativeExecutionMetrics, PostConsensusTimings, PredictionMatchMetrics,
     PreparedSpeculativeBlock, ReconciliationDependencyEvidence, SpeculativeDependency,
     SpeculativeDependencyClass, SpeculativeWave, SplitPhaseSpeculativeBlockOutcome,

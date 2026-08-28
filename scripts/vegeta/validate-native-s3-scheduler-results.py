@@ -59,6 +59,8 @@ def validate(records: list[dict], config: dict, freeze: dict, topology: dict | N
             errors.append(f"line {row.get('_lineno', '?')}: evaluation config id mismatch")
         if int(row.get("workers", -1)) != expected_workers:
             errors.append(f"line {row.get('_lineno', '?')}: workers mismatch")
+        if str(row.get("wasm_instance_lifecycle", "")) != "reuse":
+            errors.append(f"line {row.get('_lineno', '?')}: wasm instance lifecycle is not reuse")
         if int(row.get("consensus_cutoff_nanos", -1)) != int(config["consensus_cutoff_ms"]) * 1_000_000:
             errors.append(f"line {row.get('_lineno', '?')}: consensus cutoff mismatch")
         if abs(float(row.get("probability_threshold", -1)) - float(config["probability_threshold"])) > 1e-12:

@@ -5,7 +5,8 @@ use acg_cosmwasm_engine::{
     NativeContract, TransactionId,
 };
 use acg_validator_sim::{
-    BlockExecutionError, BlockProducer, BlockProducerConfig, BlockScheduler, ExecutionPlan,
+    BlockExecutionError, BlockProducer, BlockProducerConfig, BlockScheduler, DirectDagBlockExecutor,
+    ExecutionDependency, ExecutionDependencyClass, ExecutionPlan,
     ExecutionWave, FifoScheduler, IngressConfig, Mempool, ProducedBlock, RateControlledIngress,
     SchedulingError, SerialBlockExecutor, SingleValidatorRuntime, DEFAULT_BENCHMARK_INGRESS_TPS,
 };
@@ -272,6 +273,144 @@ fn scheduler_is_a_pluggable_execution_order_boundary() {
         .unwrap();
     let value: Value = serde_json::from_slice(query.data.as_slice()).unwrap();
     assert_eq!(value["count"], 10);
+}
+
+
+#[test]
+fn direct_dag_executor_runs_independent_wave_against_canonical_state() {
+    let engine = CosmWasmEngine::default();
+    let (code_id, first) = instantiate_counter(&engine);
+    let second = engine
+        .instantiate(
+            TransactionId(10),
+            BlockContext::default(),
+            Address::from("alice"),
+            code_id,
+            None,
+            "counter-2".to_owned(),
+            Vec::new(),
+            Binary::default(),
+        )
+        .unwrap()
+        .contract;
+    let mempool = Mempool::default();
+    mempool.admit(execute_request(11, &first, "increment"), 0);
+    mempool.admit(execute_request(12, &second, "increment"), 0);
+    let block = BlockProducer::fifo(BlockProducerConfig::default())
+        .unwrap()
+        .produce_next(&mempool);
+    let plan = ExecutionPlan {
+        transaction_count: 2,
+        waves: vec![ExecutionWave {
+            transaction_indices: vec![0, 1],
+        }],
+        dependencies: Vec::new(),
+    };
+
+    let report = DirectDagBlockExecutor::new(engine.clone(), 2)
+        .unwrap()
+        .execute(&block, &plan)
+        .unwrap();
+    assert_eq!(report.successful(), 2);
+    assert_eq!(report.transactions[0].transaction_id, TransactionId(11));
+    assert_eq!(report.transactions[1].transaction_id, TransactionId(12));
+
+    for contract in [first, second] {
+        let query = engine
+            .query(BlockContext::default(), contract, Binary::default())
+            .unwrap();
+        let value: Value = serde_json::from_slice(query.data.as_slice()).unwrap();
+        assert_eq!(value["count"], 1);
+    }
+}
+
+#[test]
+fn direct_dag_runtime_diagnostics_capture_worker_and_commit_hot_paths() {
+    let engine = CosmWasmEngine::default();
+    let (code_id, first) = instantiate_counter(&engine);
+    let second = engine
+        .instantiate(
+            TransactionId(40),
+            BlockContext::default(),
+            Address::from("alice"),
+            code_id,
+            None,
+            "counter-profile-2".to_owned(),
+            Vec::new(),
+            Binary::default(),
+        )
+        .unwrap()
+        .contract;
+    let mempool = Mempool::default();
+    mempool.admit(execute_request(41, &first, "increment"), 0);
+    mempool.admit(execute_request(42, &second, "increment"), 0);
+    let block = BlockProducer::fifo(BlockProducerConfig::default())
+        .unwrap()
+        .produce_next(&mempool);
+    let plan = ExecutionPlan {
+        transaction_count: 2,
+        waves: vec![ExecutionWave {
+            transaction_indices: vec![0, 1],
+        }],
+        dependencies: Vec::new(),
+    };
+
+    let (report, diagnostics) = DirectDagBlockExecutor::new(engine, 2)
+        .unwrap()
+        .execute_with_diagnostics(&block, &plan)
+        .unwrap();
+    assert_eq!(report.successful(), 2);
+    assert!(diagnostics.worker_phase_wall > std::time::Duration::ZERO);
+    assert!(diagnostics.aggregate_transaction_service > std::time::Duration::ZERO);
+    assert!(diagnostics.max_in_flight >= 1);
+    assert!(diagnostics.commit.batches >= 1);
+    assert_eq!(diagnostics.commit.write_sets, 2);
+    assert!(diagnostics.contract.aggregate_request_execution > std::time::Duration::ZERO);
+    assert!(diagnostics.contract.canonical_state_reads > 0);
+}
+
+#[test]
+fn direct_dag_executor_reuses_pool_across_blocks_and_commits_dependencies() {
+    let engine = CosmWasmEngine::default();
+    let (_code_id, contract) = instantiate_counter(&engine);
+    let executor = DirectDagBlockExecutor::new(engine.clone(), 2).unwrap();
+
+    for round in 0..2_u64 {
+        let mempool = Mempool::default();
+        mempool.admit(execute_request(20 + round * 2, &contract, "increment"), 0);
+        mempool.admit(execute_request(21 + round * 2, &contract, "increment"), 0);
+        let block = BlockProducer::fifo(BlockProducerConfig::default())
+            .unwrap()
+            .produce_next(&mempool);
+        let plan = ExecutionPlan {
+            transaction_count: 2,
+            waves: vec![
+                ExecutionWave { transaction_indices: vec![0] },
+                ExecutionWave { transaction_indices: vec![1] },
+            ],
+            dependencies: vec![ExecutionDependency {
+                predecessor_index: 0,
+                successor_index: 1,
+                class: ExecutionDependencyClass::Hard,
+            }],
+        };
+        let report = executor.execute(&block, &plan).unwrap();
+        assert_eq!(report.successful(), 2);
+    }
+
+    let query = engine
+        .query(BlockContext::default(), contract, Binary::default())
+        .unwrap();
+    let value: Value = serde_json::from_slice(query.data.as_slice()).unwrap();
+    assert_eq!(value["count"], 4);
+}
+
+#[test]
+fn direct_dag_executor_rejects_zero_workers() {
+    assert!(matches!(
+        DirectDagBlockExecutor::new(CosmWasmEngine::default(), 0),
+        Err(BlockExecutionError::InvalidWorkerCount)
+    ));
 }
 
 #[test]

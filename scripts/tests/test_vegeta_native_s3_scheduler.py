@@ -49,6 +49,11 @@ class ArchetypeFreezeTests(unittest.TestCase):
 class SchedulerSourcePolicyTests(unittest.TestCase):
     def test_static_scheduler_source_does_not_import_historical_concrete_keys(self):
         source = (ROOT / "runtime/crates/acg-vegeta-native-s3-executor/src/bin/acg-vegeta-native-s3-benchmark.rs").read_text()
+        self.assertIn("wasm_instance_lifecycle: WasmInstanceLifecycle::Reuse", source)
+        self.assertNotIn("wasm_instance_lifecycle: WasmInstanceLifecycle::Recycle", source)
+        executor_source = (ROOT / "runtime/crates/acg-vegeta-native-s3-executor/src/main.rs").read_text()
+        self.assertIn("wasm_instance_lifecycle:WasmInstanceLifecycle::Reuse", executor_source)
+        self.assertNotIn("wasm_instance_lifecycle:WasmInstanceLifecycle::Recycle", executor_source)
         for forbidden in ("exact-sload", "native-accesses.jsonl", "actual_reads", "actual_writes", "evm/"):
             self.assertNotIn(forbidden, source)
         self.assertIn("evaluation-only matched-serial concrete-access oracle", source)
@@ -122,6 +127,7 @@ def frozen_fixture_records() -> tuple[list[dict], dict]:
                     "block_number": block,
                     "strategy": strategy,
                     "workers": config["workers"],
+                    "wasm_instance_lifecycle": "reuse",
                     "transactions": txs,
                     "semantic_calls": txs,
                     "skipped_actions": 0,

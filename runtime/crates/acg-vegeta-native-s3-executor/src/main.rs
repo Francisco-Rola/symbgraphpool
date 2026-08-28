@@ -1,9 +1,10 @@
-use std::{collections::BTreeMap, env, fs, io::{self, BufRead, BufReader, BufWriter, Write}, path::{Path, PathBuf}};
+use std::{collections::BTreeMap, env, fs, io::{self, BufRead, BufReader, BufWriter, Write}, path::{Path, PathBuf}, time::Instant};
 
 use acg_cosmwasm_engine::{
     AccessKind, Address, BlockContext, BundleCall, CosmWasmEngine, EngineConfig, EngineError,
     ScopedBundleCall, TransactionId, WasmInstanceLifecycle,
 };
+use acg_vegeta_native_s3_executor::{ComputeCalibration, ComputeMetric};
 use cosmwasm_std::{Binary, Coin, Uint128};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -60,7 +61,15 @@ struct CallSpec {
 struct CoinSpec { denom: String, amount: String }
 
 #[derive(Debug, Serialize)]
-struct OutputBlock { block_number: u64, transactions: Vec<OutputTx> }
+struct OutputBlock {
+    block_number: u64,
+    wasm_instance_lifecycle: &'static str,
+    compute_calibration_metric: &'static str,
+    compute_scale: f64,
+    compute_base_total_nanos: u64,
+    compute_iterations_per_nano: f64,
+    transactions: Vec<OutputTx>,
+}
 
 #[derive(Debug, Serialize)]
 struct OutputTx {
@@ -70,6 +79,8 @@ struct OutputTx {
     execution_status: String,
     semantic_calls: usize,
     skipped_actions: usize,
+    native_execution_nanos: u64,
+    compute_iterations: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     native_failed_call_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,7 +124,17 @@ struct OutputAccess {
 }
 
 #[derive(Debug)]
-struct Args { repo_root: PathBuf, manifest: PathBuf, plan: PathBuf, output: PathBuf }
+struct Args {
+    repo_root: PathBuf,
+    manifest: PathBuf,
+    plan: PathBuf,
+    output: PathBuf,
+    compute_weights: Option<PathBuf>,
+    compute_metric: ComputeMetric,
+    compute_scale: f64,
+    compute_base_total_nanos: u64,
+    compute_iterations_per_nano: Option<f64>,
+}
 
 type AnyError = Box<dyn std::error::Error>;
 fn invalid(msg: impl Into<String>) -> AnyError { io::Error::new(io::ErrorKind::InvalidInput, msg.into()).into() }
@@ -121,6 +142,11 @@ fn invalid(msg: impl Into<String>) -> AnyError { io::Error::new(io::ErrorKind::I
 fn parse_args() -> Result<Args, AnyError> {
     let mut repo_root = PathBuf::from(".");
     let mut manifest = None; let mut plan = None; let mut output = None;
+    let mut compute_weights = None;
+    let mut compute_metric = ComputeMetric::None;
+    let mut compute_scale = 0.0_f64;
+    let mut compute_base_total_ms = 1_000_u64;
+    let mut compute_iterations_per_nano = None;
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -128,11 +154,27 @@ fn parse_args() -> Result<Args, AnyError> {
             "--manifest" => manifest = Some(PathBuf::from(it.next().ok_or_else(|| invalid("missing value after --manifest"))?)),
             "--plan" => plan = Some(PathBuf::from(it.next().ok_or_else(|| invalid("missing value after --plan"))?)),
             "--output" => output = Some(PathBuf::from(it.next().ok_or_else(|| invalid("missing value after --output"))?)),
-            "-h" | "--help" => return Err(invalid("usage: acg-vegeta-native-s3-executor --manifest FILE --plan FILE --output FILE [--repo-root ROOT]")),
+            "--compute-weights" => compute_weights = Some(PathBuf::from(it.next().ok_or_else(|| invalid("missing value after --compute-weights"))?)),
+            "--compute-metric" => compute_metric = ComputeMetric::parse(&it.next().ok_or_else(|| invalid("missing value after --compute-metric"))?)?,
+            "--compute-scale" => compute_scale = it.next().ok_or_else(|| invalid("missing value after --compute-scale"))?.parse()?,
+            "--compute-base-total-ms" => compute_base_total_ms = it.next().ok_or_else(|| invalid("missing value after --compute-base-total-ms"))?.parse()?,
+            "--compute-iterations-per-nano" => compute_iterations_per_nano = Some(it.next().ok_or_else(|| invalid("missing value after --compute-iterations-per-nano"))?.parse()?),
+            "-h" | "--help" => return Err(invalid("usage: acg-vegeta-native-s3-executor --manifest FILE --plan FILE --output FILE [--repo-root ROOT] [--compute-weights FILE --compute-metric none|steps|gas --compute-scale X --compute-base-total-ms 1000 --compute-iterations-per-nano X]")),
             _ => return Err(invalid(format!("unknown argument: {arg}"))),
         }
     }
-    Ok(Args { repo_root, manifest: manifest.ok_or_else(|| invalid("--manifest is required"))?, plan: plan.ok_or_else(|| invalid("--plan is required"))?, output: output.ok_or_else(|| invalid("--output is required"))? })
+    if !compute_scale.is_finite() || compute_scale < 0.0 { return Err(invalid("--compute-scale must be finite and non-negative")); }
+    Ok(Args {
+        repo_root,
+        manifest: manifest.ok_or_else(|| invalid("--manifest is required"))?,
+        plan: plan.ok_or_else(|| invalid("--plan is required"))?,
+        output: output.ok_or_else(|| invalid("--output is required"))?,
+        compute_weights,
+        compute_metric,
+        compute_scale,
+        compute_base_total_nanos: compute_base_total_ms.saturating_mul(1_000_000),
+        compute_iterations_per_nano,
+    })
 }
 
 fn resolve(root: &Path, path: &str) -> PathBuf { let p=PathBuf::from(path); if p.is_absolute(){p}else{root.join(p)} }
@@ -179,7 +221,15 @@ fn access_kind(kind: &AccessKind) -> &'static str {
 fn main() -> Result<(), AnyError> {
     let args=parse_args()?;
     let manifest:Manifest=serde_json::from_slice(&fs::read(&args.manifest)?)?;
-    let engine=CosmWasmEngine::new(EngineConfig{gas_limit:u64::MAX,wasm_instance_lifecycle:WasmInstanceLifecycle::Recycle,..EngineConfig::default()});
+    let calibration = if args.compute_metric == ComputeMetric::None || args.compute_scale == 0.0 {
+        ComputeCalibration::load(Path::new("."), args.compute_metric, args.compute_scale, args.compute_base_total_nanos, args.compute_iterations_per_nano)?
+    } else {
+        let weights = args.compute_weights.as_ref().ok_or_else(|| invalid("--compute-weights is required when compute calibration is enabled"))?;
+        ComputeCalibration::load(weights, args.compute_metric, args.compute_scale, args.compute_base_total_nanos, args.compute_iterations_per_nano)?
+    };
+    let calibration_meta = calibration.metadata();
+    eprintln!("native-s3 compute calibration metric={} scale={} base_total_ms={:.1} iter_per_ns={:.6}", calibration_meta.metric, calibration_meta.scale, calibration_meta.base_total_nanos as f64/1e6, calibration_meta.iterations_per_nano);
+    let engine=CosmWasmEngine::new(EngineConfig{gas_limit:u64::MAX,wasm_instance_lifecycle:WasmInstanceLifecycle::Reuse,..EngineConfig::default()});
     let mut codes=BTreeMap::new();
     for (family,path) in &manifest.wasm_artifacts {
         let bytes=fs::read(resolve(&args.repo_root,path)).map_err(|e| invalid(format!("failed to read {family} Wasm {path}: {e}")))?;
@@ -207,24 +257,34 @@ fn main() -> Result<(), AnyError> {
         let b:ExecutionBlock=serde_json::from_str(&line)?; let mut out_txs=Vec::with_capacity(b.transactions.len());
         for tx in b.transactions {
             let calls:Vec<BundleCall>=tx.calls.iter().map(|c|build_call(c,&addresses)).collect::<Result<_,_>>().map_err(|e: AnyError| invalid(format!("block {} tx {} {}: {e}",b.block_number,tx.tx_index,tx.tx_hash)))?;
+            let compute_iterations = calibration.iterations_for(b.block_number, tx.tx_index, &tx.tx_hash)?;
+            let compute_prefix = usize::from(compute_iterations > 0);
+            let mut execution_calls=Vec::with_capacity(calls.len()+compute_prefix);
+            if compute_iterations>0 { execution_calls.push(BundleCall::DeterministicCompute{iterations:compute_iterations}); }
+            execution_calls.extend(calls.iter().cloned());
             let block=BlockContext{height:b.block_number,time_nanos:b.timestamp.saturating_mul(1_000_000_000),chain_id:"vegeta-s3-native".to_owned(),transaction_index:Some(tx.tx_index as u32)};
             let tid=TransactionId(((b.block_number-16_774_645)*100_000 + tx.tx_index as u64)+10_000_000);
-            let scoped_calls:Vec<ScopedBundleCall>=calls.iter().cloned().zip(tx.calls.iter()).map(|(call,spec)|ScopedBundleCall{call,source_revert_scope:spec.source_revert_scope_action_id}).collect();
+            let mut scoped_calls:Vec<ScopedBundleCall>=Vec::with_capacity(execution_calls.len());
+            if compute_iterations>0 { scoped_calls.push(ScopedBundleCall{call:BundleCall::DeterministicCompute{iterations:compute_iterations},source_revert_scope:None}); }
+            scoped_calls.extend(calls.iter().cloned().zip(tx.calls.iter()).map(|(call,spec)|ScopedBundleCall{call,source_revert_scope:spec.source_revert_scope_action_id}));
             let has_internal_revert_scopes=tx.calls.iter().any(|c|c.source_revert_scope_action_id.is_some());
+            let native_started=Instant::now();
             let result=if tx.source_failed {
-                engine.execute_bundle_reverted_tolerant(tid,block,&calls)
+                engine.execute_bundle_reverted_tolerant(tid,block,&execution_calls)
             } else if has_internal_revert_scopes {
                 engine.execute_bundle_with_reverted_scopes(tid,block,&scoped_calls)
             } else {
-                engine.execute_bundle(tid,block,&calls)
+                engine.execute_bundle(tid,block,&execution_calls)
             };
+            let native_execution_nanos=native_started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
             let outcome=result.map_err(|e| {
                 if let EngineError::BundleCallFailed { call_index, error } = &e {
-                    let spec=tx.calls.get(*call_index);
+                    let semantic_call_index=call_index.checked_sub(compute_prefix);
+                    let spec=semantic_call_index.and_then(|index|tx.calls.get(index));
                     let msg=spec.and_then(|c|c.msg.as_ref()).map(|v|v.to_string()).unwrap_or_else(|| "-".to_owned());
                     invalid(format!(
                         "native S3 execution failed at block {} tx {} {} (semantic calls={}): strict native call {} failed; family={:?} instance={:?} sender={:?} origin={:?} kind={:?} msg={} error={}",
-                        b.block_number,tx.tx_index,tx.tx_hash,calls.len(),call_index,
+                        b.block_number,tx.tx_index,tx.tx_hash,calls.len(),semantic_call_index.map(|i|i.to_string()).unwrap_or_else(||"compute".to_owned()),
                         spec.and_then(|c|c.family.as_ref()),spec.and_then(|c|c.instance_id.as_ref()),
                         spec.and_then(|c|c.sender.as_ref()),spec.and_then(|c|c.origin_action_id),
                         spec.map(|c|c.kind.as_str()),msg,error
@@ -233,34 +293,36 @@ fn main() -> Result<(), AnyError> {
                     invalid(format!("native S3 execution failed at block {} tx {} {} (semantic calls={}): {e}",b.block_number,tx.tx_index,tx.tx_hash,calls.len()))
                 }
             })?;
-            let failed_call_index=outcome.failure.as_ref().map(|f|f.call_index);
+            let failed_call_index=outcome.failure.as_ref().and_then(|f|f.call_index.checked_sub(compute_prefix));
             let failed_origin_action_id=failed_call_index.and_then(|i|tx.calls.get(i)).and_then(|c|c.origin_action_id);
             let native_failure=outcome.failure.as_ref().map(|f|f.error.clone());
             if let Some(failure)=outcome.failure.as_ref() {
                 if !tx.source_failed {
                     return Err(invalid(format!("unexpected tolerant native failure for successful source tx at block {} tx {} {} call {}: {}",b.block_number,tx.tx_index,tx.tx_hash,failure.call_index,failure.error)));
                 }
-                let spec=tx.calls.get(failure.call_index);
+                let semantic_failure_index=failure.call_index.checked_sub(compute_prefix);
+                let spec=semantic_failure_index.and_then(|i|tx.calls.get(i));
                 eprintln!(
                     "source-reverted tx {}:{} {} stopped at native call {} family={:?} instance={:?} origin={:?}: {}",
-                    b.block_number,tx.tx_index,tx.tx_hash,failure.call_index,
+                    b.block_number,tx.tx_index,tx.tx_hash,semantic_failure_index.map(|i|i.to_string()).unwrap_or_else(||"compute".to_owned()),
                     spec.and_then(|c|c.family.as_ref()),spec.and_then(|c|c.instance_id.as_ref()),
                     spec.and_then(|c|c.origin_action_id),failure.error
                 );
             }
             let reverted_internal_scopes=outcome.reverted_scopes.iter().map(|scope|OutputRevertedScope{
                 scope_action_id:scope.scope_id,
-                first_call_index:scope.first_call_index,
-                last_call_index:scope.last_call_index,
-                native_failed_call_index:scope.failure.as_ref().map(|f|f.call_index),
+                first_call_index:scope.first_call_index.saturating_sub(compute_prefix),
+                last_call_index:scope.last_call_index.saturating_sub(compute_prefix),
+                native_failed_call_index:scope.failure.as_ref().and_then(|f|f.call_index.checked_sub(compute_prefix)),
                 native_failure:scope.failure.as_ref().map(|f|f.error.clone()),
             }).collect::<Vec<_>>();
             for scope in &outcome.reverted_scopes {
                 if let Some(failure)=scope.failure.as_ref() {
-                    let spec=tx.calls.get(failure.call_index);
+                    let semantic_failure_index=failure.call_index.checked_sub(compute_prefix);
+                    let spec=semantic_failure_index.and_then(|i|tx.calls.get(i));
                     eprintln!(
                         "caught source-reverted internal scope {} in successful tx {}:{} {} stopped at native call {} family={:?} instance={:?} origin={:?}: {}",
-                        scope.scope_id,b.block_number,tx.tx_index,tx.tx_hash,failure.call_index,
+                        scope.scope_id,b.block_number,tx.tx_index,tx.tx_hash,semantic_failure_index.map(|i|i.to_string()).unwrap_or_else(||"compute".to_owned()),
                         spec.and_then(|c|c.family.as_ref()),spec.and_then(|c|c.instance_id.as_ref()),
                         spec.and_then(|c|c.origin_action_id),failure.error
                     );
@@ -276,7 +338,7 @@ fn main() -> Result<(), AnyError> {
                 }
             }
             let accesses=outcome.accesses.into_iter().enumerate().map(|(access_index,a)|{
-                let bundle_call_index=access_call_index.get(access_index).copied().flatten();
+                let bundle_call_index=access_call_index.get(access_index).copied().flatten().and_then(|i|i.checked_sub(compute_prefix));
                 let spec=bundle_call_index.and_then(|i|tx.calls.get(i));
                 OutputAccess{
                     kind:access_kind(&a.kind),
@@ -293,9 +355,9 @@ fn main() -> Result<(), AnyError> {
                 }
             }).collect();
             calls_total+=calls.len(); txs+=1;
-            out_txs.push(OutputTx{tx_index:tx.tx_index,tx_hash:tx.tx_hash,source_failed:tx.source_failed,execution_status:if committed{"committed"}else{"reverted"}.to_owned(),semantic_calls:calls.len(),skipped_actions:tx.skipped_actions,native_failed_call_index:failed_call_index,native_failed_origin_action_id:failed_origin_action_id,native_failure,reverted_internal_scopes,accesses});
+            out_txs.push(OutputTx{tx_index:tx.tx_index,tx_hash:tx.tx_hash,source_failed:tx.source_failed,execution_status:if committed{"committed"}else{"reverted"}.to_owned(),semantic_calls:calls.len(),skipped_actions:tx.skipped_actions,native_execution_nanos,compute_iterations,native_failed_call_index:failed_call_index,native_failed_origin_action_id:failed_origin_action_id,native_failure,reverted_internal_scopes,accesses});
         }
-        serde_json::to_writer(&mut writer,&OutputBlock{block_number:b.block_number,transactions:out_txs})?; writer.write_all(b"\n")?; blocks+=1;
+        serde_json::to_writer(&mut writer,&OutputBlock{block_number:b.block_number,wasm_instance_lifecycle:"reuse",compute_calibration_metric:calibration_meta.metric,compute_scale:calibration_meta.scale,compute_base_total_nanos:calibration_meta.base_total_nanos,compute_iterations_per_nano:calibration_meta.iterations_per_nano,transactions:out_txs})?; writer.write_all(b"\n")?; blocks+=1;
         eprintln!("native-s3 block {} complete ({blocks}/101)",b.block_number);
     }
     writer.flush()?;

@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use cosmwasm_std::Uint128;
 
+use crate::parallel::CanonicalCommitDiagnostics;
 use crate::speculative::{ReadDependency, StateWriteSet};
-use crate::state::SharedWorld;
+use crate::state::{SharedWorld, WorldState};
 use crate::types::{Address, ContractMetadata};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,33 +267,77 @@ fn balance_conflict_changed_denom(
 }
 
 pub(crate) fn apply_write_set(world: &SharedWorld, write_set: &StateWriteSet) {
+    apply_write_sets(world, std::slice::from_ref(write_set));
+}
+
+/// Apply several already-ordered write sets while holding the canonical world write lock once.
+///
+/// Exact-DAG replay uses this to keep worker threads entirely on the read/compute side of the
+/// canonical state and let one coordinator perform short batched commits. This preserves canonical
+/// transaction order while avoiding N workers repeatedly contending for the same world-state
+/// writer lock.
+pub(crate) fn apply_write_sets(world: &SharedWorld, write_sets: &[StateWriteSet]) {
     let mut world = world.write();
+    apply_write_sets_locked(&mut world, write_sets);
+}
 
-    for metadata in &write_set.created_contracts {
-        world
-            .contracts
-            .insert(metadata.address.clone(), metadata.clone());
-        world.storage.entry(metadata.address.clone()).or_default();
-    }
+pub(crate) fn apply_write_sets_with_diagnostics(
+    world: &SharedWorld,
+    write_sets: &[StateWriteSet],
+) -> CanonicalCommitDiagnostics {
+    let wait_started = Instant::now();
+    let mut world = world.write();
+    let lock_wait = wait_started.elapsed();
+    let hold_started = Instant::now();
+    let mut diagnostics = CanonicalCommitDiagnostics {
+        lock_wait,
+        batches: if write_sets.is_empty() { 0 } else { 1 },
+        write_sets: u64::try_from(write_sets.len()).unwrap_or(u64::MAX),
+        storage_writes: write_sets.iter().fold(0_u64, |total, write_set| {
+            total.saturating_add(u64::try_from(write_set.storage.len()).unwrap_or(u64::MAX))
+        }),
+        balance_writes: write_sets.iter().fold(0_u64, |total, write_set| {
+            total.saturating_add(u64::try_from(write_set.balances.len()).unwrap_or(u64::MAX))
+        }),
+        created_contracts: write_sets.iter().fold(0_u64, |total, write_set| {
+            total.saturating_add(u64::try_from(write_set.created_contracts.len()).unwrap_or(u64::MAX))
+        }),
+        ..CanonicalCommitDiagnostics::default()
+    };
+    apply_write_sets_locked(&mut world, write_sets);
+    diagnostics.lock_hold = hold_started.elapsed();
+    drop(world);
+    diagnostics
+}
 
-    for write in &write_set.storage {
-        let storage = world.storage.entry(write.contract.clone()).or_default();
-        match &write.value {
-            Some(value) => {
-                storage.insert(write.key.clone(), value.clone());
-            }
-            None => {
-                storage.remove(&write.key);
+fn apply_write_sets_locked(world: &mut WorldState, write_sets: &[StateWriteSet]) {
+    for write_set in write_sets {
+        for metadata in &write_set.created_contracts {
+            world
+                .contracts
+                .insert(metadata.address.clone(), metadata.clone());
+            world.storage.entry(metadata.address.clone()).or_default();
+        }
+
+        for write in &write_set.storage {
+            let storage = world.storage.entry(write.contract.clone()).or_default();
+            match &write.value {
+                Some(value) => {
+                    storage.insert(write.key.clone(), value.clone());
+                }
+                None => {
+                    storage.remove(&write.key);
+                }
             }
         }
-    }
 
-    for write in &write_set.balances {
-        let key = (write.address.clone(), write.denom.clone());
-        if write.amount == 0 {
-            world.balances.remove(&key);
-        } else {
-            world.balances.insert(key, Uint128::new(write.amount));
+        for write in &write_set.balances {
+            let key = (write.address.clone(), write.denom.clone());
+            if write.amount == 0 {
+                world.balances.remove(&key);
+            } else {
+                world.balances.insert(key, Uint128::new(write.amount));
+            }
         }
     }
 }

@@ -193,6 +193,7 @@ dependencies = [
  "acg-cosmwasm-engine",
  "cosmwasm-std",
  "parking_lot",
+ "rayon",
  "serde_json",
  "thiserror",
 ]

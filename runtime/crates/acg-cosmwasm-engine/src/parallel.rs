@@ -56,6 +56,33 @@ impl SpeculativeWave {
     }
 }
 
+/// Canonical-state commit timings for deferred exact-DAG replay.
+///
+/// `lock_wait` measures time spent waiting to acquire the single canonical writer lock, while
+/// `lock_hold` measures only the ordered write-set application performed while that lock is held.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CanonicalCommitDiagnostics {
+    pub lock_wait: Duration,
+    pub lock_hold: Duration,
+    pub batches: u64,
+    pub write_sets: u64,
+    pub storage_writes: u64,
+    pub balance_writes: u64,
+    pub created_contracts: u64,
+}
+
+impl CanonicalCommitDiagnostics {
+    pub fn merge(&mut self, other: &Self) {
+        self.lock_wait += other.lock_wait;
+        self.lock_hold += other.lock_hold;
+        self.batches += other.batches;
+        self.write_sets += other.write_sets;
+        self.storage_writes += other.storage_writes;
+        self.balance_writes += other.balance_writes;
+        self.created_contracts += other.created_contracts;
+    }
+}
+
 /// Nested execution/runtime diagnostics captured by the block-local dependency executor.
 ///
 /// These are aggregate worker times. Several fields are intentionally nested: for example host
@@ -75,6 +102,8 @@ pub struct ContractExecutionDiagnostics {
     pub aggregate_host_storage: Duration,
     pub aggregate_host_query: Duration,
     pub aggregate_transaction_lock_wait: Duration,
+    pub aggregate_canonical_state_read_lock_wait: Duration,
+    pub aggregate_canonical_state_read_hold: Duration,
     pub aggregate_mvcc_storage_point: Duration,
     pub aggregate_mvcc_storage_range: Duration,
     pub aggregate_mvcc_balance_point: Duration,
@@ -93,6 +122,7 @@ pub struct ContractExecutionDiagnostics {
     pub host_storage_sets: u64,
     pub host_storage_removes: u64,
     pub host_queries: u64,
+    pub canonical_state_reads: u64,
     pub mvcc_storage_point_reads: u64,
     pub mvcc_storage_point_hits: u64,
     pub mvcc_storage_base_fallbacks: u64,
@@ -125,6 +155,8 @@ impl ContractExecutionDiagnostics {
         self.aggregate_host_storage += other.aggregate_host_storage;
         self.aggregate_host_query += other.aggregate_host_query;
         self.aggregate_transaction_lock_wait += other.aggregate_transaction_lock_wait;
+        self.aggregate_canonical_state_read_lock_wait += other.aggregate_canonical_state_read_lock_wait;
+        self.aggregate_canonical_state_read_hold += other.aggregate_canonical_state_read_hold;
         self.aggregate_mvcc_storage_point += other.aggregate_mvcc_storage_point;
         self.aggregate_mvcc_storage_range += other.aggregate_mvcc_storage_range;
         self.aggregate_mvcc_balance_point += other.aggregate_mvcc_balance_point;
@@ -143,6 +175,7 @@ impl ContractExecutionDiagnostics {
         self.host_storage_sets += other.host_storage_sets;
         self.host_storage_removes += other.host_storage_removes;
         self.host_queries += other.host_queries;
+        self.canonical_state_reads += other.canonical_state_reads;
         self.mvcc_storage_point_reads += other.mvcc_storage_point_reads;
         self.mvcc_storage_point_hits += other.mvcc_storage_point_hits;
         self.mvcc_storage_base_fallbacks += other.mvcc_storage_base_fallbacks;
@@ -178,6 +211,8 @@ pub(crate) struct ExecutionHotPathDiagnostics {
     host_storage_ns: AtomicU64,
     host_query_ns: AtomicU64,
     transaction_lock_wait_ns: AtomicU64,
+    canonical_state_read_lock_wait_ns: AtomicU64,
+    canonical_state_read_hold_ns: AtomicU64,
     mvcc_storage_point_ns: AtomicU64,
     mvcc_storage_range_ns: AtomicU64,
     mvcc_balance_point_ns: AtomicU64,
@@ -196,6 +231,7 @@ pub(crate) struct ExecutionHotPathDiagnostics {
     host_storage_sets: AtomicU64,
     host_storage_removes: AtomicU64,
     host_queries: AtomicU64,
+    canonical_state_reads: AtomicU64,
     mvcc_storage_point_reads: AtomicU64,
     mvcc_storage_point_hits: AtomicU64,
     mvcc_storage_base_fallbacks: AtomicU64,
@@ -319,6 +355,12 @@ impl ExecutionHotPathDiagnostics {
         self.host_queries.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn record_canonical_state_read(&self, lock_wait: Duration, hold: Duration) {
+        Self::add_duration(&self.canonical_state_read_lock_wait_ns, lock_wait);
+        Self::add_duration(&self.canonical_state_read_hold_ns, hold);
+        self.canonical_state_reads.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn record_mvcc_storage_point(
         &self,
         duration: Duration,
@@ -382,6 +424,8 @@ impl ExecutionHotPathDiagnostics {
             aggregate_host_storage: duration(&self.host_storage_ns),
             aggregate_host_query: duration(&self.host_query_ns),
             aggregate_transaction_lock_wait: duration(&self.transaction_lock_wait_ns),
+            aggregate_canonical_state_read_lock_wait: duration(&self.canonical_state_read_lock_wait_ns),
+            aggregate_canonical_state_read_hold: duration(&self.canonical_state_read_hold_ns),
             aggregate_mvcc_storage_point: duration(&self.mvcc_storage_point_ns),
             aggregate_mvcc_storage_range: duration(&self.mvcc_storage_range_ns),
             aggregate_mvcc_balance_point: duration(&self.mvcc_balance_point_ns),
@@ -400,6 +444,7 @@ impl ExecutionHotPathDiagnostics {
             host_storage_sets: count(&self.host_storage_sets),
             host_storage_removes: count(&self.host_storage_removes),
             host_queries: count(&self.host_queries),
+            canonical_state_reads: count(&self.canonical_state_reads),
             mvcc_storage_point_reads: count(&self.mvcc_storage_point_reads),
             mvcc_storage_point_hits: count(&self.mvcc_storage_point_hits),
             mvcc_storage_base_fallbacks: count(&self.mvcc_storage_base_fallbacks),

@@ -21,7 +21,8 @@ use crate::error::{EngineError, EngineResult};
 use crate::mvcc::{BlockMvccState, MvccReadView, VisibilityMask};
 use crate::native::{NativeCallContext, NativeContract};
 use crate::parallel::{
-    ContractExecutionDiagnostics, DependencyPreexecutionDiagnostics, ExecutionHotPathDiagnostics,
+    CanonicalCommitDiagnostics, ContractExecutionDiagnostics, DependencyPreexecutionDiagnostics,
+    ExecutionHotPathDiagnostics,
     ParallelExecutionConfig, ParallelSpeculativeExecutionMetrics, PostConsensusTimings,
     PredictionMatchMetrics, PreparedSpeculativeBlock, ReconciliationDependencyEvidence,
     SpeculativeDependency, SpeculativeDependencyClass, SpeculativeWave,
@@ -43,7 +44,9 @@ use crate::types::{
     ExecutionRequest, QueryOutcome, TransactionId,
 };
 use crate::validation::{
-    apply_write_set, validate_dependencies, write_set_touches_conflict, ValidationOutcome,
+    apply_write_set, apply_write_sets, apply_write_sets_with_diagnostics, validate_dependencies,
+    write_set_touches_conflict,
+    ValidationOutcome,
 };
 
 const EXECUTE_RESPONSE_TYPE_URL: &str = "/cosmwasm.wasm.v1.MsgExecuteContractResponse";
@@ -108,11 +111,27 @@ pub(crate) struct EngineCore {
     codes: RwLock<BTreeMap<CodeId, CodeRecord>>,
     wasm_cache: WasmModuleCache,
     next_code_id: AtomicU64,
+    dependency_worker_pools: Mutex<BTreeMap<usize, Arc<rayon::ThreadPool>>>,
 }
 
 #[derive(Clone)]
 pub struct CosmWasmEngine {
     core: Arc<EngineCore>,
+}
+
+/// Execute a fixed amount of deterministic CPU-only work for workload calibration.
+///
+/// The loop is intentionally state-free and allocation-free. It is public so benchmark binaries
+/// can calibrate iteration throughput using the exact same primitive inserted into transactions.
+pub fn deterministic_compute(iterations: u64, seed: u64) -> u64 {
+    let mut value = seed ^ 0xD1B5_4A32_D192_ED03;
+    for index in 0..iterations {
+        value = value.wrapping_add(index ^ 0x9E37_79B9_7F4A_7C15);
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        value ^= value >> 31;
+    }
+    value
 }
 
 impl CosmWasmEngine {
@@ -128,6 +147,7 @@ impl CosmWasmEngine {
                 codes: RwLock::new(BTreeMap::new()),
                 wasm_cache,
                 next_code_id: AtomicU64::new(1),
+                dependency_worker_pools: Mutex::new(BTreeMap::new()),
             }),
         })
     }
@@ -684,7 +704,10 @@ impl CosmWasmEngine {
         let wasm_cache_before = self.wasm_cache_metrics();
 
         let worker_phase_started = Instant::now();
-        let worker_result: EngineResult<()> = std::thread::scope(|scope| {
+        let worker_pool = self.core.dependency_worker_pool(worker_count)?;
+        // Spawn into the persistent pool without moving the caller into it; this preserves the
+        // configured worker count and keeps VM thread-local reuse bound to the long-lived workers.
+        let worker_result: EngineResult<()> = worker_pool.in_place_scope(|scope| {
             for worker_index in 0..worker_count {
                 let shared = shared.clone();
                 let versions = versions.clone();
@@ -693,7 +716,7 @@ impl CosmWasmEngine {
                 let base_state = base.state.clone();
                 let worker_phase_origin = worker_phase_started;
                 let cutoff_origin = executor_started;
-                scope.spawn(move || {
+                scope.spawn(move |_| {
                     let mut diagnostics = DependencyWorkerDiagnostics::default();
                     'worker: loop {
                         let ready_started = Instant::now();
@@ -1154,6 +1177,68 @@ impl CosmWasmEngine {
             .0
     }
 
+    /// Execute a canonical transaction against the current world without committing its writes.
+    ///
+    /// The returned write set can be committed later with [`Self::apply_canonical_write_sets`].
+    /// This is intended for exact dependency-DAG replay where worker threads are known not to
+    /// conflict and a coordinator can batch canonical commits without a global writer-lock stampede.
+    pub fn execute_request_deferred(
+        &self,
+        block: BlockContext,
+        request: ExecutionRequest,
+    ) -> (EngineResult<ExecutionOutcome>, StateWriteSet) {
+        let (result, tx) =
+            self.execute_request_on_state(self.core.state.clone(), block, request, false);
+        let write_set = if result.is_ok() {
+            tx.lock().write_set()
+        } else {
+            StateWriteSet::default()
+        };
+        (result, write_set)
+    }
+
+    /// Deferred canonical execution with the same per-transaction hot-path diagnostics used by
+    /// the MVCC executor. This is intended for the runtime-concurrency profiler only.
+    pub fn execute_request_deferred_with_diagnostics(
+        &self,
+        block: BlockContext,
+        request: ExecutionRequest,
+    ) -> (EngineResult<ExecutionOutcome>, StateWriteSet, ContractExecutionDiagnostics) {
+        let diagnostics = Arc::new(ExecutionHotPathDiagnostics::default());
+        let transaction_id = request.transaction_id();
+        let tx = Arc::new(parking_lot::Mutex::new(
+            TransactionState::new_with_diagnostics(
+                self.core.state.clone(),
+                transaction_id,
+                diagnostics.clone(),
+            ),
+        ));
+        let started = Instant::now();
+        let result = self
+            .execute_request_in_transaction(tx.clone(), block, request, false)
+            .0;
+        diagnostics.record_request_execution(started.elapsed());
+        let write_set = if result.is_ok() {
+            tx.lock().write_set()
+        } else {
+            StateWriteSet::default()
+        };
+        (result, write_set, diagnostics.snapshot())
+    }
+
+    /// Apply canonically ordered deferred write sets under one world-state writer lock.
+    pub fn apply_canonical_write_sets(&self, write_sets: &[StateWriteSet]) {
+        apply_write_sets(&self.core.state, write_sets);
+    }
+
+    /// Apply deferred canonical write sets and return writer-lock wait/hold diagnostics.
+    pub fn apply_canonical_write_sets_with_diagnostics(
+        &self,
+        write_sets: &[StateWriteSet],
+    ) -> CanonicalCommitDiagnostics {
+        apply_write_sets_with_diagnostics(&self.core.state, write_sets)
+    }
+
     /// Canonical serial execution with the same contract hot-path diagnostics used by the
     /// speculative executor. This is validator-local instrumentation for research admission and
     /// VM-lifecycle measurements; the execution semantics are identical to [`Self::execute_request`].
@@ -1447,6 +1532,13 @@ impl CosmWasmEngine {
             BundleCall::BankSend { from, to, coins } => validate_public_address(from)
                 .and_then(|_| validate_public_address(to))
                 .and_then(|_| tx.lock().transfer(from, to, coins, from, 0)),
+            BundleCall::DeterministicCompute { iterations } => {
+                std::hint::black_box(deterministic_compute(
+                    *iterations,
+                    transaction_id.0 ^ (call_index as u64).rotate_left(17),
+                ));
+                Ok(())
+            }
             BundleCall::Noop => Ok(()),
         }
     }
@@ -2123,6 +2215,26 @@ impl EngineCore {
             .get(&code_id)
             .cloned()
             .ok_or(EngineError::UnknownCode(code_id))
+    }
+
+    fn dependency_worker_pool(&self, workers: usize) -> EngineResult<Arc<rayon::ThreadPool>> {
+        debug_assert!(workers > 0);
+        if let Some(pool) = self.dependency_worker_pools.lock().get(&workers).cloned() {
+            return Ok(pool);
+        }
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .thread_name(move |index| format!("acg-dependency-{workers}-{index}"))
+                .build()
+                .map_err(|error| {
+                    EngineError::InvalidConfiguration(format!(
+                        "failed to build persistent dependency worker pool ({workers} workers): {error}"
+                    ))
+                })?,
+        );
+        let mut pools = self.dependency_worker_pools.lock();
+        Ok(pools.entry(workers).or_insert_with(|| pool.clone()).clone())
     }
 }
 

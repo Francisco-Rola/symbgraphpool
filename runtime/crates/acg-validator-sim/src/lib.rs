@@ -17,8 +17,9 @@ pub use crate::block::{
     FifoSelectionPolicy, ProducedBlock, ReverseFifoSelectionPolicy, SeededShuffleSelectionPolicy,
 };
 pub use crate::executor::{
-    BlockExecutionError, BlockExecutionReport, BlockExecutor, ReconciliationTransactionDiagnostic,
-    SerialBlockExecutor, SpeculativeParallelBlockExecutor, SplitPhaseSpeculativeExecutionReport,
+    BlockExecutionError, BlockExecutionReport, BlockExecutor, DirectDagBlockExecutor,
+    DirectDagExecutionDiagnostics, ReconciliationTransactionDiagnostic, SerialBlockExecutor,
+    SpeculativeParallelBlockExecutor, SplitPhaseSpeculativeExecutionReport,
     TransactionExecution, TransactionExecutionTiming,
 };
 pub use crate::ingress::{

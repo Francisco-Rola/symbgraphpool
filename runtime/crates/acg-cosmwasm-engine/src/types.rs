@@ -227,6 +227,11 @@ pub enum BundleCall {
         to: Address,
         coins: Vec<Coin>,
     },
+    /// Deterministic CPU-only benchmark work. This never reads or writes chain state and exists
+    /// only to restore source-workload computational intensity in controlled experiments.
+    DeterministicCompute {
+        iterations: u64,
+    },
     Noop,
 }
 

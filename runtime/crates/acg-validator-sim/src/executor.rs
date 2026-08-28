@@ -1,11 +1,16 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Condvar, Mutex},
+    time::{Duration, Instant},
+};
 
 use acg_cosmwasm_engine::{
-    CanonicalTransaction, CanonicalTxDisposition, ContractExecutionDiagnostics, CosmWasmEngine,
+    CanonicalCommitDiagnostics, CanonicalTransaction, CanonicalTxDisposition,
+    ContractExecutionDiagnostics, CosmWasmEngine,
     EngineError, ExecutionOutcome, ParallelExecutionConfig, PostConsensusTimings,
     PredictionMatchMetrics, PreparedSpeculativeBlock, ReconciliationDependencyEvidence,
     SpeculativeDependency, SpeculativeDependencyClass, SpeculativeExecutionMetrics,
-    SpeculativeWave, SplitPhaseSpeculativeBlockOutcome, StateSnapshot, TransactionId,
+    SpeculativeWave, SplitPhaseSpeculativeBlockOutcome, StateSnapshot, StateWriteSet, TransactionId,
     ValidationOutcome,
 };
 use thiserror::Error;
@@ -208,6 +213,319 @@ pub struct SplitPhaseSpeculativeExecutionReport {
     pub timings: PostConsensusTimings,
     pub reconciliation: Vec<ReconciliationTransactionDiagnostic>,
     pub dependency_evidence: Vec<ReconciliationDependencyEvidence>,
+}
+
+
+/// Aggregate runtime diagnostics for exact dependency-DAG direct replay.
+///
+/// Worker-time fields may exceed wall time because workers overlap. The nested contract timings are
+/// not additive: host storage/query time and canonical read-lock time occur inside request/Wasm time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirectDagExecutionDiagnostics {
+    pub worker_phase_wall: Duration,
+    pub aggregate_ready_wait: Duration,
+    pub aggregate_transaction_service: Duration,
+    pub max_in_flight: usize,
+    pub commit: CanonicalCommitDiagnostics,
+    pub contract: ContractExecutionDiagnostics,
+}
+
+/// Diagnostic canonical executor for an already-validated dependency plan.
+///
+/// Unlike [`SpeculativeParallelBlockExecutor`], this executor does not materialize speculative
+/// receipts or run receipt validation/reconciliation. Worker threads execute ready transactions
+/// against canonical predecessor state in deferred-commit mode. They never take the canonical
+/// world writer lock. A coordinator drains completed dependency-independent transactions, applies
+/// their write sets in canonical order under one short batched writer lock, and only then releases
+/// successors. The Rayon pool is created once with the executor and reused across every block.
+///
+/// Correctness therefore depends on the supplied plan being complete for the concrete accesses of
+/// the block. It is intended for exact-access/replay diagnostics, not as a replacement for the
+/// validator's speculative correctness boundary.
+#[derive(Clone)]
+pub struct DirectDagBlockExecutor {
+    engine: CosmWasmEngine,
+    workers: usize,
+    pool: Arc<rayon::ThreadPool>,
+}
+
+impl DirectDagBlockExecutor {
+    pub fn new(engine: CosmWasmEngine, workers: usize) -> Result<Self, BlockExecutionError> {
+        if workers == 0 {
+            return Err(BlockExecutionError::InvalidWorkerCount);
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(move |index| format!("acg-direct-dag-{workers}-{index}"))
+            .build()
+            .map_err(|error| BlockExecutionError::WorkerPool(error.to_string()))?;
+        Ok(Self {
+            engine,
+            workers,
+            pool: Arc::new(pool),
+        })
+    }
+
+    pub fn engine(&self) -> &CosmWasmEngine {
+        &self.engine
+    }
+
+    pub fn workers(&self) -> usize {
+        self.workers
+    }
+
+    pub fn execute(
+        &self,
+        block: &ProducedBlock,
+        plan: &ExecutionPlan,
+    ) -> Result<BlockExecutionReport, BlockExecutionError> {
+        self.execute_internal(block, plan, false).map(|(report, _)| report)
+    }
+
+    pub fn execute_with_diagnostics(
+        &self,
+        block: &ProducedBlock,
+        plan: &ExecutionPlan,
+    ) -> Result<(BlockExecutionReport, DirectDagExecutionDiagnostics), BlockExecutionError> {
+        self.execute_internal(block, plan, true)
+    }
+
+    fn execute_internal(
+        &self,
+        block: &ProducedBlock,
+        plan: &ExecutionPlan,
+        collect_diagnostics: bool,
+    ) -> Result<(BlockExecutionReport, DirectDagExecutionDiagnostics), BlockExecutionError> {
+        plan.validate()?;
+        if plan.transaction_count != block.transactions.len() {
+            return Err(BlockExecutionError::TransactionCountMismatch {
+                plan: plan.transaction_count,
+                block: block.transactions.len(),
+            });
+        }
+        for transaction_index in 0..block.transactions.len() {
+            let _ = u32::try_from(transaction_index)
+                .map_err(|_| BlockExecutionError::TransactionIndexOverflow(transaction_index))?;
+        }
+        if block.transactions.is_empty() {
+            return Ok((
+                BlockExecutionReport {
+                    block_height: block.context.height,
+                    block_time_nanos: block.context.time_nanos,
+                    transactions: Vec::new(),
+                },
+                DirectDagExecutionDiagnostics::default(),
+            ));
+        }
+
+        let mut successors = vec![Vec::new(); block.transactions.len()];
+        let mut indegree = vec![0usize; block.transactions.len()];
+        for dependency in &plan.dependencies {
+            successors[dependency.predecessor_index].push(dependency.successor_index);
+            indegree[dependency.successor_index] += 1;
+        }
+        let ready = indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &degree)| (degree == 0).then_some(index))
+            .collect::<VecDeque<_>>();
+
+        struct FinishedTransaction {
+            execution: TransactionExecution,
+            write_set: StateWriteSet,
+            contract: ContractExecutionDiagnostics,
+        }
+
+        struct ReadyState {
+            ready: VecDeque<usize>,
+            indegree: Vec<usize>,
+            in_flight: usize,
+            max_in_flight: usize,
+            aggregate_ready_wait: Duration,
+            committed: usize,
+            stop: bool,
+            finished: VecDeque<FinishedTransaction>,
+            results: Vec<TransactionExecution>,
+        }
+
+        let shared = Arc::new((
+            Mutex::new(ReadyState {
+                ready,
+                indegree,
+                in_flight: 0,
+                max_in_flight: 0,
+                aggregate_ready_wait: Duration::ZERO,
+                committed: 0,
+                stop: false,
+                finished: VecDeque::new(),
+                results: Vec::with_capacity(block.transactions.len()),
+            }),
+            Condvar::new(),
+        ));
+        let phase_started = Instant::now();
+        let worker_count = self.workers.min(block.transactions.len());
+        let mut scheduler_deadlock = false;
+        let mut diagnostics = DirectDagExecutionDiagnostics::default();
+
+        // Keep the coordinator on the caller thread. `ThreadPool::scope` runs the scope body
+        // inside the pool and would consume one worker for the coordinator (and deadlock at 1 worker).
+        self.pool.in_place_scope(|scope| {
+            for _ in 0..worker_count {
+                let shared = Arc::clone(&shared);
+                let engine = self.engine.clone();
+                scope.spawn(move |_| loop {
+                    let transaction_index = {
+                        let (lock, ready_changed) = &*shared;
+                        let mut state = lock.lock().expect("direct DAG ready mutex poisoned");
+                        loop {
+                            if state.stop || state.committed == block.transactions.len() {
+                                break None;
+                            }
+                            if let Some(index) = state.ready.pop_front() {
+                                state.in_flight += 1;
+                                state.max_in_flight = state.max_in_flight.max(state.in_flight);
+                                break Some(index);
+                            }
+                            let wait_started = Instant::now();
+                            state = ready_changed
+                                .wait(state)
+                                .expect("direct DAG ready mutex poisoned");
+                            state.aggregate_ready_wait += wait_started.elapsed();
+                        }
+                    };
+                    let Some(transaction_index) = transaction_index else {
+                        break;
+                    };
+                    let pending = &block.transactions[transaction_index];
+                    let mut context = block.context.clone();
+                    context.transaction_index = Some(transaction_index as u32);
+                    let started_after_phase = phase_started.elapsed();
+                    let execution_started = Instant::now();
+                    let (result, write_set, contract) = if collect_diagnostics {
+                        engine.execute_request_deferred_with_diagnostics(
+                            context,
+                            pending.request.clone(),
+                        )
+                    } else {
+                        let (result, write_set) =
+                            engine.execute_request_deferred(context, pending.request.clone());
+                        (result, write_set, ContractExecutionDiagnostics::default())
+                    };
+                    let service_duration = execution_started.elapsed();
+                    let completed_after_phase = phase_started.elapsed();
+                    let execution = TransactionExecution {
+                        transaction_index,
+                        transaction_id: pending.transaction_id(),
+                        result,
+                        timing: TransactionExecutionTiming {
+                            started_after_phase,
+                            completed_after_phase,
+                            service_duration,
+                        },
+                    };
+
+                    let (lock, ready_changed) = &*shared;
+                    let mut state = lock.lock().expect("direct DAG ready mutex poisoned");
+                    state.in_flight = state.in_flight.saturating_sub(1);
+                    state.finished.push_back(FinishedTransaction {
+                        execution,
+                        write_set,
+                        contract,
+                    });
+                    ready_changed.notify_all();
+                });
+            }
+
+            // The caller thread acts as the only canonical-state writer. Workers remain entirely
+            // on read/compute paths and can continue processing other already-ready transactions
+            // while completed transactions accumulate into the next short commit batch.
+            loop {
+                let mut batch = {
+                    let (lock, ready_changed) = &*shared;
+                    let mut state = lock.lock().expect("direct DAG ready mutex poisoned");
+                    loop {
+                        if state.committed == block.transactions.len() {
+                            break Vec::new();
+                        }
+                        if !state.finished.is_empty() {
+                            break state.finished.drain(..).collect::<Vec<_>>();
+                        }
+                        if state.ready.is_empty() && state.in_flight == 0 {
+                            state.stop = true;
+                            scheduler_deadlock = true;
+                            ready_changed.notify_all();
+                            break Vec::new();
+                        }
+                        state = ready_changed
+                            .wait(state)
+                            .expect("direct DAG ready mutex poisoned");
+                    }
+                };
+
+                if scheduler_deadlock || batch.is_empty() {
+                    break;
+                }
+                batch.sort_by_key(|finished| finished.execution.transaction_index);
+                let mut write_sets = Vec::with_capacity(batch.len());
+                let mut committed_executions = Vec::with_capacity(batch.len());
+                for finished in batch {
+                    if collect_diagnostics {
+                        diagnostics.aggregate_transaction_service +=
+                            finished.execution.timing.service_duration;
+                        diagnostics.contract.merge(&finished.contract);
+                    }
+                    write_sets.push(finished.write_set);
+                    committed_executions.push(finished.execution);
+                }
+                if collect_diagnostics {
+                    let commit = self
+                        .engine
+                        .apply_canonical_write_sets_with_diagnostics(&write_sets);
+                    diagnostics.commit.merge(&commit);
+                } else {
+                    self.engine.apply_canonical_write_sets(&write_sets);
+                }
+
+                let (lock, ready_changed) = &*shared;
+                let mut state = lock.lock().expect("direct DAG ready mutex poisoned");
+                for execution in committed_executions {
+                    let transaction_index = execution.transaction_index;
+                    state.results.push(execution);
+                    state.committed += 1;
+                    for &successor in &successors[transaction_index] {
+                        debug_assert!(state.indegree[successor] > 0);
+                        state.indegree[successor] -= 1;
+                        if state.indegree[successor] == 0 {
+                            state.ready.push_back(successor);
+                        }
+                    }
+                }
+                ready_changed.notify_all();
+            }
+        });
+
+        if scheduler_deadlock {
+            return Err(BlockExecutionError::DirectDagDeadlock);
+        }
+
+        diagnostics.worker_phase_wall = phase_started.elapsed();
+        let (lock, _) = &*shared;
+        let mut state = lock.lock().expect("direct DAG ready mutex poisoned");
+        if collect_diagnostics {
+            diagnostics.aggregate_ready_wait = state.aggregate_ready_wait;
+            diagnostics.max_in_flight = state.max_in_flight;
+        }
+        let mut executions = std::mem::take(&mut state.results);
+        executions.sort_by_key(|execution| execution.transaction_index);
+        Ok((
+            BlockExecutionReport {
+                block_height: block.context.height,
+                block_time_nanos: block.context.time_nanos,
+                transactions: executions,
+            },
+            diagnostics,
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -507,6 +825,12 @@ pub enum BlockExecutionError {
     ParallelWaveUnsupported { wave_index: usize, width: usize },
     #[error("transaction index {0} cannot be represented as a CosmWasm u32 index")]
     TransactionIndexOverflow(usize),
+    #[error("direct DAG executor worker count must be greater than zero")]
+    InvalidWorkerCount,
+    #[error("failed to create direct DAG persistent worker pool: {0}")]
+    WorkerPool(String),
+    #[error("direct DAG replay reached a scheduler deadlock")]
+    DirectDagDeadlock,
 }
 
 impl BlockExecutor for SerialBlockExecutor {

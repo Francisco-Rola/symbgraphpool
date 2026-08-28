@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use cosmwasm_std::{Coin, Uint128};
 use parking_lot::{Mutex, RwLock};
@@ -76,22 +77,32 @@ impl TransactionState {
         self.diagnostics.clone()
     }
 
+    fn with_canonical_read<T>(&self, read: impl FnOnce(&WorldState) -> T) -> T {
+        let wait_started = Instant::now();
+        let world = self.base.read();
+        let lock_wait = wait_started.elapsed();
+        let hold_started = Instant::now();
+        let value = read(&world);
+        let hold = hold_started.elapsed();
+        drop(world);
+        if let Some(diagnostics) = &self.diagnostics {
+            diagnostics.record_canonical_state_read(lock_wait, hold);
+        }
+        value
+    }
+
     fn base_contract(&self, address: &Address) -> Option<ContractMetadata> {
         self.mvcc_view.as_ref().map_or_else(
-            || self.base.read().contracts.get(address).cloned(),
+            || self.with_canonical_read(|world| world.contracts.get(address).cloned()),
             |view| view.contract(address),
         )
     }
 
     fn base_storage_get(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>> {
         self.mvcc_view.as_ref().map_or_else(
-            || {
-                self.base
-                    .read()
-                    .storage
-                    .get(contract)
-                    .and_then(|entries| entries.get(key).cloned())
-            },
+            || self.with_canonical_read(|world| {
+                world.storage.get(contract).and_then(|entries| entries.get(key).cloned())
+            }),
             |view| view.storage_get(contract, key),
         )
     }
@@ -103,9 +114,8 @@ impl TransactionState {
         end: Option<&[u8]>,
     ) -> BTreeMap<Vec<u8>, Vec<u8>> {
         self.mvcc_view.as_ref().map_or_else(
-            || {
-                self.base
-                    .read()
+            || self.with_canonical_read(|world| {
+                world
                     .storage
                     .get(contract)
                     .map(|entries| {
@@ -119,36 +129,34 @@ impl TransactionState {
                             .collect()
                     })
                     .unwrap_or_default()
-            },
+            }),
             |view| view.storage_range(contract, start, end),
         )
     }
 
     fn base_balance(&self, address: &Address, denom: &str) -> Uint128 {
         self.mvcc_view.as_ref().map_or_else(
-            || {
-                self.base
-                    .read()
+            || self.with_canonical_read(|world| {
+                world
                     .balances
                     .get(&(address.clone(), denom.to_owned()))
                     .copied()
                     .unwrap_or_default()
-            },
+            }),
             |view| view.balance(address, denom),
         )
     }
 
     fn base_balances(&self, address: &Address) -> BTreeMap<String, Uint128> {
         self.mvcc_view.as_ref().map_or_else(
-            || {
-                self.base
-                    .read()
+            || self.with_canonical_read(|world| {
+                world
                     .balances
                     .iter()
                     .filter(|((owner, _), _)| owner == address)
                     .map(|((_, denom), amount)| (denom.clone(), *amount))
                     .collect()
-            },
+            }),
             |view| view.balances(address),
         )
     }

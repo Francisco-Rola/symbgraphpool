@@ -8,13 +8,17 @@ use std::{
 
 use acg_core::ConflictKinds;
 use acg_cosmwasm_engine::{
-    AccessKind, Address, BlockContext, BundleCall, CosmWasmEngine, EngineConfig, ParallelExecutionConfig,
-    ScopedBundleCall, SpeculativeTxResult, TransactionId, WasmInstanceLifecycle,
+    AccessKind, Address, BlockContext, BundleCall, ContractExecutionDiagnostics, CosmWasmEngine,
+    DependencyPreexecutionDiagnostics, EngineConfig, ParallelExecutionConfig, ScopedBundleCall,
+    SpeculativeTxResult, TransactionId, WasmInstanceLifecycle,
 };
 use acg_runtime_feedback::{AccessConflictDetector, ObservedConflict, TraceConflictConfig};
+use acg_vegeta_native_s3_executor::{ComputeCalibration, ComputeMetric};
 use acg_validator_sim::{
-    ExecutionDependency, ExecutionDependencyClass, ExecutionPlan, ExecutionWave, PendingTransaction,
-    ProducedBlock, SerialBlockExecutor, SpeculativeParallelBlockExecutor,
+    DirectDagBlockExecutor, DirectDagExecutionDiagnostics, ExecutionDependency,
+    ExecutionDependencyClass, ExecutionPlan,
+    ExecutionWave, PendingTransaction, ProducedBlock, SerialBlockExecutor,
+    SpeculativeParallelBlockExecutor,
 };
 use cosmwasm_std::{Binary, Coin, Uint128};
 use serde::{Deserialize, Serialize};
@@ -23,7 +27,7 @@ use serde_json::Value;
 const FIRST_BLOCK: u64 = 16_774_645;
 const LAST_BLOCK: u64 = 16_774_745;
 const EXPECTED_TRANSACTIONS: usize = 13_783;
-const STRATEGIES: [&str; 7] = [
+const DEFAULT_STRATEGIES: [&str; 7] = [
     "serial",
     "aria-fb",
     "vegeta",
@@ -115,6 +119,13 @@ struct Args {
     probability_threshold: f64,
     cost_bypass_speedup: f64,
     order_seed: u64,
+    strategies: Vec<String>,
+    compute_weights: Option<PathBuf>,
+    compute_metric: ComputeMetric,
+    compute_scale: f64,
+    compute_base_total_nanos: u64,
+    compute_iterations_per_nano: Option<f64>,
+    runtime_profile: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -190,6 +201,12 @@ struct Record {
     block_number: u64,
     strategy: String,
     workers: usize,
+    wasm_instance_lifecycle: &'static str,
+    compute_calibration_metric: &'static str,
+    compute_scale: f64,
+    compute_base_total_nanos: u64,
+    compute_iterations_per_nano: f64,
+    compute_block_iterations: u64,
     transactions: usize,
     semantic_calls: usize,
     skipped_actions: usize,
@@ -225,7 +242,95 @@ struct Record {
     probability_threshold: f64,
     cost_bypass_speedup: f64,
     strategy_order_seed: u64,
+    runtime_profile: Option<RuntimeProfileRecord>,
     evaluation_config_id: &'static str,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct RuntimeProfileRecord {
+    profile_kind: String,
+    worker_phase_wall_nanos: u64,
+    aggregate_ready_wait_nanos: u64,
+    aggregate_transaction_service_nanos: u64,
+    aggregate_visibility_capture_nanos: u64,
+    aggregate_publish_and_unblock_nanos: u64,
+    aggregate_request_execution_nanos: u64,
+    aggregate_receipt_finalization_nanos: u64,
+    aggregate_backend_construction_nanos: u64,
+    aggregate_wasm_instance_acquire_nanos: u64,
+    aggregate_wasm_entrypoint_nanos: u64,
+    aggregate_host_storage_nanos: u64,
+    aggregate_host_query_nanos: u64,
+    aggregate_transaction_lock_wait_nanos: u64,
+    aggregate_canonical_state_read_lock_wait_nanos: u64,
+    aggregate_canonical_state_read_hold_nanos: u64,
+    aggregate_mvcc_lock_wait_nanos: u64,
+    aggregate_mvcc_publish_nanos: u64,
+    aggregate_commit_lock_wait_nanos: u64,
+    aggregate_commit_lock_hold_nanos: u64,
+    commit_batches: u64,
+    commit_write_sets: u64,
+    max_in_flight: usize,
+    wasm_instance_acquires: u64,
+    wasm_instance_reuse_hits: u64,
+    wasm_instance_pool_misses: u64,
+    canonical_state_reads: u64,
+}
+
+fn runtime_profile_from_contract(
+    kind: &str,
+    contract: &ContractExecutionDiagnostics,
+) -> RuntimeProfileRecord {
+    RuntimeProfileRecord {
+        profile_kind: kind.to_owned(),
+        aggregate_request_execution_nanos: nanos(contract.aggregate_request_execution),
+        aggregate_receipt_finalization_nanos: nanos(contract.aggregate_receipt_finalization),
+        aggregate_backend_construction_nanos: nanos(contract.aggregate_backend_construction),
+        aggregate_wasm_instance_acquire_nanos: nanos(contract.aggregate_wasm_instance_acquire),
+        aggregate_wasm_entrypoint_nanos: nanos(contract.aggregate_wasm_entrypoint),
+        aggregate_host_storage_nanos: nanos(contract.aggregate_host_storage),
+        aggregate_host_query_nanos: nanos(contract.aggregate_host_query),
+        aggregate_transaction_lock_wait_nanos: nanos(contract.aggregate_transaction_lock_wait),
+        aggregate_canonical_state_read_lock_wait_nanos: nanos(
+            contract.aggregate_canonical_state_read_lock_wait,
+        ),
+        aggregate_canonical_state_read_hold_nanos: nanos(
+            contract.aggregate_canonical_state_read_hold,
+        ),
+        aggregate_mvcc_lock_wait_nanos: nanos(contract.aggregate_mvcc_lock_wait),
+        aggregate_mvcc_publish_nanos: nanos(contract.aggregate_mvcc_publish),
+        wasm_instance_acquires: contract.wasm_instance_acquires,
+        wasm_instance_reuse_hits: contract.wasm_instance_reuse_hits,
+        wasm_instance_pool_misses: contract.wasm_instance_pool_misses,
+        canonical_state_reads: contract.canonical_state_reads,
+        ..RuntimeProfileRecord::default()
+    }
+}
+
+fn runtime_profile_from_dependency(
+    diagnostics: &DependencyPreexecutionDiagnostics,
+) -> RuntimeProfileRecord {
+    let mut profile = runtime_profile_from_contract("dependency-mvcc", &diagnostics.contract);
+    profile.worker_phase_wall_nanos = nanos(diagnostics.worker_phase_wall);
+    profile.aggregate_ready_wait_nanos = nanos(diagnostics.aggregate_ready_wait);
+    profile.aggregate_transaction_service_nanos = nanos(diagnostics.aggregate_contract_execution);
+    profile.aggregate_visibility_capture_nanos = nanos(diagnostics.aggregate_visibility_capture);
+    profile.aggregate_publish_and_unblock_nanos = nanos(diagnostics.aggregate_publish_and_unblock);
+    profile.max_in_flight = diagnostics.max_in_flight;
+    profile
+}
+
+fn runtime_profile_from_direct(diagnostics: &DirectDagExecutionDiagnostics) -> RuntimeProfileRecord {
+    let mut profile = runtime_profile_from_contract("exact-direct", &diagnostics.contract);
+    profile.worker_phase_wall_nanos = nanos(diagnostics.worker_phase_wall);
+    profile.aggregate_ready_wait_nanos = nanos(diagnostics.aggregate_ready_wait);
+    profile.aggregate_transaction_service_nanos = nanos(diagnostics.aggregate_transaction_service);
+    profile.aggregate_commit_lock_wait_nanos = nanos(diagnostics.commit.lock_wait);
+    profile.aggregate_commit_lock_hold_nanos = nanos(diagnostics.commit.lock_hold);
+    profile.commit_batches = diagnostics.commit.batches;
+    profile.commit_write_sets = diagnostics.commit.write_sets;
+    profile.max_in_flight = diagnostics.max_in_flight;
+    profile
 }
 
 #[derive(Default)]
@@ -243,11 +348,13 @@ struct StrategyMetrics {
     replayed_transactions: u64,
     canonical_transactions: u64,
     discovered_conflicts: u64,
+    reference_conflicts: u64,
     dependency_edges: usize,
     waves: usize,
     max_wave_width: usize,
     serial_bypassed: bool,
     projected_speedup: Option<f64>,
+    runtime_profile: Option<RuntimeProfileRecord>,
 }
 
 fn parse_args() -> Result<Args, AnyError> {
@@ -262,6 +369,13 @@ fn parse_args() -> Result<Args, AnyError> {
     let mut probability_threshold = 0.50f64;
     let mut cost_bypass_speedup = 1.05f64;
     let mut order_seed = 2_026_082_501u64;
+    let mut strategies = DEFAULT_STRATEGIES.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let mut compute_weights = None;
+    let mut compute_metric = ComputeMetric::None;
+    let mut compute_scale = 0.0_f64;
+    let mut compute_base_total_ms = 1_000_u64;
+    let mut compute_iterations_per_nano = None;
+    let mut runtime_profile = false;
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -276,7 +390,17 @@ fn parse_args() -> Result<Args, AnyError> {
             "--probability-threshold" => probability_threshold = it.next().ok_or_else(|| invalid("missing --probability-threshold value"))?.parse()?,
             "--cost-bypass-speedup" => cost_bypass_speedup = it.next().ok_or_else(|| invalid("missing --cost-bypass-speedup value"))?.parse()?,
             "--order-seed" => order_seed = it.next().ok_or_else(|| invalid("missing --order-seed value"))?.parse()?,
-            "-h" | "--help" => return Err(invalid("usage: acg-vegeta-native-s3-benchmark --manifest FILE --execution-plan FILE --output FILE [--repo-root ROOT] [--symbolic-dir DIR] [--workers 6] [--samples 3] [--consensus-cutoff-ms 5000] [--probability-threshold 0.5] [--cost-bypass-speedup 1.05] [--order-seed 2026082501]")),
+            "--compute-weights" => compute_weights = Some(PathBuf::from(it.next().ok_or_else(|| invalid("missing --compute-weights value"))?)),
+            "--compute-metric" => compute_metric = ComputeMetric::parse(&it.next().ok_or_else(|| invalid("missing --compute-metric value"))?)?,
+            "--compute-scale" => compute_scale = it.next().ok_or_else(|| invalid("missing --compute-scale value"))?.parse()?,
+            "--compute-base-total-ms" => compute_base_total_ms = it.next().ok_or_else(|| invalid("missing --compute-base-total-ms value"))?.parse()?,
+            "--compute-iterations-per-nano" => compute_iterations_per_nano = Some(it.next().ok_or_else(|| invalid("missing --compute-iterations-per-nano value"))?.parse()?),
+            "--runtime-profile" => runtime_profile = true,
+            "--strategies" => {
+                let value = it.next().ok_or_else(|| invalid("missing --strategies value"))?;
+                strategies = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
+            "-h" | "--help" => return Err(invalid("usage: acg-vegeta-native-s3-benchmark --manifest FILE --execution-plan FILE --output FILE [--repo-root ROOT] [--symbolic-dir DIR] [--workers 6] [--samples 3] [--consensus-cutoff-ms 5000] [--probability-threshold 0.5] [--cost-bypass-speedup 1.05] [--order-seed 2026082501] [--strategies serial,aria-fb,vegeta,exact-access,exact-direct,static,probability-only,cost-aware] [--compute-weights FILE --compute-metric none|steps|gas --compute-scale X --compute-base-total-ms 1000 --compute-iterations-per-nano X] [--runtime-profile]")),
             _ => return Err(invalid(format!("unknown argument: {arg}"))),
         }
     }
@@ -285,6 +409,17 @@ fn parse_args() -> Result<Args, AnyError> {
     }
     if !(0.0..=1.0).contains(&probability_threshold) {
         return Err(invalid("probability threshold must be in [0,1]"));
+    }
+    if !compute_scale.is_finite() || compute_scale < 0.0 {
+        return Err(invalid("compute scale must be finite and non-negative"));
+    }
+    if strategies.is_empty() {
+        return Err(invalid("at least one strategy must be selected"));
+    }
+    for strategy in &strategies {
+        if !matches!(strategy.as_str(), "serial" | "aria-fb" | "vegeta" | "exact-access" | "exact-direct" | "static" | "probability-only" | "cost-aware") {
+            return Err(invalid(format!("unknown strategy {strategy}")));
+        }
     }
     Ok(Args {
         repo_root,
@@ -298,6 +433,13 @@ fn parse_args() -> Result<Args, AnyError> {
         probability_threshold,
         cost_bypass_speedup,
         order_seed,
+        strategies,
+        compute_weights,
+        compute_metric,
+        compute_scale,
+        compute_base_total_nanos: compute_base_total_ms.saturating_mul(1_000_000),
+        compute_iterations_per_nano,
+        runtime_profile,
     })
 }
 
@@ -388,10 +530,11 @@ fn setup_engine(
     repo_root: &Path,
     manifest: &Manifest,
     raw_blocks: &[ExecutionBlock],
+    calibration: &ComputeCalibration,
 ) -> Result<(CosmWasmEngine, Vec<ProducedBlock>), AnyError> {
     let engine = CosmWasmEngine::new(EngineConfig {
         gas_limit: u64::MAX,
-        wasm_instance_lifecycle: WasmInstanceLifecycle::Recycle,
+        wasm_instance_lifecycle: WasmInstanceLifecycle::Reuse,
         ..EngineConfig::default()
     });
     let mut codes = BTreeMap::new();
@@ -437,12 +580,20 @@ fn setup_engine(
     for block in raw_blocks {
         let mut transactions = Vec::with_capacity(block.transactions.len());
         for tx in &block.transactions {
-            let scoped_calls = tx.calls.iter().map(|spec| {
+            let compute_iterations = calibration.iterations_for(block.block_number, tx.tx_index, &tx.tx_hash)?;
+            let mut scoped_calls = Vec::with_capacity(tx.calls.len() + usize::from(compute_iterations > 0));
+            if compute_iterations > 0 {
+                scoped_calls.push(ScopedBundleCall {
+                    call: BundleCall::DeterministicCompute { iterations: compute_iterations },
+                    source_revert_scope: None,
+                });
+            }
+            scoped_calls.extend(tx.calls.iter().map(|spec| {
                 Ok(ScopedBundleCall {
                     call: build_call(spec, &addresses)?,
                     source_revert_scope: spec.source_revert_scope_action_id,
                 })
-            }).collect::<Result<Vec<_>, AnyError>>()?;
+            }).collect::<Result<Vec<_>, AnyError>>()?);
             let tid = TransactionId(((block.block_number - FIRST_BLOCK) * 100_000 + tx.tx_index as u64) + 10_000_000);
             transactions.push(PendingTransaction {
                 request: acg_cosmwasm_engine::ExecutionRequest::Bundle {
@@ -775,6 +926,7 @@ fn speculative_run(
     workers: usize,
     cutoff: Duration,
     planning: Duration,
+    collect_runtime_profile: bool,
 ) -> Result<StrategyMetrics, AnyError> {
     let total_started = Instant::now();
     let executor = SpeculativeParallelBlockExecutor::new(engine.clone(), ParallelExecutionConfig { workers });
@@ -786,6 +938,8 @@ fn speculative_run(
     let pre_consensus = eligible.min(cutoff);
     let overrun = eligible.saturating_sub(cutoff);
     let prepared_receipts = prepared.receipts.len() as u64;
+    let runtime_profile = collect_runtime_profile
+        .then(|| runtime_profile_from_dependency(&prepared.metrics.dependency_diagnostics));
     let rec_started = Instant::now();
     let rec = executor.validate_prepared(block, prepared)?;
     let reconciliation = rec_started.elapsed();
@@ -806,6 +960,7 @@ fn speculative_run(
         dependency_edges: plan.dependencies.len(),
         waves,
         max_wave_width,
+        runtime_profile,
         ..StrategyMetrics::default()
     })
 }
@@ -818,10 +973,12 @@ fn execute_strategy(
     predictor: &SymbolicPredictor,
     feedback: &FeedbackModel,
     reference_conflicts: &[ObservedConflict],
+    direct_executor: Option<&DirectDagBlockExecutor>,
     workers: usize,
     cutoff: Duration,
     probability_threshold: f64,
     bypass_speedup: f64,
+    collect_runtime_profile: bool,
 ) -> Result<StrategyMetrics, AnyError> {
     match strategy {
         "serial" => {
@@ -885,9 +1042,37 @@ fn execute_strategy(
             let planning_started=Instant::now();
             let plan=plan_from_edges(block.transactions.len(),&conflict_edges(reference_conflicts));
             let planning=planning_started.elapsed();
-            let mut m=speculative_run(engine,block,&plan,workers,cutoff,planning)?;
+            let mut m=speculative_run(engine,block,&plan,workers,cutoff,planning,collect_runtime_profile)?;
             m.discovered_conflicts=reference_conflicts.len() as u64;
             Ok(m)
+        }
+        "exact-direct" => {
+            let planning_started=Instant::now();
+            let plan=plan_from_edges(block.transactions.len(),&conflict_edges(reference_conflicts));
+            let planning=planning_started.elapsed();
+            let total_started=Instant::now();
+            let executor=direct_executor.ok_or_else(|| invalid("exact-direct strategy missing persistent direct executor"))?;
+            let (report, runtime_profile)=if collect_runtime_profile {
+                let (report, diagnostics)=executor.execute_with_diagnostics(block,&plan)?;
+                (report, Some(runtime_profile_from_direct(&diagnostics)))
+            } else {
+                (executor.execute(block,&plan)?, None)
+            };
+            ensure_successful_report("exact direct DAG replay", &report)?;
+            let replay=total_started.elapsed();
+            let (waves,max_wave_width)=plan_shape(&plan);
+            Ok(StrategyMetrics {
+                total:planning.saturating_add(replay),
+                planning,
+                reconciliation:replay,
+                post_consensus:planning.saturating_add(replay),
+                dependency_edges:plan.dependencies.len(),
+                waves,
+                max_wave_width,
+                discovered_conflicts:reference_conflicts.len() as u64,
+                runtime_profile,
+                ..StrategyMetrics::default()
+            })
         }
         "static" | "probability-only" | "cost-aware" => {
             let planning_started=Instant::now();
@@ -920,7 +1105,7 @@ fn execute_strategy(
                 let cutoff_overrun=planning.saturating_sub(cutoff);
                 return Ok(StrategyMetrics { total:planning.saturating_add(wall), planning, reconciliation:wall, post_consensus:cutoff_overrun.saturating_add(wall), cutoff_overrun, pre_consensus, dependency_edges:0, waves:plan.waves.len(), max_wave_width:1, serial_bypassed, projected_speedup:projected, ..StrategyMetrics::default() });
             }
-            let mut m=speculative_run(engine,block,&plan,workers,cutoff,planning)?;
+            let mut m=speculative_run(engine,block,&plan,workers,cutoff,planning,collect_runtime_profile)?;
             m.serial_bypassed=serial_bypassed; m.projected_speedup=projected;
             Ok(m)
         }
@@ -935,8 +1120,8 @@ fn splitmix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-fn strategy_order(sample: usize, seed: u64) -> Vec<&'static str> {
-    let mut rows = STRATEGIES.to_vec();
+fn strategy_order<'a>(strategies: &'a [String], sample: usize, seed: u64) -> Vec<&'a str> {
+    let mut rows = strategies.iter().map(String::as_str).collect::<Vec<_>>();
     let mut state = seed ^ (sample as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     for index in (1..rows.len()).rev() {
         state = splitmix64(state);
@@ -951,6 +1136,7 @@ fn strategy_provenance(strategy: &str) -> (&'static str, &'static str) {
         "aria-fb" => ("current-block concrete speculative accesses", "post-consensus discovery+fallback"),
         "vegeta" => ("current-block concrete discovery accesses", "pre-consensus discovery; post-consensus dependency replay"),
         "exact-access" => ("evaluation-only matched-serial concrete-access oracle", "pre-consensus oracle plan+execution; post-consensus validation"),
+        "exact-direct" => ("evaluation-only matched-serial concrete-access oracle", "post-consensus direct canonical DAG replay; no snapshot/MVCC/receipt validation"),
         "static" => ("checked-in source-derived symbolic profiles + public native call inputs", "pre-consensus symbolic plan+execution; post-consensus validation"),
         "probability-only" => ("source-derived symbolic prior + strictly prior-block conflict feedback", "pre-consensus adaptive plan+execution; post-consensus validation"),
         "cost-aware" => ("source-derived symbolic prior + strictly prior-block conflict/cost feedback", "pre-consensus adaptive plan+execution or serial bypass"),
@@ -963,14 +1149,27 @@ fn main() -> Result<(), AnyError> {
     let manifest:Manifest=serde_json::from_slice(&fs::read(&args.manifest)?)?;
     let raw_blocks=read_execution_blocks(&args.execution_plan)?;
     let predictor=SymbolicPredictor::load(&args.repo_root,&args.symbolic_dir)?;
+    let calibration = if args.compute_metric == ComputeMetric::None || args.compute_scale == 0.0 {
+        ComputeCalibration::load(Path::new("."), args.compute_metric, args.compute_scale, args.compute_base_total_nanos, args.compute_iterations_per_nano)?
+    } else {
+        let weights = args.compute_weights.as_ref().ok_or_else(|| invalid("--compute-weights is required when compute calibration is enabled"))?;
+        ComputeCalibration::load(weights, args.compute_metric, args.compute_scale, args.compute_base_total_nanos, args.compute_iterations_per_nano)?
+    };
+    let calibration_meta = calibration.metadata();
+    eprintln!("native-s3 benchmark compute calibration metric={} scale={} base_total_ms={:.1} iter_per_ns={:.6}", calibration_meta.metric, calibration_meta.scale, calibration_meta.base_total_nanos as f64/1e6, calibration_meta.iterations_per_nano);
     if let Some(parent)=args.output.parent(){fs::create_dir_all(parent)?;}
     let mut writer=BufWriter::new(fs::File::create(&args.output)?);
 
     for sample in 0..args.samples {
-        for strategy in strategy_order(sample, args.order_seed) {
+        for strategy in strategy_order(&args.strategies, sample, args.order_seed) {
             eprintln!("native-s3 benchmark sample={} strategy={} setup",sample,strategy);
-            let (reference_engine, reference_blocks)=setup_engine(&args.repo_root,&manifest,&raw_blocks)?;
-            let (strategy_engine, strategy_blocks)=setup_engine(&args.repo_root,&manifest,&raw_blocks)?;
+            let (reference_engine, reference_blocks)=setup_engine(&args.repo_root,&manifest,&raw_blocks,&calibration)?;
+            let (strategy_engine, strategy_blocks)=setup_engine(&args.repo_root,&manifest,&raw_blocks,&calibration)?;
+            let direct_executor = if strategy == "exact-direct" {
+                Some(DirectDagBlockExecutor::new(strategy_engine.clone(), args.workers)?)
+            } else {
+                None
+            };
             let mut feedback=FeedbackModel::default();
             for (block_index, raw) in raw_blocks.iter().enumerate() {
                 let reference_block=&reference_blocks[block_index];
@@ -987,7 +1186,8 @@ fn main() -> Result<(), AnyError> {
 
                 let mut metrics=execute_strategy(
                     strategy,&strategy_engine,strategy_block,raw,&predictor,&feedback,&reference_conflicts,
-                    args.workers,args.cutoff,args.probability_threshold,args.cost_bypass_speedup,
+                    direct_executor.as_ref(),args.workers,args.cutoff,args.probability_threshold,args.cost_bypass_speedup,
+                    args.runtime_profile,
                 )?;
                 if matches!(strategy, "probability-only" | "cost-aware") {
                     let feedback_started=Instant::now();
@@ -1004,7 +1204,11 @@ fn main() -> Result<(), AnyError> {
                 let total_nanos=nanos(metrics.total);
                 let record=Record {
                     schema_version:1,dataset:"vegeta-s3-native-seven-strategy",sample,block_number:raw.block_number,
-                    strategy:strategy.to_owned(),workers:args.workers,transactions:raw.transactions.len(),
+                    strategy:strategy.to_owned(),workers:args.workers,wasm_instance_lifecycle:"reuse",
+                    compute_calibration_metric:calibration_meta.metric,compute_scale:calibration_meta.scale,
+                    compute_base_total_nanos:calibration_meta.base_total_nanos,compute_iterations_per_nano:calibration_meta.iterations_per_nano,
+                    compute_block_iterations:raw.transactions.iter().map(|tx|calibration.iterations_for(raw.block_number,tx.tx_index,&tx.tx_hash)).collect::<Result<Vec<_>,_>>()?.into_iter().sum(),
+                    transactions:raw.transactions.len(),
                     semantic_calls:raw.transactions.iter().map(|t|t.calls.len()).sum(),
                     skipped_actions:raw.transactions.iter().map(|t|t.skipped_actions).sum(),
                     matched_serial_nanos:serial_nanos,strategy_total_nanos:total_nanos,
@@ -1024,6 +1228,7 @@ fn main() -> Result<(), AnyError> {
                     post_consensus_speedup:if metrics.post_consensus.is_zero(){0.0}else{serial_nanos as f64/nanos(metrics.post_consensus) as f64},
                     feedback_nanos:nanos(metrics.feedback),probability_threshold:args.probability_threshold,
                     cost_bypass_speedup:args.cost_bypass_speedup,strategy_order_seed:args.order_seed,
+                    runtime_profile:metrics.runtime_profile,
                     evaluation_config_id:"vegeta-s3-native-scheduler-v1",
                 };
                 serde_json::to_writer(&mut writer,&record)?; writer.write_all(b"\n")?; writer.flush()?;
@@ -1156,10 +1361,11 @@ mod tests {
 
     #[test]
     fn strategy_order_is_seeded_permutation() {
-        let first = strategy_order(0, 2026082501);
-        let second = strategy_order(1, 2026082501);
+        let strategies = DEFAULT_STRATEGIES.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let first = strategy_order(&strategies, 0, 2026082501);
+        let second = strategy_order(&strategies, 1, 2026082501);
         let first_set = first.iter().copied().collect::<BTreeSet<_>>();
-        assert_eq!(first_set, STRATEGIES.iter().copied().collect::<BTreeSet<_>>());
+        assert_eq!(first_set, DEFAULT_STRATEGIES.iter().copied().collect::<BTreeSet<_>>());
         assert_ne!(first, second);
     }
 }

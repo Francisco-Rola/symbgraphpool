@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 acg-cosmwasm-engine.workspace = true
 parking_lot.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

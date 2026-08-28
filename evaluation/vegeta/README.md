@@ -1,3 +1,218 @@
+# SymbGraphPool / Vegeta evaluation continuation state
+
+**Last updated:** 2026-08-28  
+**Continuation rule:** every evaluation patch must update this file. If work moves to a new chat,
+provide this README, the latest result summaries, and the newest patch name first.
+
+## Current research state
+
+The core S3 investigation has moved from implementation debugging to publication evaluation.
+The strongest current conclusions are:
+
+- The original semantic-only native S3 port was too computationally fine-grained to expose useful
+  post-order parallel execution. At the uncalibrated profile, native/source cost rank correlation was
+  weak and exact-DAG replay was approximately break-even after serial-control normalization.
+- Source-derived deterministic compute calibration causally restored parallel replay. The current
+  publication candidate is **opcode-steps 4x**: native-vs-EVM steps Spearman was ~0.969 and the
+  source-critical-path native overweight ratio was ~1.051.
+- On steps-4 at 8 workers, exact direct DAG replay reached about **1.86x net active speedup**.
+- Runtime profiling at steps-4 / 8 workers showed about **2.01x effective transaction-service
+  concurrency**, ~71.8% direct-DAG READY-capacity wait, ~0.4% canonical read-lock wait, ~0.8%
+  commit-hold share, and ~99.7% Wasm reuse hits. Shared canonical locking and Wasm recycle are no
+  longer the leading explanation for the remaining ceiling.
+- `perf` is now validated on WSL: the steps-4 / 2-worker exact-direct smoke reported **perf-cpus=2.02**, matching the configured two workers. The perf 7.x parser/collection issue is therefore considered fixed.
+- The first steps-4 publication matrix (WSL, n=1, workers 2/4) is complete. At 4 workers, deployable **static SymbGraph** reached **1.268x net active** and **3.909x consensus-visible** speedup with 9.76% replay; exact-direct reached 1.777x net; exact-access reached 1.713x net / 19.812x post; the Cosmos SDK Block-STM access-replay diagnostic reached 2.240x. These are development numbers, not paper statistics.
+- The first Cosmos Block-STM harness build exposed two dependency/toolchain problems in the old `v0.54.0-beta.0` pin (`tidwall/btree` API skew and Sonic v1.14.0 failing on Go 1.26). Moving to Cosmos SDK **v0.54.4** fixed that dependency line, but also exposed an API migration: the old public `github.com/cosmos/cosmos-sdk/blockstm` package existed only in the beta and is no longer public in v0.54.4. The current hotfix uses the supported `github.com/cosmos/cosmos-sdk/baseapp/txnrunner.NewSTMRunner` integration point instead.
+
+These numbers are development evidence, not final paper numbers. Final performance figures still need
+native Linux, randomized/counterbalanced order, and >=5 independent full-range samples.
+
+## Patch lineage
+
+Apply patches in this conceptual order (some earlier compile hotfixes were superseded by full-file
+replacements during development):
+
+1. `vegeta-s3-replay-cost-fidelity-diagnostics.patch`
+2. `vegeta-s3-persistent-workers-batched-state-reuse-cost-fidelity.patch`
+3. `vegeta-s3-evm-cost-calibrated-compute-sweep.patch`
+4. `vegeta-s3-runtime-concurrency-profiler-perf.patch`
+5. `vegeta-s3-perf-publication-matrix-cosmos-blockstm.patch`
+6. `vegeta-s3-perf-mvcc-blockstm-go126-hotfix.patch`
+7. `vegeta-s3-cosmos-txnrunner-v0544-hotfix.patch`
+8. `vegeta-s3-wasmd-blockstm-publication-ci.patch`
+9. `vegeta-s3-wasmd-chainid-init-hotfix.patch`
+10. `vegeta-s3-wasmd-store-load-init-hotfix.patch`
+11. `vegeta-s3-wasmd-genesis-validator-init-hotfix.patch`
+12. **current:** `vegeta-s3-wasmd-wasm-genesis-params-hotfix.patch`
+
+## What the current patch adds
+
+### 0. Wasmd x/wasm genesis-params initialization hotfix
+
+After patch #11 seeded a valid bonded validator, the full Wasmd preflight advanced through module genesis and reached the first real `WasmKeeper.Create`. That call failed with `collections: not found: key 'no_key' of type cosmwasm.wasm.v1.Params`, proving that the x/wasm module's parameter collection had not been initialized in genesis. Patch #12 explicitly injects `wasm.AppModuleBasic{}.DefaultGenesis(a.AppCodec())` into the application genesis map before `InitChain`, keyed by the module's own `Name()`. This uses Wasmd v0.70.3's version-matched default x/wasm genesis rather than hand-constructing Params, and keeps upload/instantiate permissions at the upstream defaults used by a normal Wasmd genesis.
+
+This setup remains outside all timed S3 execution. The regression suite now requires the benchmark harness to include the explicit x/wasm default genesis so future changes cannot silently reintroduce an uninitialized Wasm params store.
+
+### 0a. Wasmd genesis-validator initialization hotfix
+
+After the chain-ID and store-load fixes, the full Wasmd preflight advanced into module `InitGenesis` and correctly failed because the default Wasmd genesis contains no bonded validator. Cosmos SDK requires exactly one module to return a non-empty validator update set at genesis, and the staking validator must have at least one `DefaultPowerReduction` delegation. Patch #11 now constructs a deterministic one-validator CometBFT set and calls Wasmd's own `GenesisStateWithValSet` test helper to populate mutually consistent auth/bank/staking genesis. The validator bootstrap and its stake exist only to satisfy real Wasmd chain initialization and remain completely outside the timed S3 workload.
+
+The helper uses a deterministic CometBFT ed25519 key, a dedicated benchmark genesis account, and ten `DefaultPowerReduction` units of the default staking denom so the helper can bond one consensus-power unit without depending on an exact-balance edge case. No benchmark S3 address, contract, state seed, or measured transaction is changed.
+
+### 1. Wasmd BaseApp chain-ID initialization hotfix
+
+The first full Wasmd preflight reached `InitChain` but failed before Wasm upload with `invalid chain-id on InitChain; expected: , got: vegeta-s3-wasmd-blockstm`. The benchmark now passes `baseapp.SetChainID(chainID)` directly into `wasmapp.NewWasmApp`, so BaseApp is created with the same chain ID used by `InitChain` and subsequent block headers. This is the supported Cosmos SDK initialization path and avoids mutating a sealed BaseApp after construction.
+
+### 2. Full Wasmd/WasmVM + Cosmos SDK Block-STM baseline
+
+This patch adds `benchmarks/cosmos-wasmd-blockstm-s3`, a stronger Block-STM baseline that executes the **actual native S3 Wasm artifacts** through Wasmd **v0.70.3 / wasmvm v3.0.7** and the real account, bank, and wasm keepers while Cosmos SDK **v0.54.4** `baseapp/txnrunner.NewSTMRunner` provides optimistic Block-STM execution.
+
+The baseline initializes a real in-memory `WasmApp`, uploads/instantiates the frozen native S3 contracts, applies bank seeds and priming calls out of the timed region, then executes the translated S3 execute/query/bank-send calls under Block-STM. Source-reverted top-level transactions and caught internal revert scopes use nested SDK cache contexts so discarded writes remain discarded while reads still participate in conflict detection. Original source timestamps are preserved; synthetic sequential Cosmos heights are used only to satisfy BaseApp lifecycle ordering because the native S3 contracts consume block time but not source block height.
+
+The row is intentionally labelled:
+
+```text
+actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-no-ante-abci
+```
+
+It is substantially stronger than access replay because the real Wasm VM and keepers execute. It still bypasses signed transaction decoding, ante/signature verification, and the ABCI `FinalizeBlock` message path: frozen semantic S3 calls are invoked directly inside the TxRunner callback. Do not hide this qualifier in paper text. Keep the older access-replay Block-STM row as an algorithm/access-substrate diagnostic.
+
+Preflight the full VM baseline before any matrix:
+
+```bash
+bash scripts/check-vegeta-cosmos-wasmd-blockstm.sh
+```
+
+This builds the Rust Wasm artifacts, downloads/builds the Go harness, runs Go unit tests, and performs a real upload + instantiate + priming setup smoke.
+
+### 3. Publication matrix modes and repeated samples
+
+`scripts/run-vegeta-s3-publication-matrix.sh` now has explicit modes:
+
+```bash
+# cheapest functional check: workers=2, n=1
+VEGETA_S3_PUBLICATION_MODE=smoke bash scripts/run-vegeta-s3-publication-matrix.sh
+
+# WSL development matrix: workers=2,4, n=1 (default)
+VEGETA_S3_PUBLICATION_MODE=debug bash scripts/run-vegeta-s3-publication-matrix.sh
+
+# publication configuration: workers=1,2,4,8,16, n=5
+VEGETA_S3_PUBLICATION_MODE=paper bash scripts/run-vegeta-s3-publication-matrix.sh
+```
+
+Explicit `VEGETA_S3_PUBLICATION_WORKERS` and `VEGETA_S3_PUBLICATION_SAMPLES` still override the mode. Paper mode is intended for the later native-Linux host; use debug mode on WSL first.
+
+The matrix now contains native serial/Aria/Vegeta/static/probability/cost-aware/exact-direct/exact-access, Cosmos SDK access replay, and the full Wasmd/WasmVM Block-STM row.
+
+### 4. Publication statistics
+
+The publication summarizer is upgraded to schema v2. For every worker/strategy it reports:
+
+- independent full-range sample count;
+- absolute matched-serial wall milliseconds;
+- absolute active wall milliseconds;
+- absolute consensus-visible/post-order wall milliseconds;
+- raw and serial-control-normalized active speedup;
+- post speedup;
+- per-block post p95 and p99 latency;
+- replay and reuse rates;
+- deterministic bootstrap 95% confidence intervals over the per-sample medians for the headline wall/speedup metrics.
+
+A one-sample WSL development row explicitly reports CI as `n/a`; it is not publication evidence.
+
+### 5. Existing perf and access-replay baselines remain
+
+The WSL perf 7.x parser fix remains validated (`perf-cpus=2.02` for the 2-worker exact-direct smoke). The access-replay TxRunner baseline remains enabled by default and is now presented beside the Wasmd/WasmVM row so VM/keeper overhead can be quantified directly.
+
+## Validation after applying this patch
+
+Run the local suites first:
+
+```bash
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
+cargo test --manifest-path runtime/Cargo.toml -p acg-cosmwasm-engine
+cargo test --manifest-path runtime/Cargo.toml -p acg-validator-sim
+cargo test --manifest-path runtime/Cargo.toml -p acg-vegeta-native-s3-executor
+```
+
+Validate both Cosmos baselines independently:
+
+```bash
+bash scripts/check-vegeta-cosmos-blockstm.sh
+bash scripts/check-vegeta-cosmos-wasmd-blockstm.sh
+```
+
+Perf was already validated, but after WSL/kernel changes rerun:
+
+```bash
+bash scripts/check-vegeta-perf.sh
+```
+
+Then run the **debug** matrix before paper mode:
+
+```bash
+VEGETA_S3_PUBLICATION_MODE=debug bash scripts/run-vegeta-s3-publication-matrix.sh
+```
+
+Inspect `publication-matrix-steps4/summary.txt` for serial equivalence, complete samples, and plausible full-Wasmd Block-STM timing before expanding.
+
+## Evaluation inventory
+
+### Completed / strong development evidence
+
+- Native S3 semantic-port validation and serial state equivalence.
+- Candidate-archetype freeze / anti-overfitting ablation.
+- Seven-strategy scheduler comparison on semantic-only S3.
+- Exact-DAG direct replay diagnostic and worker scaling.
+- Persistent worker pools, batched canonical commits, Wasm lifecycle fixed to `Reuse`.
+- EVM/native compute-fidelity join with 13,781 matched transactions and two explicitly tolerated
+  missing public-RPC traces.
+- Source steps/gas compute calibration sweeps and causal granularity experiment.
+- Runtime hot-path profiling of READY wait, service concurrency, VM acquisition/entrypoint, state
+  reads, commits, and MVCC.
+
+### Added / current status
+
+- perf 7.x smoke and corrected average-CPU parsing: **validated on WSL (`perf-cpus=2.02` at 2 workers)**.
+- Full **deployable** SymbGraph strategy matrix on steps-4: first WSL n=1 results exist for workers 2/4; repeated 1/2/4/8/16 paper-mode runs remain pending.
+- Actual Cosmos SDK TxRunner Block-STM access-replay baseline: working in the first WSL matrix (2.240x at 4 workers, n=1).
+- Full Wasmd/WasmVM + SDK TxRunner Block-STM baseline: implemented; WSL setup has now passed chain-ID validation, store loading, and validator genesis. The next preflight reached the first real `WasmKeeper.Create` and exposed missing x/wasm genesis Params; patch #12 now injects Wasmd's own `AppModuleBasic.DefaultGenesis` for x/wasm before `InitChain`.
+
+### Still required for an OSDI/EuroSys-quality final evaluation
+
+1. Repeat headline matrices on a dedicated **native Linux** host with pinned CPU configuration and at
+   least five independent samples; report confidence intervals and p95/p99 where appropriate.
+2. Promote the new Wasmd/WasmVM TxRunner baseline to a true signed-transaction/ante/ABCI `FinalizeBlock` baseline if reviewers require full node-path accounting; the current patch already measures the real VM + keepers under Block-STM.
+3. Add at least two more workloads: additional Vegeta datasets and/or real CosmWasm-chain traces.
+4. Add controlled conflict/compute/skew synthetic workloads to show the regime where SymbGraph wins,
+   breaks even, and loses.
+5. Add end-to-end multi-validator measurements: proposal-to-finalize latency, block time, throughput,
+   proposer/validator CPU, memory, speculative work amplification, and tail latency.
+6. Add symbolic prediction-quality metrics: read/write-set recall, false positives/negatives,
+   dependency-edge precision/recall, and critical-edge recall.
+7. Add resource-cost accounting: CPU-seconds/block, memory, speculative waste, and ideally energy.
+8. Counterbalance matched-serial/strategy execution order in final production runs to remove the
+   repeatedly observed serial-control offset.
+
+### Latest WSL Cosmos baseline history
+
+- `perf` parsing is fixed and verified (`perf-cpus=2.02` at two workers).
+- The old beta-only direct `github.com/cosmos/cosmos-sdk/blockstm` import failed after upgrading to SDK v0.54.4; the access-replay harness now correctly uses public `baseapp/txnrunner.NewSTMRunner`.
+- The first access-replay publication matrix completed successfully. The full Wasmd/WasmVM harness first exposed a chain-ID mismatch (fixed in patch #9), then reached module genesis and exposed an unloaded `upgrade` KV store because the benchmark app used `loadLatest=false`. Patch #10 switches fresh in-memory Wasmd apps to `loadLatest=true`, which loads/materializes the mounted Wasmd store set before `InitChain`. The next preflight reached staking genesis and failed because default genesis had no validator; patch #11 added a deterministic single-validator staking/auth/bank genesis through Wasmd's `GenesisStateWithValSet` helper. That advanced setup to the first `WasmKeeper.Create`, where x/wasm Params were absent (`collections: not found ... cosmwasm.wasm.v1.Params`); patch #12 explicitly inserts Wasmd's version-matched default x/wasm genesis before `InitChain`.
+
+## Immediate next steps
+
+1. Apply `vegeta-s3-wasmd-wasm-genesis-params-hotfix.patch` on top of `vegeta-s3-wasmd-genesis-validator-init-hotfix.patch`.
+2. Rerun `bash scripts/check-vegeta-cosmos-wasmd-blockstm.sh`; the prior chain-ID, unloaded-store, empty-validator, and missing-x/wasm-Params failures should be gone. Stop and fix any further Go/Wasmd/runtime setup error before the matrix.
+3. Run `VEGETA_S3_PUBLICATION_MODE=smoke bash scripts/run-vegeta-s3-publication-matrix.sh` on WSL (workers 2, n=1), then `VEGETA_S3_PUBLICATION_MODE=debug` (workers 2/4, n=1).
+4. Compare `cosmos-block-stm-access-replay` vs `cosmos-wasmd-block-stm` to quantify real Wasm/keeper overhead; confirm every row is serial-equivalent.
+5. If clean, run a one-sample WSL full worker sweep with `VEGETA_S3_PUBLICATION_WORKERS=1,2,4,8,16 VEGETA_S3_PUBLICATION_SAMPLES=1`.
+6. Move the exact `VEGETA_S3_PUBLICATION_MODE=paper` run to dedicated native Linux for 1/2/4/8/16 workers, n=5, then use the reported bootstrap CIs/p95/p99 in paper figures.
+7. After the headline matrix is stable, prioritize static SymbGraph prediction-quality attribution (the ~9–10% replay gap to exact-access), additional workloads, and end-to-end multi-validator evaluation.
+
+---
+
 # Vegeta Ethereum trace-port evaluation
 
 `./scripts/run-vegeta-s3-smoke.sh` runs three representative S3 blocks through all seven common
