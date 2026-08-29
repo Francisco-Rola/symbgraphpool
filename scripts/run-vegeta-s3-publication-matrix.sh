@@ -23,6 +23,8 @@ STRATEGIES="${VEGETA_S3_PUBLICATION_STRATEGIES:-serial,aria-fb,vegeta,static,pro
 COSMOS_ACCESS="${VEGETA_S3_PUBLICATION_COSMOS_BLOCKSTM:-1}"
 COSMOS_WASMD="${VEGETA_S3_PUBLICATION_COSMOS_WASMD_BLOCKSTM:-1}"
 COSMOS_GO_TOOLCHAIN="${VEGETA_S3_COSMOS_GO_TOOLCHAIN:-auto}"
+WASMD_INVESTIGATE="${VEGETA_S3_WASMD_INVESTIGATE:-0}" # old double-cache + optimized tracked-single-cache controls
+WASMD_COMPARE_PPROF_DIR="${VEGETA_S3_WASMD_COMPARE_PPROF_DIR:-}"
 if [[ "$OUT_DIR" = /* ]]; then OUT_DIR_ABS="$OUT_DIR"; else OUT_DIR_ABS="$ROOT/$OUT_DIR"; fi
 
 for p in "$EXEC_DIR/execution-manifest.json" "$EXEC_DIR/execution-plan.jsonl"; do
@@ -129,20 +131,56 @@ for workers in "${WORKERS[@]}"; do
 
   if [[ "$COSMOS_WASMD" != "0" && "$COSMOS_WASMD" != "off" ]]; then
     out="$OUT_DIR/cosmos-wasmd-block-stm/records-workers-${workers}.jsonl"
+    WASMD_EXTRA_ARGS=()
+    if [[ "$WASMD_INVESTIGATE" != "0" && "$WASMD_INVESTIGATE" != "off" ]]; then
+      WASMD_EXTRA_ARGS+=(
+        --investigate-overhead
+        --diagnostics-output "$OUT_DIR/cosmos-wasmd-block-stm/overhead-workers-${workers}.json"
+      )
+    fi
     "$WASMD_BLOCKSTM_BIN" \
       --repo-root "$ROOT" \
       --manifest "$EXEC_DIR/execution-manifest.json" \
       --plan "$EXEC_DIR/execution-plan.jsonl" \
       --compute-weights "$WEIGHTS" \
+      --symbolic-dir benchmarks/symbolic/native-s3 \
       --output "$out" \
       --workers "$workers" \
       --samples "$SAMPLES" \
       --compute-scale 4 \
       --compute-base-total-ms "$BASE_TOTAL_MS" \
-      --go-iterations-per-nano "$WASMD_GO_ITER_PER_NS"
+      --go-iterations-per-nano "$WASMD_GO_ITER_PER_NS" \
+      "${WASMD_EXTRA_ARGS[@]}"
     cat "$out" >> "$WASMD_RECORDS"
   fi
 done
+
+# Optional isolated diagnostics. Each runner is executed in a fresh process so
+# CPU, mutex, allocation, and GC state are not inherited from the publication
+# benchmark or from another profile. Allocation profiles include before/after
+# snapshots suitable for: go tool pprof -diff_base=<before> <after>.
+if [[ "$COSMOS_WASMD" != "0" && "$COSMOS_WASMD" != "off" && -n "$WASMD_COMPARE_PPROF_DIR" ]]; then
+  mkdir -p "$WASMD_COMPARE_PPROF_DIR"
+  for kind in cpu-alloc mutex; do
+    for runner in direct-serial outer-cache-serial symbgraph-static; do
+      echo "isolated Wasmd profile runner=$runner kind=$kind workers=2 -> $WASMD_COMPARE_PPROF_DIR"
+      "$WASMD_BLOCKSTM_BIN" \
+        --repo-root "$ROOT" \
+        --manifest "$EXEC_DIR/execution-manifest.json" \
+        --plan "$EXEC_DIR/execution-plan.jsonl" \
+        --compute-weights "$WEIGHTS" \
+        --symbolic-dir benchmarks/symbolic/native-s3 \
+        --workers 2 \
+        --samples 1 \
+        --compute-scale 4 \
+        --compute-base-total-ms "$BASE_TOTAL_MS" \
+        --go-iterations-per-nano "$WASMD_GO_ITER_PER_NS" \
+        --profile-only-runner "$runner" \
+        --profile-only-kind "$kind" \
+        --profile-output-dir "$WASMD_COMPARE_PPROF_DIR"
+    done
+  done
+fi
 
 python3 scripts/vegeta/summarize-native-s3-publication-matrix.py \
   --native-records "$NATIVE_RECORDS" \
@@ -160,9 +198,16 @@ assert any(r['strategy']=='static' for r in rows), 'missing deployable static Sy
 assert any(r['strategy']=='exact-access' for r in rows), 'missing exact-access oracle'
 if access: assert any(r['strategy']=='cosmos-block-stm-access-replay' for r in rows), 'missing Cosmos access-replay baseline'
 if wasmd:
-    w=next((r for r in rows if r['strategy']=='cosmos-wasmd-block-stm'),None)
-    assert w, 'missing full Wasmd/WasmVM Block-STM baseline'
-    assert 'wasmd-wasmvm' in w['scope'], w['scope']
-print('PASS: publication matrix complete, serial-equivalent, and includes requested deployable/oracle/Block-STM rows')
+    required = [
+        'cosmos-wasmd-direct-serial',
+        'cosmos-wasmd-block-stm',
+        'cosmos-wasmd-symbgraph-static',
+        'cosmos-wasmd-vegeta',
+    ]
+    by_strategy = {r['strategy']: r for r in rows}
+    for strategy in required:
+        assert strategy in by_strategy, f'missing Wasmd scheduler row: {strategy}'
+        assert 'wasmd-wasmvm' in by_strategy[strategy]['scope'], by_strategy[strategy]['scope']
+print('PASS: publication matrix complete, serial-equivalent, and includes native plus four-way Wasmd scheduler rows')
 PY
 cat "$OUT_DIR/summary.txt"

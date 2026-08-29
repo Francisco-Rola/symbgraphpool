@@ -1,0 +1,300 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestKeyInRange(t *testing.T) {
+	cases := []struct {
+		name       string
+		key, start string
+		end        string
+		want       bool
+	}{
+		{name: "inside", key: "b", start: "a", end: "c", want: true},
+		{name: "start inclusive", key: "a", start: "a", end: "c", want: true},
+		{name: "end exclusive", key: "c", start: "a", end: "c", want: false},
+		{name: "unbounded", key: "z", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var start, end []byte
+			if tc.start != "" {
+				start = []byte(tc.start)
+			}
+			if tc.end != "" {
+				end = []byte(tc.end)
+			}
+			if got := keyInRange([]byte(tc.key), start, end); got != tc.want {
+				t.Fatalf("keyInRange(%q,%q,%q)=%v want %v", tc.key, tc.start, tc.end, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadsConflictWithWritesExactAndRange(t *testing.T) {
+	reads := newAccessTracker(nil)
+	key := testStoreKey("wasm")
+	store := storeIDFromName(key.Name())
+	reads.read(store, []byte("exact"))
+	reads.readRange(store, []byte("p/"), []byte("q/"))
+
+	exactWrites := newWriteSet(1)
+	exactWrites.add(store, []byte("exact"))
+	if !readsConflictWithWrites(reads, &exactWrites) {
+		t.Fatal("expected exact read/write conflict")
+	}
+	rangeWrites := newWriteSet(1)
+	rangeWrites.add(store, []byte("p/123"))
+	if !readsConflictWithWrites(reads, &rangeWrites) {
+		t.Fatal("expected iterator-range conflict")
+	}
+	outsideWrites := newWriteSet(1)
+	outsideWrites.add(store, []byte("z"))
+	if readsConflictWithWrites(reads, &outsideWrites) {
+		t.Fatal("unexpected conflict outside read set/range")
+	}
+}
+
+func TestNestedTrackerReadBubblesWithoutWrite(t *testing.T) {
+	parent := newAccessTracker(nil)
+	child := newAccessTracker(parent)
+	key := testStoreKey("wasm")
+	store := storeIDFromName(key.Name())
+	child.read(store, []byte("observed-before-revert"))
+	writes := newWriteSet(1)
+	writes.add(store, []byte("observed-before-revert"))
+	if !readsConflictWithWrites(parent, &writes) {
+		t.Fatal("discarded nested-cache read must remain part of the transaction validation set")
+	}
+}
+
+type testStoreKey string
+
+func (k testStoreKey) Name() string   { return string(k) }
+func (k testStoreKey) String() string { return string(k) }
+
+func ptr(s string) *string { return &s }
+
+func access(scope, resource, key string, write bool) predictedAccess {
+	return predictedAccess{location: predictedLocation{scope: scope, resource: resource, key: key}, write: write}
+}
+
+func footprint(accesses ...predictedAccess) staticFootprint {
+	return staticFootprint{accesses: accesses}
+}
+
+func TestStaticDependsMatchesRustPredictedConflict(t *testing.T) {
+	read := footprint(access("pair", "RESERVES", "singleton", false))
+	write := footprint(access("pair", "RESERVES", "singleton", true))
+	other := footprint(access("other", "RESERVES", "singleton", true))
+	wildcard := footprint(access("pair", "RESERVES", "*", true))
+
+	if !staticDepends(read, write) {
+		t.Fatal("native Rust predicted_conflict includes earlier-read/later-write")
+	}
+	if !staticDepends(write, read) {
+		t.Fatal("native Rust predicted_conflict includes earlier-write/later-read")
+	}
+	if staticDepends(read, read) {
+		t.Fatal("read/read should not conflict")
+	}
+	if staticDepends(read, other) {
+		t.Fatal("different symbolic scopes should not conflict")
+	}
+	if !staticDepends(read, wildcard) {
+		t.Fatal("wildcard key must overlap concrete key")
+	}
+}
+
+func TestBuildStaticLevelsFromSymbolicPredictions(t *testing.T) {
+	block := ExecutionBlock{BlockNumber: 99, Transactions: []ExecutionTx{{}, {}, {}}}
+	accesses := symbolicAccessIndex{
+		{block: 99, tx: 0}: footprint(access("pair", "A", "singleton", true)),
+		{block: 99, tx: 1}: footprint(access("pair", "B", "singleton", true)),
+		{block: 99, tx: 2}: footprint(access("pair", "A", "singleton", false)),
+	}
+	levels, err := buildStaticLevels(block, accesses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(levels) != 2 {
+		t.Fatalf("got %d levels, want 2: %#v", len(levels), levels)
+	}
+	if len(levels[0]) != 2 || levels[0][0] != 0 || levels[0][1] != 1 {
+		t.Fatalf("level 0=%v, want [0 1]", levels[0])
+	}
+	if len(levels[1]) != 1 || levels[1][0] != 2 {
+		t.Fatalf("level 1=%v, want [2]", levels[1])
+	}
+}
+
+func TestNormalizeEntrypointMatchesRust(t *testing.T) {
+	if got, want := normalizeEntrypoint("execute::TransferFrom"), "executetransferfrom"; got != want {
+		t.Fatalf("normalizeEntrypoint=%q want %q", got, want)
+	}
+}
+
+func TestResolveSymbolicKeyMatchesRustInputRules(t *testing.T) {
+	call := CallSpec{
+		Kind:   "execute",
+		Sender: ptr("sender"),
+		Msg: map[string]any{"transfer_from": map[string]any{
+			"owner":   "alice",
+			"spender": "carol",
+		}},
+	}
+	ownerSpender := symbolicKey{DependsOn: &symbolicDependency{OriginInput: ptr("(owner, spender)")}}
+	if got, want := resolveSymbolicKey(call, ownerSpender), "alice|carol"; got != want {
+		t.Fatalf("tuple key=%q want %q", got, want)
+	}
+	senderKey := symbolicKey{DependsOn: &symbolicDependency{OriginInput: ptr("info.sender")}}
+	if got, want := resolveSymbolicKey(call, senderKey), "sender"; got != want {
+		t.Fatalf("sender key=%q want %q", got, want)
+	}
+	unknown := symbolicKey{SemanticName: ptr("address"), DependsOn: &symbolicDependency{OriginInput: ptr("missing")}}
+	if got := resolveSymbolicKey(call, unknown); got != "*" {
+		t.Fatalf("unresolved input must become wildcard, got %q", got)
+	}
+}
+
+func TestSymbolicPredictorSyntheticProfileAndBankDependencies(t *testing.T) {
+	dir := t.TempDir()
+	profile := `{
+  "contract":"cw20-base",
+  "profiles":[{
+    "entrypoint":"execute::Transfer",
+    "accesses":[
+      {"kind":"read","resource":"BALANCES","key":{"semantic_name":"address","depends_on":{"origin_input":"info.sender"}}},
+      {"kind":"write","resource":"BALANCES","key":{"semantic_name":"address","depends_on":{"origin_input":"recipient"}}}
+    ]
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(dir, "cw20-base.symbolic.json"), []byte(profile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	predictor, err := loadSymbolicPredictor(".", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	family, instance, sender := "cw20-base", "token-A", "alice"
+	tx := ExecutionTx{Calls: []CallSpec{{
+		Kind:       "execute",
+		Family:     &family,
+		InstanceID: &instance,
+		Sender:     &sender,
+		Msg:        map[string]any{"transfer": map[string]any{"recipient": "bob", "amount": "10"}},
+		Funds:      []CoinSpec{{Denom: "unative", Amount: "1"}},
+	}}}
+	fp := predictor.predictTx(tx)
+	want := []predictedAccess{
+		access("bank", "alice", "unative", true),
+		access("bank", "token-A", "unative", true),
+		access("token-A", "BALANCES", "alice", false),
+		access("token-A", "BALANCES", "bob", true),
+	}
+	if len(fp.accesses) != len(want) {
+		t.Fatalf("access count=%d want %d: %#v", len(fp.accesses), len(want), fp.accesses)
+	}
+	for i := range want {
+		if fp.accesses[i] != want[i] {
+			t.Fatalf("access[%d]=%#v want %#v", i, fp.accesses[i], want[i])
+		}
+	}
+}
+
+func TestNativeS3SymbolicProfilesLoadAndPredict(t *testing.T) {
+	repoRoot := filepath.Clean("../..")
+	predictor, err := loadSymbolicPredictor(repoRoot, "benchmarks/symbolic/native-s3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if predictor.documentCount < 10 {
+		t.Fatalf("loaded %d symbolic documents, want at least 10", predictor.documentCount)
+	}
+	if predictor.profileCount < 80 {
+		t.Fatalf("loaded %d profiles, want at least 80", predictor.profileCount)
+	}
+	family, instance, sender := "astroport-pair", "astroport-pair:0xabc", "trader"
+	tx := ExecutionTx{Calls: []CallSpec{{
+		Kind:       "execute",
+		Family:     &family,
+		InstanceID: &instance,
+		Sender:     &sender,
+		Msg: map[string]any{"swap": map[string]any{
+			"offer_index": float64(0), "amount_in": "100", "min_out": "1", "recipient": "trader",
+		}},
+	}}}
+	fp := predictor.predictTx(tx)
+	foundRead, foundWrite := false, false
+	for _, a := range fp.accesses {
+		if a.location.scope == instance && a.location.resource == "RESERVES" && a.location.key == "singleton" {
+			if a.write {
+				foundWrite = true
+			} else {
+				foundRead = true
+			}
+		}
+	}
+	if !foundRead || !foundWrite {
+		t.Fatalf("astroport Swap prediction missing RESERVES read/write: %#v", fp.accesses)
+	}
+}
+
+func TestNestedTrackerWritesCommitOnlyOnMerge(t *testing.T) {
+	parent := newAccessTracker(nil)
+	child := newAccessTracker(parent)
+	key := testStoreKey("wasm")
+	store := storeIDFromName(key.Name())
+	id := exactAccessID(store, []byte("discard-or-commit"))
+	child.write(store, []byte("discard-or-commit"))
+	if _, ok := parent.writes.exact[id]; ok {
+		t.Fatal("nested write must not bubble before child cache commits")
+	}
+	child.mergeIntoParent()
+	if _, ok := parent.writes.exact[id]; !ok {
+		t.Fatal("nested write must bubble when child cache commits")
+	}
+}
+
+func TestExactAccessFingerprintDeterministicAndAllocFree(t *testing.T) {
+	store := storeIDFromName("wasm")
+	key := []byte("contract/storage/key/123456789")
+	want := exactAccessID(store, key)
+	if got := exactAccessID(store, key); got != want {
+		t.Fatalf("fingerprint changed: got=%d want=%d", got, want)
+	}
+	allocs := testing.AllocsPerRun(1000, func() {
+		_ = exactAccessID(store, key)
+	})
+	if allocs != 0 {
+		t.Fatalf("exactAccessID allocations/run=%f want 0", allocs)
+	}
+}
+
+func TestWriteSetDeduplicatesRepeatedWritesAndPreservesRangeKey(t *testing.T) {
+	store := storeIDFromName("wasm")
+	writes := newWriteSet(2)
+	writes.add(store, []byte("p/123"))
+	writes.add(store, []byte("p/123"))
+	if len(writes.exact) != 1 {
+		t.Fatalf("unique writes=%d want 1", len(writes.exact))
+	}
+	reads := newAccessTracker(nil)
+	reads.readRange(store, []byte("p/"), []byte("q/"))
+	if !readsConflictWithWrites(reads, &writes) {
+		t.Fatal("raw write key must remain available for range validation")
+	}
+}
+
+func TestPolicyReuseCountersAreConsistent(t *testing.T) {
+	stats := policyRunStats{Speculated: 100, Reused: 96, Replayed: 4, Attempts: 104, Reexecutions: 4}
+	if stats.Reused+stats.Replayed != stats.Speculated {
+		t.Fatalf("reuse+replay=%d want speculated=%d", stats.Reused+stats.Replayed, stats.Speculated)
+	}
+	if stats.Replayed != stats.Reexecutions {
+		t.Fatalf("replayed=%d reexecutions=%d", stats.Replayed, stats.Reexecutions)
+	}
+}

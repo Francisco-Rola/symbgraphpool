@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	wasmapp "github.com/CosmWasm/wasmd/app"
 	wasm "github.com/CosmWasm/wasmd/x/wasm"
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
+	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	abci "github.com/cometbft/cometbft/abci/types"
 	cmted25519 "github.com/cometbft/cometbft/crypto/ed25519"
 	tmproto "github.com/cometbft/cometbft/proto/tendermint/types"
@@ -37,10 +39,14 @@ import (
 )
 
 const (
-	cosmosSDKVersion = "v0.54.4"
-	wasmdVersion     = "v0.70.3"
-	baselineScope    = "actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-no-ante-abci"
-	chainID          = "vegeta-s3-wasmd-blockstm"
+	cosmosSDKVersion     = "v0.54.4"
+	wasmdVersion         = "v0.70.3"
+	baselineScope        = "actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-prepared-payloads-no-ante-abci"
+	directSerialScope    = "actual-wasmd-wasmvm-cosmos-sdk-direct-keeper-serial-prepared-payloads-no-ante-abci"
+	symbGraphStaticScope = "actual-wasmd-wasmvm-cosmos-sdk-symbgraph-static-symbolic-predict-prepared-payloads-single-cache-fingerprint-validate-replay-no-ante-abci"
+	vegetaScope          = "actual-wasmd-wasmvm-cosmos-sdk-vegeta-prepared-payloads-single-cache-fingerprint-speculate-order-replay-no-ante-abci"
+	profileBaselineScope = "actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-w4-pprof-unmeasured"
+	chainID              = "vegeta-s3-wasmd-blockstm"
 )
 
 type mapAppOptions map[string]any
@@ -111,26 +117,45 @@ type Calibration struct {
 }
 
 type Record struct {
-	SchemaVersion        int     `json:"schema_version"`
-	Dataset              string  `json:"dataset"`
-	Sample               int     `json:"sample"`
-	BlockNumber          uint64  `json:"block_number"`
-	Strategy             string  `json:"strategy"`
-	Workers              int     `json:"workers"`
-	MatchedSerialNanos   uint64  `json:"matched_serial_nanos"`
-	StrategyTotalNanos   uint64  `json:"strategy_total_nanos"`
-	MatchedSerialSpeedup float64 `json:"matched_serial_speedup"`
-	Transactions         int     `json:"transactions"`
-	ExecutionAttempts    uint64  `json:"execution_attempts"`
-	Reexecutions         uint64  `json:"reexecutions"`
-	SerialEquivalent     bool    `json:"serial_equivalent"`
-	ComputeMetric        string  `json:"compute_calibration_metric"`
-	ComputeScale         float64 `json:"compute_scale"`
-	GoIterationsPerNano  float64 `json:"go_iterations_per_nano"`
-	CosmosSDKVersion     string  `json:"cosmos_sdk_version"`
-	WasmdVersion         string  `json:"wasmd_version"`
-	BaselineScope        string  `json:"baseline_scope"`
-	BlockSTMPreEstimate  bool    `json:"block_stm_pre_estimate"`
+	SchemaVersion          int     `json:"schema_version"`
+	Dataset                string  `json:"dataset"`
+	Sample                 int     `json:"sample"`
+	BlockNumber            uint64  `json:"block_number"`
+	Strategy               string  `json:"strategy"`
+	Workers                int     `json:"workers"`
+	MatchedSerialNanos     uint64  `json:"matched_serial_nanos"`
+	StrategyTotalNanos     uint64  `json:"strategy_total_nanos"`
+	MatchedSerialSpeedup   float64 `json:"matched_serial_speedup"`
+	Transactions           int     `json:"transactions"`
+	ExecutionAttempts      uint64  `json:"execution_attempts"`
+	Reexecutions           uint64  `json:"reexecutions"`
+	SerialEquivalent       bool    `json:"serial_equivalent"`
+	ComputeMetric          string  `json:"compute_calibration_metric"`
+	ComputeScale           float64 `json:"compute_scale"`
+	GoIterationsPerNano    float64 `json:"go_iterations_per_nano"`
+	CosmosSDKVersion       string  `json:"cosmos_sdk_version"`
+	WasmdVersion           string  `json:"wasmd_version"`
+	BaselineScope          string  `json:"baseline_scope"`
+	BlockSTMPreEstimate    bool    `json:"block_stm_pre_estimate"`
+	SpeculatedTransactions uint64  `json:"speculated_transactions,omitempty"`
+	ReusedTransactions     uint64  `json:"reused_transactions,omitempty"`
+}
+
+type preparedCallKey struct {
+	blockNumber uint64
+	txIndex     int
+	callIndex   int
+}
+
+type preparedCall struct {
+	kind     string
+	contract sdk.AccAddress
+	sender   sdk.AccAddress
+	msg      []byte
+	funds    sdk.Coins
+	from     sdk.AccAddress
+	to       sdk.AccAddress
+	coins    sdk.Coins
 }
 
 type benchApp struct {
@@ -138,6 +163,8 @@ type benchApp struct {
 	permissioned *wasmkeeper.PermissionedKeeper
 	contracts    map[string]sdk.AccAddress
 	addresses    map[string]sdk.AccAddress
+	repl         map[string]string
+	prepared     map[preparedCallKey]preparedCall
 	home         string
 }
 
@@ -385,6 +412,16 @@ func benchmarkGenesisWithValidator(a *wasmapp.WasmApp) (map[string]json.RawMessa
 	return genesisState, nil
 }
 
+func commitFinalizeState(a *wasmapp.WasmApp) error {
+	// This harness mutates BaseApp's finalize-state directly via keepers and the
+	// standalone Block-STM runner rather than through BaseApp.FinalizeBlock.
+	// Flush that finalize cache into the root CommitMultiStore before Commit.
+	// Cosmos SDK exposes SimWriteState specifically for this simulation/test path.
+	a.SimWriteState()
+	_, err := a.Commit()
+	return err
+}
+
 func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchApp, error) {
 	home, e := os.MkdirTemp("", "symbgraph-wasmd-blockstm-")
 	if e != nil {
@@ -411,8 +448,8 @@ func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchAp
 	if _, e = a.InitChain(&abci.RequestInitChain{ChainId: chainID, InitialHeight: 1, Time: time.Unix(firstTime, 0), AppStateBytes: genesis}); e != nil {
 		return nil, e
 	}
-	if _, e = a.Commit(); e != nil {
-		return nil, e
+	if e = commitFinalizeState(a); e != nil {
+		return nil, fmt.Errorf("commit benchmark genesis state: %w", e)
 	}
 	// Height 1 is a benchmark-setup block used only to install/instantiate the
 	// frozen S3 contracts and seed state. Workload blocks begin at Cosmos height 2.
@@ -430,6 +467,11 @@ func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchAp
 		}
 	}
 	for _, s := range m.BankSeeds {
+		// BankSeed denominations model source-chain assets, not Cosmos governance
+		// policy. Mark each seeded denom send-enabled so Wasm BankMsg::Send and
+		// replayed bank_send calls can transfer the source native asset (e.g.
+		// unative) during setup and measured execution.
+		a.BankKeeper.SetSendEnabled(ctx, s.Denom, true)
 		i, ok := sdkmath.NewIntFromString(s.Amount)
 		if !ok {
 			return nil, fmt.Errorf("invalid seed amount %s", s.Amount)
@@ -437,6 +479,12 @@ func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchAp
 		if e := a.BankKeeper.UncheckedSetBalance(ctx, addrs[s.Address], sdk.NewCoin(s.Denom, i)); e != nil {
 			return nil, e
 		}
+	}
+	// The benchmark setup calls the Wasm keeper directly to upload code.
+	// Seed the x/wasm params collection before PermissionedKeeper.Create reads
+	// it. This setup-only write happens before any measured workload execution.
+	if e := a.WasmKeeper.SetParams(ctx, wasmtypes.DefaultParams()); e != nil {
+		return nil, fmt.Errorf("initialize wasm keeper params: %w", e)
 	}
 	pk := wasmkeeper.NewDefaultPermissionKeeper(&a.WasmKeeper)
 	codes := map[string]uint64{}
@@ -471,28 +519,36 @@ func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchAp
 		contracts[i.InstanceID] = addr
 		repl[i.InstanceID] = addr.String()
 	}
-	b := &benchApp{app: a, permissioned: pk, contracts: contracts, addresses: addrs, home: home}
+	b := &benchApp{
+		app:          a,
+		permissioned: pk,
+		contracts:    contracts,
+		addresses:    addrs,
+		repl:         repl,
+		home:         home,
+	}
 	for n, c := range m.PrimingCalls {
-		if e := b.executeCall(ctx, c, repl); e != nil {
+		if e := b.executeCall(ctx, c, b.repl); e != nil {
 			return nil, fmt.Errorf("priming call %d: %w", n, e)
 		}
 	}
-	if _, e = a.Commit(); e != nil {
-		return nil, e
+	if e := b.prepareWorkloadCalls(blocks); e != nil {
+		return nil, fmt.Errorf("prepare workload calls: %w", e)
+	}
+	if e = commitFinalizeState(a); e != nil {
+		return nil, fmt.Errorf("commit wasm benchmark setup state: %w", e)
+	}
+	committedCtx := a.NewContext(true)
+	for id, addr := range contracts {
+		if !a.WasmKeeper.HasContractInfo(committedCtx, addr) {
+			return nil, fmt.Errorf("wasm instance %s (%s) missing after setup commit", id, addr)
+		}
 	}
 	return b, nil
 }
-func (b *benchApp) close() { _ = b.app.Close(); _ = os.RemoveAll(b.home) }
-func (b *benchApp) replacements() map[string]string {
-	r := map[string]string{}
-	for k, v := range b.addresses {
-		r[k] = v.String()
-	}
-	for k, v := range b.contracts {
-		r[k] = v.String()
-	}
-	return r
-}
+func (b *benchApp) close()                          { _ = b.app.Close(); _ = os.RemoveAll(b.home) }
+func (b *benchApp) replacements() map[string]string { return b.repl }
+
 func (b *benchApp) executeCall(ctx sdk.Context, c CallSpec, repl map[string]string) error {
 	switch c.Kind {
 	case "noop":
@@ -518,20 +574,108 @@ func (b *benchApp) executeCall(ctx sdk.Context, c CallSpec, repl map[string]stri
 		return fmt.Errorf("unsupported call kind %s", c.Kind)
 	}
 }
-func (b *benchApp) executeTx(ctx sdk.Context, block ExecutionBlock, tx ExecutionTx, compute uint64) error {
-	if compute > 0 {
-		sink := deterministicCompute(compute)
-		runtime.KeepAlive(sink)
+
+func (b *benchApp) prepareWorkloadCalls(blocks []ExecutionBlock) error {
+	prepared := make(map[preparedCallKey]preparedCall)
+	for _, block := range blocks {
+		for _, tx := range block.Transactions {
+			for callIndex, c := range tx.Calls {
+				key := preparedCallKey{blockNumber: block.BlockNumber, txIndex: tx.TxIndex, callIndex: callIndex}
+				pc := preparedCall{kind: c.Kind}
+				switch c.Kind {
+				case "noop":
+				case "execute":
+					if c.InstanceID == nil || c.Sender == nil {
+						return fmt.Errorf("block %d tx %d call %d execute missing instance/sender", block.BlockNumber, tx.TxIndex, callIndex)
+					}
+					contract, ok := b.contracts[*c.InstanceID]
+					if !ok {
+						return fmt.Errorf("block %d tx %d call %d unknown instance %q", block.BlockNumber, tx.TxIndex, callIndex, *c.InstanceID)
+					}
+					sender, ok := b.addresses[*c.Sender]
+					if !ok {
+						return fmt.Errorf("block %d tx %d call %d unknown sender %q", block.BlockNumber, tx.TxIndex, callIndex, *c.Sender)
+					}
+					pc.contract = contract
+					pc.sender = sender
+					pc.msg = jsonBytes(c.Msg, b.repl)
+					pc.funds = coins(c.Funds)
+				case "query":
+					if c.InstanceID == nil {
+						return fmt.Errorf("block %d tx %d call %d query missing instance", block.BlockNumber, tx.TxIndex, callIndex)
+					}
+					contract, ok := b.contracts[*c.InstanceID]
+					if !ok {
+						return fmt.Errorf("block %d tx %d call %d unknown instance %q", block.BlockNumber, tx.TxIndex, callIndex, *c.InstanceID)
+					}
+					pc.contract = contract
+					pc.msg = jsonBytes(c.Msg, b.repl)
+				case "bank_send":
+					if c.From == nil || c.To == nil {
+						return fmt.Errorf("block %d tx %d call %d bank_send missing endpoint", block.BlockNumber, tx.TxIndex, callIndex)
+					}
+					from, ok := b.addresses[*c.From]
+					if !ok {
+						return fmt.Errorf("block %d tx %d call %d unknown bank sender %q", block.BlockNumber, tx.TxIndex, callIndex, *c.From)
+					}
+					to, ok := b.addresses[*c.To]
+					if !ok {
+						return fmt.Errorf("block %d tx %d call %d unknown bank recipient %q", block.BlockNumber, tx.TxIndex, callIndex, *c.To)
+					}
+					pc.from = from
+					pc.to = to
+					pc.coins = coins(c.Coins)
+				default:
+					return fmt.Errorf("block %d tx %d call %d unsupported call kind %s", block.BlockNumber, tx.TxIndex, callIndex, c.Kind)
+				}
+				prepared[key] = pc
+			}
+		}
 	}
-	repl := b.replacements()
-	outer, write := ctx.CacheContext()
+	b.prepared = prepared
+	return nil
+}
+
+func (b *benchApp) preparedCall(block ExecutionBlock, tx ExecutionTx, callIndex int) (preparedCall, error) {
+	key := preparedCallKey{blockNumber: block.BlockNumber, txIndex: tx.TxIndex, callIndex: callIndex}
+	pc, ok := b.prepared[key]
+	if !ok {
+		return preparedCall{}, fmt.Errorf("missing prepared call block=%d tx=%d call=%d", block.BlockNumber, tx.TxIndex, callIndex)
+	}
+	return pc, nil
+}
+
+func (b *benchApp) executePreparedCall(ctx sdk.Context, block ExecutionBlock, tx ExecutionTx, callIndex int) error {
+	pc, e := b.preparedCall(block, tx, callIndex)
+	if e != nil {
+		return e
+	}
+	switch pc.kind {
+	case "noop":
+		return nil
+	case "execute":
+		_, e := b.permissioned.Execute(ctx, pc.contract, pc.sender, pc.msg, pc.funds)
+		return e
+	case "query":
+		_, e := b.app.WasmKeeper.QuerySmart(ctx, pc.contract, pc.msg)
+		return e
+	case "bank_send":
+		return b.app.BankKeeper.SendCoins(ctx, pc.from, pc.to, pc.coins)
+	default:
+		return fmt.Errorf("unsupported prepared call kind %s", pc.kind)
+	}
+}
+
+func (b *benchApp) executeTxCalls(ctx sdk.Context, block ExecutionBlock, tx ExecutionTx) error {
 	for i := 0; i < len(tx.Calls); {
 		c := tx.Calls[i]
 		if c.SourceRevertScopeActionID != nil {
+			// Source-side reverted scopes still need to execute because their
+			// reads can affect control flow, but their writes must be discarded.
 			scope := *c.SourceRevertScopeActionID
-			child, _ := outer.CacheContext()
+			child, _ := ctx.CacheContext()
 			for i < len(tx.Calls) && tx.Calls[i].SourceRevertScopeActionID != nil && *tx.Calls[i].SourceRevertScopeActionID == scope {
-				if e := b.executeCall(child, tx.Calls[i], repl); e != nil {
+				if e := b.executePreparedCall(child, block, tx, i); e != nil {
 					break
 				}
 				i++
@@ -541,18 +685,51 @@ func (b *benchApp) executeTx(ctx sdk.Context, block ExecutionBlock, tx Execution
 			}
 			continue
 		}
-		if e := b.executeCall(outer, c, repl); e != nil {
-			if tx.SourceFailed {
-				return nil
-			}
+		if e := b.executePreparedCall(ctx, block, tx, i); e != nil {
 			return fmt.Errorf("block %d tx %d call %d: %w", block.BlockNumber, tx.TxIndex, i, e)
 		}
 		i++
+	}
+	return nil
+}
+
+func (b *benchApp) executeTx(ctx sdk.Context, block ExecutionBlock, tx ExecutionTx, compute uint64) error {
+	if compute > 0 {
+		sink := deterministicCompute(compute)
+		runtime.KeepAlive(sink)
+	}
+	outer, write := ctx.CacheContext()
+	if e := b.executeTxCalls(outer, block, tx); e != nil {
+		if tx.SourceFailed {
+			return nil
+		}
+		return e
 	}
 	if !tx.SourceFailed {
 		write()
 	}
 	return nil
+}
+
+// executeTxIsolated executes directly on a caller-owned private transaction
+// branch. SymbGraph/Vegeta already allocate a disposable CacheMultiStore for
+// each attempt, so another top-level CacheContext would make every Wasmd store
+// access traverse two transaction cache layers.
+//
+// The caller either writes this branch after validation or discards it. That
+// branch is therefore the transaction atomicity boundary. Expected-failure
+// transactions retain executeTx's inner disposable cache so all top-level
+// effects are discarded. Reverted source scopes still use child caches inside
+// executeTxCalls.
+func (b *benchApp) executeTxIsolated(ctx sdk.Context, block ExecutionBlock, tx ExecutionTx, compute uint64) error {
+	if tx.SourceFailed {
+		return b.executeTx(ctx, block, tx, compute)
+	}
+	if compute > 0 {
+		sink := deterministicCompute(compute)
+		runtime.KeepAlive(sink)
+	}
+	return b.executeTxCalls(ctx, block, tx)
 }
 
 func digestApp(a *wasmapp.WasmApp) [32]byte {
@@ -590,6 +767,130 @@ func txBytes(block ExecutionBlock) [][]byte {
 	return out
 }
 
+func writeRuntimeProfile(name, path string) error {
+	p := pprof.Lookup(name)
+	if p == nil {
+		return fmt.Errorf("runtime profile %q unavailable", name)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return p.WriteTo(f, 0)
+}
+
+func profileWasmdBlockSTM4(repoRoot string, m Manifest, blocks []ExecutionBlock, cal Calibration, profileDir string) error {
+	if profileDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		return err
+	}
+
+	b, err := newBenchApp(repoRoot, m, blocks)
+	if err != nil {
+		return fmt.Errorf("create 4-worker profiling app: %w", err)
+	}
+	defer b.close()
+
+	const workers = 4
+	const preEstimate = false
+	runner := txnrunner.NewSTMRunner(
+		sdk.TxDecoder(func([]byte) (sdk.Tx, error) { return nil, nil }),
+		b.app.GetStoreKeys(),
+		workers,
+		preEstimate,
+		func(storetypes.MultiStore) string { return sdk.DefaultBondDenom },
+	)
+
+	cpuPath := filepath.Join(profileDir, "cosmos-wasmd-block-stm-w4.cpu.pprof")
+	cpuFile, err := os.Create(cpuPath)
+	if err != nil {
+		return err
+	}
+	if err := pprof.StartCPUProfile(cpuFile); err != nil {
+		cpuFile.Close()
+		return err
+	}
+
+	// Profile only the 101-block TxRunner execution, not app creation or setup.
+	runtime.SetBlockProfileRate(1)
+	oldMutexFraction := runtime.SetMutexProfileFraction(1)
+	runErr := func() error {
+		for blockOffset, block := range blocks {
+			header := tmproto.Header{
+				ChainID: chainID,
+				Height:  int64(blockOffset + 2),
+				Time:    time.Unix(int64(block.Timestamp), 0),
+			}
+			blockCtx := b.app.NewNextBlockContext(header)
+			_, err := runner.Run(
+				context.Background(),
+				blockCtx.MultiStore(),
+				txBytes(block),
+				func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+					ctx := blockCtx.
+						WithMultiStore(ms).
+						WithEventManager(sdk.NewEventManager()).
+						WithGasMeter(storetypes.NewInfiniteGasMeter())
+					tx := block.Transactions[idx]
+					if err := b.executeTx(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); err != nil {
+						return &abci.ExecTxResult{Code: 1, Log: err.Error()}
+					}
+					return &abci.ExecTxResult{}
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("profile block %d: %w", block.BlockNumber, err)
+			}
+			if err := commitFinalizeState(b.app); err != nil {
+				return fmt.Errorf("profile commit block %d: %w", block.BlockNumber, err)
+			}
+		}
+		return nil
+	}()
+
+	pprof.StopCPUProfile()
+	cpuCloseErr := cpuFile.Close()
+	runtime.SetBlockProfileRate(0)
+	runtime.SetMutexProfileFraction(oldMutexFraction)
+
+	if runErr != nil {
+		return runErr
+	}
+	if cpuCloseErr != nil {
+		return cpuCloseErr
+	}
+	if err := writeRuntimeProfile("mutex", filepath.Join(profileDir, "cosmos-wasmd-block-stm-w4.mutex.pprof")); err != nil {
+		return err
+	}
+	if err := writeRuntimeProfile("block", filepath.Join(profileDir, "cosmos-wasmd-block-stm-w4.block.pprof")); err != nil {
+		return err
+	}
+
+	meta := map[string]any{
+		"dataset":                    "vegeta-s3-wasmd-blockstm",
+		"strategy":                   "cosmos-wasmd-block-stm",
+		"workers":                    workers,
+		"blocks":                     len(blocks),
+		"scope":                      profileBaselineScope,
+		"cosmos_sdk_version":         cosmosSDKVersion,
+		"wasmd_version":              wasmdVersion,
+		"compute_scale":              cal.Scale,
+		"go_iterations_per_nano":     cal.IterPerNano,
+		"block_stm_pre_estimate":     preEstimate,
+		"measurement_included":       false,
+		"profile_execution_separate": true,
+	}
+	metaBytes, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	metaBytes = append(metaBytes, '\n')
+	return os.WriteFile(filepath.Join(profileDir, "cosmos-wasmd-block-stm-w4.profile.json"), metaBytes, 0o644)
+}
+
 func main() {
 	manifestPath := flag.String("manifest", "", "native execution manifest")
 	planPath := flag.String("plan", "", "native execution plan JSONL")
@@ -603,6 +904,50 @@ func main() {
 	iterPerNs := flag.Float64("go-iterations-per-nano", 0, "pin Go compute calibration")
 	calOnly := flag.Bool("calibrate-only", false, "print compute iterations/ns and exit")
 	setupOnly := flag.Bool("setup-only", false, "initialize Wasmd + upload/instantiate/prime contracts, then exit")
+	profileDir := flag.String(
+		"profile-dir",
+		os.Getenv("VEGETA_S3_WASMD_PPROF_DIR"),
+		"write an additional unmeasured 4-worker Wasmd TxRunner CPU/mutex/block profile to this directory",
+	)
+	symbProfileDir := flag.String(
+		"symbgraph-profile-dir",
+		os.Getenv("VEGETA_S3_WASMD_SYMBGRAPH_PPROF_DIR"),
+		"write an additional unmeasured 2-worker SymbGraph CPU profile and allocation deltas to this directory",
+	)
+	profileOnlyRunner := flag.String(
+		"profile-only-runner",
+		"",
+		"run one isolated unmeasured profile and exit: direct-serial|outer-cache-serial|symbgraph-static",
+	)
+	profileOutputDir := flag.String(
+		"profile-output-dir",
+		"",
+		"output directory for --profile-only-runner CPU/allocs/mutex profiles",
+	)
+	profileOnlyKind := flag.String(
+		"profile-only-kind",
+		"cpu-alloc",
+		"isolated profile kind for --profile-only-runner: cpu-alloc|mutex",
+	)
+	symbolicDirDefault := os.Getenv("VEGETA_S3_SYMBOLIC_DIR")
+	if symbolicDirDefault == "" {
+		symbolicDirDefault = "benchmarks/symbolic/native-s3"
+	}
+	symbolicDir := flag.String(
+		"symbolic-dir",
+		symbolicDirDefault,
+		"source-derived S3 symbolic profile directory (same input used by the native Rust scheduler)",
+	)
+	investigateOverhead := flag.Bool(
+		"investigate-overhead",
+		boolEnv("VEGETA_S3_WASMD_INVESTIGATE"),
+		"run unmeasured Wasmd serial controls that isolate extra-cache and access-tracking overhead",
+	)
+	diagnosticsOutput := flag.String(
+		"diagnostics-output",
+		os.Getenv("VEGETA_S3_WASMD_DIAGNOSTICS_OUTPUT"),
+		"write Wasmd overhead diagnostics JSON (default: <output>.overhead.json)",
+	)
 	flag.Parse()
 	setupSDKConfig()
 	if *calOnly {
@@ -613,9 +958,20 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if !*setupOnly && (*weightsPath == "" || *output == "") {
+	if !*setupOnly && *weightsPath == "" {
 		flag.Usage()
 		os.Exit(2)
+	}
+	if !*setupOnly && *profileOnlyRunner == "" && *output == "" {
+		flag.Usage()
+		os.Exit(2)
+	}
+	if *profileOnlyRunner != "" && *profileOutputDir == "" {
+		flag.Usage()
+		os.Exit(2)
+	}
+	if *investigateOverhead && *diagnosticsOutput == "" && *output != "" {
+		*diagnosticsOutput = *output + ".overhead.json"
 	}
 	var manifest Manifest
 	if e := readJSON(*manifestPath, &manifest); e != nil {
@@ -644,6 +1000,17 @@ func main() {
 	if e != nil {
 		panic(e)
 	}
+	symbolicPredictor, e := loadSymbolicPredictor(*repoRoot, *symbolicDir)
+	if e != nil {
+		panic(e)
+	}
+	symbolicAccesses := buildSymbolicAccessIndex(symbolicPredictor, blocks)
+	if *profileOnlyRunner != "" {
+		if e := profileWasmdRunner(*repoRoot, manifest, blocks, cal, symbolicAccesses, *profileOnlyRunner, *profileOnlyKind, *workers, *profileOutputDir); e != nil {
+			panic(e)
+		}
+		return
+	}
 	f, e := os.Create(*output)
 	if e != nil {
 		panic(e)
@@ -651,7 +1018,12 @@ func main() {
 	defer f.Close()
 	w := bufio.NewWriter(f)
 	defer w.Flush()
-	fmt.Fprintf(os.Stderr, "wasmd Block-STM sdk=%s wasmd=%s workers=%d samples=%d go-iter/ns=%.6f\n", cosmosSDKVersion, wasmdVersion, *workers, *samples, *iterPerNs)
+	fmt.Fprintf(os.Stderr, "wasmd scheduler matrix sdk=%s wasmd=%s workers=%d samples=%d go-iter/ns=%.6f symbolic=%s\n", cosmosSDKVersion, wasmdVersion, *workers, *samples, *iterPerNs, symbolicAccessSource(symbolicPredictor))
+	var diagnosticDirectNanos uint64
+	var diagnosticSerialDigests [][32]byte
+	if *investigateOverhead {
+		diagnosticSerialDigests = make([][32]byte, len(blocks))
+	}
 	for sample := 0; sample < *samples; sample++ {
 		serial, e := newBenchApp(*repoRoot, manifest, blocks)
 		if e != nil {
@@ -659,31 +1031,94 @@ func main() {
 		}
 		stm, e := newBenchApp(*repoRoot, manifest, blocks)
 		if e != nil {
+			serial.close()
 			panic(e)
 		}
+		symb, e := newBenchApp(*repoRoot, manifest, blocks)
+		if e != nil {
+			serial.close()
+			stm.close()
+			panic(e)
+		}
+		vegeta, e := newBenchApp(*repoRoot, manifest, blocks)
+		if e != nil {
+			serial.close()
+			stm.close()
+			symb.close()
+			panic(e)
+		}
+
 		func() {
 			defer serial.close()
 			defer stm.close()
+			defer symb.close()
+			defer vegeta.close()
+
 			const preEstimate = false
-			runner := txnrunner.NewSTMRunner(sdk.TxDecoder(func([]byte) (sdk.Tx, error) { return nil, nil }), stm.app.GetStoreKeys(), *workers, preEstimate, func(storetypes.MultiStore) string { return sdk.DefaultBondDenom })
+			blockSTMRunner := txnrunner.NewSTMRunner(
+				sdk.TxDecoder(func([]byte) (sdk.Tx, error) { return nil, nil }),
+				stm.app.GetStoreKeys(),
+				*workers,
+				preEstimate,
+				func(storetypes.MultiStore) string { return sdk.DefaultBondDenom },
+			)
+			vegetaRunner := NewVegetaRunner(*workers)
+
 			for blockOffset, block := range blocks {
 				header := tmproto.Header{ChainID: chainID, Height: int64(blockOffset + 2), Time: time.Unix(int64(block.Timestamp), 0)}
+
+				// One direct Wasmd serial execution is the matched control for all
+				// schedulers in this block. All runners start from independently built,
+				// byte-identical setup state and execute the same Wasm artifacts.
 				serialCtx := serial.app.NewNextBlockContext(header)
-				ss := time.Now()
+				serialStart := time.Now()
 				for _, tx := range block.Transactions {
 					if e := serial.executeTx(serialCtx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
 						panic(e)
 					}
 				}
-				serialWall := time.Since(ss)
-				if _, e := serial.app.Commit(); e != nil {
+				serialWall := time.Since(serialStart)
+				if e := commitFinalizeState(serial.app); e != nil {
 					panic(e)
 				}
+				serialNanos := uint64(serialWall.Nanoseconds())
+				serialDigest := digestApp(serial.app)
+				if *investigateOverhead && sample == 0 {
+					diagnosticDirectNanos += serialNanos
+					diagnosticSerialDigests[blockOffset] = serialDigest
+				}
+				serialRec := Record{
+					SchemaVersion:        1,
+					Dataset:              "vegeta-s3-wasmd-blockstm",
+					Sample:               sample,
+					BlockNumber:          block.BlockNumber,
+					Strategy:             "cosmos-wasmd-direct-serial",
+					Workers:              *workers,
+					MatchedSerialNanos:   serialNanos,
+					StrategyTotalNanos:   serialNanos,
+					MatchedSerialSpeedup: 1,
+					Transactions:         len(block.Transactions),
+					ExecutionAttempts:    uint64(len(block.Transactions)),
+					Reexecutions:         0,
+					SerialEquivalent:     true,
+					ComputeMetric:        "steps",
+					ComputeScale:         *scale,
+					GoIterationsPerNano:  *iterPerNs,
+					CosmosSDKVersion:     cosmosSDKVersion,
+					WasmdVersion:         wasmdVersion,
+					BaselineScope:        directSerialScope,
+					BlockSTMPreEstimate:  false,
+				}
+				if e := json.NewEncoder(w).Encode(&serialRec); e != nil {
+					panic(e)
+				}
+
+				// Cosmos SDK Block-STM: native SDK MVCC/scheduler baseline.
 				stmBlockCtx := stm.app.NewNextBlockContext(header)
-				var attempts atomic.Uint64
-				start := time.Now()
-				_, e := runner.Run(context.Background(), stmBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
-					attempts.Add(1)
+				var stmAttempts atomic.Uint64
+				stmStart := time.Now()
+				_, e := blockSTMRunner.Run(context.Background(), stmBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+					stmAttempts.Add(1)
 					ctx := stmBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
 					tx := block.Transactions[idx]
 					if e := stm.executeTx(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
@@ -691,26 +1126,168 @@ func main() {
 					}
 					return &abci.ExecTxResult{}
 				})
-				wall := time.Since(start)
+				stmWall := time.Since(stmStart)
 				if e != nil {
 					panic(e)
 				}
-				if _, e := stm.app.Commit(); e != nil {
+				if e := commitFinalizeState(stm.app); e != nil {
 					panic(e)
 				}
-				eq := digestApp(serial.app) == digestApp(stm.app)
-				if !eq {
-					panic(fmt.Sprintf("state mismatch sample=%d block=%d", sample, block.BlockNumber))
+				stmEq := serialDigest == digestApp(stm.app)
+				if !stmEq {
+					panic(fmt.Sprintf("block-stm state mismatch sample=%d block=%d", sample, block.BlockNumber))
 				}
-				a := attempts.Load()
-				rec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-block-stm", Workers: *workers, MatchedSerialNanos: uint64(serialWall.Nanoseconds()), StrategyTotalNanos: uint64(wall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: a, Reexecutions: a - uint64(len(block.Transactions)), SerialEquivalent: eq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: baselineScope, BlockSTMPreEstimate: preEstimate}
-				if rec.StrategyTotalNanos > 0 {
-					rec.MatchedSerialSpeedup = float64(rec.MatchedSerialNanos) / float64(rec.StrategyTotalNanos)
+				stmA := stmAttempts.Load()
+				stmRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-block-stm", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(stmWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: stmA, Reexecutions: stmA - uint64(len(block.Transactions)), SerialEquivalent: stmEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: baselineScope, BlockSTMPreEstimate: preEstimate}
+				if stmRec.StrategyTotalNanos > 0 {
+					stmRec.MatchedSerialSpeedup = float64(stmRec.MatchedSerialNanos) / float64(stmRec.StrategyTotalNanos)
 				}
-				if e := json.NewEncoder(w).Encode(&rec); e != nil {
+				if e := json.NewEncoder(w).Encode(&stmRec); e != nil {
+					panic(e)
+				}
+
+				// SymbGraph static: pre-execution logical dependency waves, real
+				// Wasmd/WasmVM execution, and actual SDK access validation/replay.
+				symbBlockCtx := symb.app.NewNextBlockContext(header)
+				symbRunner := NewSymbGraphStaticRunner(*workers, block, symbolicAccesses)
+				symbStart := time.Now()
+				_, e = symbRunner.Run(context.Background(), symbBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+					ctx := symbBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
+					tx := block.Transactions[idx]
+					if e := symb.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
+						return &abci.ExecTxResult{Code: 1, Log: e.Error()}
+					}
+					return &abci.ExecTxResult{}
+				})
+				symbWall := time.Since(symbStart)
+				if e != nil {
+					panic(e)
+				}
+				if e := commitFinalizeState(symb.app); e != nil {
+					panic(e)
+				}
+				symbEq := serialDigest == digestApp(symb.app)
+				if !symbEq {
+					panic(fmt.Sprintf("symbgraph-static state mismatch sample=%d block=%d", sample, block.BlockNumber))
+				}
+				symbStats := symbRunner.LastStats()
+				symbRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-symbgraph-static", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(symbWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: symbStats.Attempts, Reexecutions: symbStats.Reexecutions, SerialEquivalent: symbEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: symbGraphStaticScope, BlockSTMPreEstimate: false, SpeculatedTransactions: symbStats.Speculated, ReusedTransactions: symbStats.Reused}
+				if symbRec.StrategyTotalNanos > 0 {
+					symbRec.MatchedSerialSpeedup = float64(symbRec.MatchedSerialNanos) / float64(symbRec.StrategyTotalNanos)
+				}
+				if e := json.NewEncoder(w).Encode(&symbRec); e != nil {
+					panic(e)
+				}
+
+				// Vegeta port: speculate all transactions on the same block-start
+				// snapshot, derive dependencies from actual Wasmd accesses, then
+				// deterministic order/replay against the shared SDK store.
+				vegetaBlockCtx := vegeta.app.NewNextBlockContext(header)
+				vegetaStart := time.Now()
+				_, e = vegetaRunner.Run(context.Background(), vegetaBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+					ctx := vegetaBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
+					tx := block.Transactions[idx]
+					if e := vegeta.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
+						return &abci.ExecTxResult{Code: 1, Log: e.Error()}
+					}
+					return &abci.ExecTxResult{}
+				})
+				vegetaWall := time.Since(vegetaStart)
+				if e != nil {
+					panic(e)
+				}
+				if e := commitFinalizeState(vegeta.app); e != nil {
+					panic(e)
+				}
+				vegetaEq := serialDigest == digestApp(vegeta.app)
+				if !vegetaEq {
+					panic(fmt.Sprintf("vegeta state mismatch sample=%d block=%d", sample, block.BlockNumber))
+				}
+				vegetaStats := vegetaRunner.LastStats()
+				vegetaRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-vegeta", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(vegetaWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: vegetaStats.Attempts, Reexecutions: vegetaStats.Reexecutions, SerialEquivalent: vegetaEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: vegetaScope, BlockSTMPreEstimate: false, SpeculatedTransactions: vegetaStats.Speculated, ReusedTransactions: vegetaStats.Reused}
+				if vegetaRec.StrategyTotalNanos > 0 {
+					vegetaRec.MatchedSerialSpeedup = float64(vegetaRec.MatchedSerialNanos) / float64(vegetaRec.StrategyTotalNanos)
+				}
+				if e := json.NewEncoder(w).Encode(&vegetaRec); e != nil {
 					panic(e)
 				}
 			}
 		}()
 	}
+
+	if *investigateOverhead {
+		if e := w.Flush(); e != nil {
+			panic(e)
+		}
+		fmt.Fprintln(os.Stderr, "running unmeasured Wasmd overhead controls (not publication timing)")
+		diag, e := runWasmdOverheadDiagnostics(
+			*repoRoot,
+			manifest,
+			blocks,
+			cal,
+			*workers,
+			diagnosticDirectNanos,
+			diagnosticSerialDigests,
+		)
+		if e != nil {
+			panic(e)
+		}
+		if e := writeWasmdOverheadDiagnostics(*diagnosticsOutput, diag); e != nil {
+			panic(e)
+		}
+		fmt.Fprintf(
+			os.Stderr,
+			"WASMD-OVERHEAD direct=%.3fs outer-cache=%.3fs (%.3fx direct) tracked-outer-cache=%.3fs (%.3fx direct; %.3fx outer-cache) tracked-single-cache=%.3fs (%.3fx direct) output=%s\n",
+			float64(diag.DirectSerialNanos)/1e9,
+			float64(diag.OuterCacheSerial.ActiveNanos)/1e9,
+			diag.OuterCacheVsDirect,
+			float64(diag.TrackedOuterCacheSerial.ActiveNanos)/1e9,
+			diag.TrackedVsDirect,
+			diag.TrackedVsOuterCache,
+			float64(diag.TrackedSingleCacheSerial.ActiveNanos)/1e9,
+			diag.TrackedSingleCacheVsDirect,
+			*diagnosticsOutput,
+		)
+		fmt.Fprintf(
+			os.Stderr,
+			"WASMD-OVERHEAD-PHASE outer-cache branch=%.3fs execute=%.3fs write=%.3fs | tracked-outer branch=%.3fs execute=%.3fs write=%.3fs | tracked-single branch=%.3fs execute=%.3fs write=%.3fs\n",
+			float64(diag.OuterCacheSerial.BranchNanos)/1e9,
+			float64(diag.OuterCacheSerial.ExecuteNanos)/1e9,
+			float64(diag.OuterCacheSerial.WriteNanos)/1e9,
+			float64(diag.TrackedOuterCacheSerial.BranchNanos)/1e9,
+			float64(diag.TrackedOuterCacheSerial.ExecuteNanos)/1e9,
+			float64(diag.TrackedOuterCacheSerial.WriteNanos)/1e9,
+			float64(diag.TrackedSingleCacheSerial.BranchNanos)/1e9,
+			float64(diag.TrackedSingleCacheSerial.ExecuteNanos)/1e9,
+			float64(diag.TrackedSingleCacheSerial.WriteNanos)/1e9,
+		)
+
+	}
+
+	// SymbGraph tracker profiling is also a separate replay. CPU profiling covers
+	// only the 101-block scheduler execution; allocation counters are deltas from
+	// runtime.MemStats around that same interval.
+	if *workers == 2 && *symbProfileDir != "" {
+		if e := w.Flush(); e != nil {
+			panic(e)
+		}
+		fmt.Fprintf(os.Stderr, "profiling unmeasured Wasmd SymbGraph workers=2 -> %s\n", *symbProfileDir)
+		if e := profileWasmdSymbGraph2(*repoRoot, manifest, blocks, cal, symbolicAccesses, *symbProfileDir); e != nil {
+			panic(e)
+		}
+	}
+
+	// Profiling is deliberately a separate replay after all benchmark records
+	// have been written, so pprof instrumentation cannot contaminate publication
+	// timings. Set --profile-dir or VEGETA_S3_WASMD_PPROF_DIR; only workers=4 runs it.
+	if *workers == 4 && *profileDir != "" {
+		if e := w.Flush(); e != nil {
+			panic(e)
+		}
+		fmt.Fprintf(os.Stderr, "profiling unmeasured Wasmd Block-STM workers=4 -> %s\n", *profileDir)
+		if e := profileWasmdBlockSTM4(*repoRoot, manifest, blocks, cal, *profileDir); e != nil {
+			panic(e)
+		}
+	}
+
 }

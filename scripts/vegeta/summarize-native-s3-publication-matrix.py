@@ -5,7 +5,13 @@ from collections import defaultdict
 from pathlib import Path
 
 NATIVE_ORDER = ["serial","aria-fb","vegeta","static","probability-only","cost-aware","exact-direct","exact-access"]
-EXTERNAL_ORDER = ["cosmos-block-stm-access-replay","cosmos-wasmd-block-stm"]
+EXTERNAL_ORDER = [
+    "cosmos-block-stm-access-replay",
+    "cosmos-wasmd-direct-serial",
+    "cosmos-wasmd-block-stm",
+    "cosmos-wasmd-symbgraph-static",
+    "cosmos-wasmd-vegeta",
+]
 
 
 def read_jsonl(path):
@@ -75,6 +81,8 @@ def external_per_sample(rows, family):
         tx=sum(int(r['transactions']) for r in g)
         attempts=sum(int(r.get('execution_attempts',0)) for r in g)
         rex=sum(int(r.get('reexecutions',0)) for r in g)
+        speculated=sum(int(r.get('speculated_transactions',0)) for r in g)
+        reused=sum(int(r.get('reused_transactions',0)) for r in g)
         block_ms=[int(r['strategy_total_nanos'])/1e6 for r in g]
         speed=serial/total if total else 0.0
         out.append({
@@ -83,7 +91,7 @@ def external_per_sample(rows, family):
             'active_wall_ms':total/1e6,'post_wall_ms':total/1e6,
             'post_p95_ms':percentile(block_ms,.95),'post_p99_ms':percentile(block_ms,.99),
             'active_speedup':speed,'net_active_speedup':speed,'post_speedup':speed,
-            'replay_rate':rex/tx if tx else 0.0,'reuse_rate':0.0,
+            'replay_rate':rex/tx if tx else 0.0,'reuse_rate':reused/speculated if speculated else 0.0,
             'serial_equivalent':all(bool(r['serial_equivalent']) for r in g),
             'scope':g[0].get('baseline_scope',family),'execution_attempts':attempts,
         })
@@ -125,7 +133,7 @@ def render(rows):
         'Vegeta S3 publication matrix — steps-calibrated native workload','',
         'Native rows execute the actual CosmWasm semantic port with VM lifecycle=reuse.',
         'cosmos-block-stm-access-replay uses the actual Cosmos SDK TxRunner Block-STM engine on exported native accesses + matched deterministic compute.',
-        'cosmos-wasmd-block-stm executes the actual native S3 Wasm artifacts through Wasmd/WasmVM + bank/account/wasm keepers under Cosmos SDK TxRunner Block-STM; it bypasses ante/signature/ABCI tx decoding.','',
+        'The four cosmos-wasmd-* rows execute identical native S3 Wasm artifacts through the same Wasmd/WasmVM + bank/account/wasm keeper substrate; only the scheduler/concurrency-control runner changes. Ante/signature/ABCI tx decoding is bypassed for all four.','',
         'Times are full 101-block sample totals; p95/p99 are per-block post-order/consensus-visible latencies.',
         '95% CIs are deterministic bootstrap intervals over independent full-range samples; n=1 development rows report n/a.','',
         'workers strategy                       n active-ms[95%CI]              post-ms[95%CI]                net-x[95%CI]            post-x[95%CI]           p95-ms p99-ms replay% reuse% serial-eq scope'
@@ -142,7 +150,7 @@ def render(rows):
         '', 'Publication interpretation:',
         '  static/probability-only/cost-aware are deployable SymbGraph schedulers; exact-access/exact-direct are evaluation oracles/diagnostics.',
         '  net-x divides native rows by the same worker/sample serial control to reduce paired-run order bias; external Block-STM rows use their own matched serial implementation.',
-        '  cosmos-wasmd-block-stm is the stronger app/VM baseline: real Wasmd/WasmVM execution under SDK Block-STM, but without ante/signature/ABCI decoding.',
+        '  cosmos-wasmd-direct-serial/block-stm/symbgraph-static/vegeta share the same real Wasmd/WasmVM execution substrate and matched direct-serial control.',
         '  keep cosmos-block-stm-access-replay as an algorithm/access-substrate diagnostic rather than a native CosmWasm result.',
     ]
     return '\n'.join(lines)+'\n'

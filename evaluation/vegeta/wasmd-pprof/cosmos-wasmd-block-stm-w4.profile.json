@@ -1,0 +1,14 @@
+{
+  "block_stm_pre_estimate": false,
+  "blocks": 101,
+  "compute_scale": 4,
+  "cosmos_sdk_version": "v0.54.4",
+  "dataset": "vegeta-s3-wasmd-blockstm",
+  "go_iterations_per_nano": 0.570279377,
+  "measurement_included": false,
+  "profile_execution_separate": true,
+  "scope": "actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-w4-pprof-unmeasured",
+  "strategy": "cosmos-wasmd-block-stm",
+  "wasmd_version": "v0.70.3",
+  "workers": 4
+}
