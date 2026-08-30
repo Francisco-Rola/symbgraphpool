@@ -97,12 +97,16 @@ The maintained controlled evaluator now runs five strategies over the same state
 
 - direct serial;
 - Cosmos SDK BlockSTM;
-- AriaFB-style post-consensus parallel discovery + Rule-2-like fallback + canonical validation;
-- Vegeta-style pre-consensus speculate-order-replay;
+- AriaFB same-Wasmd port with exact Rule-2 aborts and hot-chain dependency-DAG fallback;
+- Vegeta same-Wasmd `SpeculateMod`/`ParallelMod` port with hot-key proposal reordering, Rule-2 replay batches, and access-change handling;
 - Rust-ACG pre-consensus symbolic/adaptive scheduling + canonical validation/replay.
 
-AriaFB and Vegeta are explicitly mechanism adaptations that preserve the benchmark's canonical-order
-semantics; they are not claims of source-code identity with the upstream systems.
+AriaFB and Vegeta are mechanism ports over the same Wasmd execution substrate, not source-code identity
+with the upstream Ethereum engine. Unlike the earlier conservative baselines, they no longer force
+historical canonical-order semantics: Vegeta uses its proposal reorder and AriaFB uses a Rule-2-valid
+serialization. Each row is checked against an independent serial execution of that derived order; its
+`matched_serial_nanos` uses the same order, while `historical_serial_nanos` retains the common original-order
+timing control.
 
 ## Evaluation metrics
 

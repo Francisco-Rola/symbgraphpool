@@ -173,6 +173,7 @@ def aggregate_samples(per_sample: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row[f"{metric}_median"] = statistics.median(vals)
         row["reexecutions"] = statistics.fmean(float(s["reexecutions"]) for s in samples)
         row["forward_fallbacks"] = statistics.fmean(float(s["forward_fallbacks"]) for s in samples)
+        row["safety_replays"] = statistics.fmean(float(s["safety_replays"]) for s in samples)
         out.append(row)
     order = {s: i for i, s in enumerate(STRATEGY_ORDER)}
     out.sort(key=lambda r: (r["workers"], order.get(r["strategy"], 999), r["strategy"]))
@@ -203,6 +204,7 @@ def build_per_sample(rows: list[dict[str, Any]], window_ns: int) -> list[dict[st
         conflict_ns = sum(int(r.get("conflict_analysis_nanos", 0)) for r in rs)
         reexec = sum(int(r.get("reexecutions", 0)) for r in rs)
         forward = sum(int(r.get("forward_fallbacks", 0)) for r in rs)
+        safety = sum(int(r.get("safety_replays", 0)) for r in rs)
         serial_equivalent = all(bool(r.get("serial_equivalent", False)) for r in rs)
         if not serial_equivalent:
             raise SystemExit(f"state-equivalence failure strategy={strategy} workers={workers} sample={sample}")
@@ -242,6 +244,7 @@ def build_per_sample(rows: list[dict[str, Any]], window_ns: int) -> list[dict[st
             "reexecutions": reexec,
             "replay_pct": (100.0 * reexec / txs) if txs else 0.0,
             "forward_fallbacks": forward,
+            "safety_replays": safety,
             "serial_equivalent": serial_equivalent,
         })
 
@@ -296,8 +299,10 @@ def render(rows: list[dict[str, Any]], window_ns: int) -> str:
         "  * Use throughput_tps as the primary fixed-consensus-window throughput metric.",
         "  * Report post-x beside throughput: it isolates consensus-visible validation/replay from serial execution.",
         "  * Report wall-x and pre-consensus percentiles to show the real resource cost and whether speculation fits C.",
-        "  * AriaFB is the repository's same-VM Rule-2-like mechanism adaptation, not upstream Aria source code.",
-        "  * Vegeta is the repository's same-VM speculate-order-replay adaptation with canonical-order semantics.",
+        "  * AriaFB ports the attached repository's exact Rule-2 abort condition and hot-chain DAG fallback to Wasmd.",
+        "  * Vegeta ports SpeculateMod/ParallelMod hot-key proposal reordering, Rule-2 replay batches, and access-change handling to Wasmd.",
+        "  * serial_equivalent and matched_serial_nanos use each strategy's serial_reference_scope; historical_serial_nanos retains the common historical-order control.",
+        "  * safety_replays are conservative Wasmd-only fallbacks for dynamic key/range changes absent from the Ethereum access model.",
     ]
     return "\n".join(lines) + "\n"
 

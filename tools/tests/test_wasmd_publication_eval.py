@@ -120,7 +120,13 @@ class WasmdPublicationEvalTests(unittest.TestCase):
         self.assertIn('Strategy: "cosmos-wasmd-aria-fb"', main)
         self.assertIn("NewAriaFBRunner", main)
         self.assertIn("ariaRule2ForwardFallbacks", runner)
-        self.assertIn("commitSpeculationWithForcedReplay", runner)
+        self.assertIn("ariaDirectPredecessors", runner)
+        self.assertIn("ariaFallbackEdges", runner)
+        self.assertIn("vegetaProposalOrder", runner)
+        self.assertIn("nextVegetaBatch", runner)
+        self.assertIn("vegetaValidateBatch", runner)
+        self.assertIn('SerialReferenceScope: "aria-derived-serialization"', main)
+        self.assertIn('SerialReferenceScope: "vegeta-derived-serialization"', main)
 
 
 if __name__ == "__main__":

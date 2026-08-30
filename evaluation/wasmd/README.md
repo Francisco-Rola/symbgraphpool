@@ -6,23 +6,37 @@ multi-machine consensus integration and additional workloads.
 
 ## Systems in the controlled Wasmd matrix
 
-Every row executes the same translated Vegeta S3 transactions, native CosmWasm artifacts, bank
-state, Cosmos SDK v0.54.4 keepers, Wasmd v0.70.3/WasmVM runtime, deterministic compute calibration,
-and consensus-decided transaction order.
+Every row executes the same translated Vegeta S3 transaction payloads, native CosmWasm artifacts,
+bank state, Cosmos SDK v0.54.4 keepers, Wasmd v0.70.3/WasmVM runtime, and deterministic compute
+calibration. Serial, BlockSTM, and Rust-ACG preserve the historical block order. Vegeta is allowed to
+choose the proposal order exactly because proposal reordering is part of the upstream design; AriaFB
+commits a serialization admitted by Aria Rule 2 and its fallback DAG.
 
 1. **Serial** — direct canonical keeper execution after consensus.
 2. **BlockSTM** — Cosmos SDK `txnrunner.NewSTMRunner`; entirely post-consensus.
-3. **AriaFB** — same-VM mechanism adaptation of the repository's existing Rust AriaFB baseline:
-   fully parallel batch discovery after consensus, Aria Rule-2-like forward fallback, then canonical
-   concrete read-set validation/replay. This is not upstream Aria source code.
-4. **Vegeta** — same-VM speculate-order-replay adaptation: block-start speculation before consensus,
-   then canonical validation/replay after consensus. This preserves the benchmark's decided-order
-   state-machine semantics rather than claiming source-code identity with Vegeta.
+3. **AriaFB** — same-Wasmd port of the AriaFB path in the attached Vegeta repository: one
+   post-consensus Aria batch, exact Rule-2 abort condition (`WAW || (RAW && WAR)`), then the
+   repository's transitively reduced fallback DAG with hot-chain prioritization. Cosmos dynamic
+   key/range changes retain an additional conservative safety replay. This is a mechanism port to
+   Wasmd, not the upstream Ethereum execution engine.
+4. **Vegeta** — same-Wasmd port of `SpeculateMod` + `ParallelMod`: pre-consensus concrete access
+   discovery, hottest-key proposal reordering, `BuildDAGShowDependencies` dependency precedence,
+   Rule-2-compatible replay batches, and `checkR`/`checkW`-style known/new access handling. Cosmos
+   iterator ranges use a conservative extension because the Ethereum implementation has no direct
+   range-query analogue.
 5. **Rust-ACG** — offline symbolic profile graph + online atomic transaction candidate graph,
    adaptive feedback, risk-bounded Rust scheduler, dependency-ready Wasmd execution, concrete
    canonical validation/replay.
 
-Every measured block must finish with the same full state digest as the matched direct serial run.
+Every measured block must finish with the same full state digest as an independently executed serial
+reference for the ordering semantics of that strategy. Serial, BlockSTM, and Rust-ACG use the
+historical block order. Vegeta uses its derived proposal/serialization order, and AriaFB uses its
+derived Aria serialization. The record field `serial_reference_scope` makes this distinction explicit.
+`matched_serial_nanos` is the serial timing for that same reference scope, so `post-x` and `wall-x`
+remain apples-to-apples for reordered systems. `historical_serial_nanos` is also recorded on every row
+as the common historical-order timing control. Fixed-window throughput speedup is still computed from
+the explicit `cosmos-wasmd-direct-serial` row, so all systems share the same campaign-level throughput
+baseline.
 
 ## Primary timing model
 
@@ -63,7 +77,7 @@ The campaign also reports:
   total machine cost and must always be shown beside post-x.
 - pre-consensus p50/p95/p99/max and headroom relative to `C`;
 - validation time and replay-execution time where exposed by the runner;
-- reexecution/replay rate, forward fallbacks for AriaFB, and state equivalence.
+- reexecution/replay rate, AriaFB Rule-2 fallbacks, conservative Wasmd safety replays, and serialization equivalence.
 
 The fixed-window throughput metric is an evaluation model, not a claim that consensus itself is
 free. Final publication plots should include a sensitivity analysis with externally fixed consensus

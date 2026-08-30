@@ -1,11 +1,12 @@
 # Wasmd scheduler-port patch
 
-This harness evaluates four publication schedulers over the same S3 Wasm artifacts, Wasmd/WasmVM application state, Cosmos SDK keepers, deterministic compute calibration, and per-block direct-serial state oracle:
+This harness evaluates five publication schedulers over the same S3 Wasm artifacts, Wasmd/WasmVM application state, Cosmos SDK keepers, deterministic compute calibration, and per-block direct-serial state oracle:
 
 1. `cosmos-wasmd-direct-serial`
 2. `cosmos-wasmd-block-stm`
-3. `cosmos-wasmd-symbgraph-rust`
+3. `cosmos-wasmd-aria-fb`
 4. `cosmos-wasmd-vegeta`
+5. `cosmos-wasmd-symbgraph-rust`
 
 ## SymbGraph implementation
 
@@ -39,9 +40,10 @@ See [`README.rust-symbgraph-bridge.md`](README.rust-symbgraph-bridge.md) for the
 - Block-STM uses the SDK `txnrunner.STMRunner` unchanged.
 - SymbGraph Rust executes the Rust scheduler's `ordering_dependencies` as a ready DAG; scheduler levels are diagnostic only.
 - Go preserves the Phase-5 launch-visibility rule on private Cosmos cache branches, then uses actual KV/object/range fingerprints for canonical validation and replay.
-- Vegeta speculates block transactions from the block-start state and performs deterministic validation/replay in source transaction order.
-- SymbGraph Rust and Vegeta execute the real Wasmd transactions and use SDK `CacheMultiStore` branches.
+- Vegeta ports the attached repository's `SpeculateMod`/`ParallelMod`: concrete pre-execution, hottest-key proposal reordering, upstream dependency precedence, Rule-2-compatible replay batches, and access-change/new-key handling.
+- AriaFB ports the attached repository's Rule-2 abort test and transitively reduced hot-chain DAG fallback; Cosmos dynamic accesses have an additional conservative safety replay.
+- SymbGraph Rust, AriaFB, and Vegeta execute the real Wasmd transactions and use SDK `CacheMultiStore` branches.
 - Reads made in discarded nested cache contexts still participate in validation, which is required for reverted S3 call scopes.
-- Every scheduler's committed state digest is compared with direct serial after every block; a mismatch aborts the run.
+- Serial, BlockSTM, and Rust-ACG compare against historical-order direct serial. Vegeta and AriaFB compare against independent serial execution of their derived serialization order; `serial_reference_scope` records which oracle was used. Their `matched_serial_nanos` is timed on that same derived serial order, while `historical_serial_nanos` preserves the common original-order control. A mismatch aborts the run.
 
 The existing optional profiling passes remain separate replays and are not included in publication timing records.

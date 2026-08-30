@@ -14,8 +14,8 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
-// policyRunStats records actual execution attempts. An attempt beyond the
-// transaction count is a validation-triggered replay.
+// policyRunStats records concrete strategy work. Attempts counts executions in the
+// measured phase; Reexecutions counts executions beyond each strategy's initial batch.
 type policyRunStats struct {
 	Attempts              uint64
 	Reexecutions          uint64
@@ -29,6 +29,7 @@ type policyRunStats struct {
 	ConflictAnalysisNanos uint64
 	DiscoveredConflicts   uint64
 	ForwardFallbacks      uint64
+	SafetyReplays         uint64
 }
 
 type storeID uint64
@@ -713,10 +714,548 @@ func writeSetsConflict(left, right *writeSet) bool {
 	return false
 }
 
-// ariaRule2ForwardFallbacks implements the same AriaFB Rule-2-like adaptation
-// used by the Rust benchmark harness. For a later transaction j, force fallback
-// when it has a WAW dependency, or when it has both WAR and RAW dependencies
-// against earlier transactions in the consensus-decided order.
+type dependencyKinds uint8
+
+const (
+	dependencyWAW dependencyKinds = 1 << iota
+	dependencyRAW
+	dependencyWAR
+)
+
+func dependencyBetween(earlier, later *accessTracker) dependencyKinds {
+	if earlier == nil || later == nil {
+		return 0
+	}
+	var kinds dependencyKinds
+	if writeSetsConflict(&earlier.writes, &later.writes) {
+		kinds |= dependencyWAW
+	}
+	if readsConflictWithWrites(later, &earlier.writes) {
+		kinds |= dependencyRAW
+	}
+	if readsConflictWithWrites(earlier, &later.writes) {
+		kinds |= dependencyWAR
+	}
+	return kinds
+}
+
+// vegetaDependencyBetween matches BuildDAGShowDependencies in the attached
+// Vegeta repository. That code assigns exactly one dependency class per pair
+// with WAW taking precedence over RAW, which takes precedence over WAR.
+func vegetaDependencyBetween(earlier, later *accessTracker) dependencyKinds {
+	kinds := dependencyBetween(earlier, later)
+	switch {
+	case kinds&dependencyWAW != 0:
+		return dependencyWAW
+	case kinds&dependencyRAW != 0:
+		return dependencyRAW
+	case kinds&dependencyWAR != 0:
+		return dependencyWAR
+	default:
+		return 0
+	}
+}
+
+func writeSetHasID(writes *writeSet, id accessID) bool {
+	if writes == nil {
+		return false
+	}
+	if _, ok := writes.exact[id]; ok {
+		return true
+	}
+	_, ok := writes.collisions[id]
+	return ok
+}
+
+func writeSetContainsLocation(writes *writeSet, id accessID, loc writeLocation) bool {
+	if writes == nil {
+		return false
+	}
+	if existing, ok := writes.exact[id]; ok && sameWriteLocation(existing, loc.store, loc.key) {
+		return true
+	}
+	for _, collision := range writes.collisions[id] {
+		if sameWriteLocation(collision, loc.store, loc.key) {
+			return true
+		}
+	}
+	return false
+}
+
+func forEachWrite(writes *writeSet, fn func(accessID, writeLocation)) {
+	if writes == nil {
+		return
+	}
+	for id, loc := range writes.exact {
+		fn(id, loc)
+	}
+	for id, collisions := range writes.collisions {
+		for _, loc := range collisions {
+			fn(id, loc)
+		}
+	}
+}
+
+func trackerTouchesID(tracker *accessTracker, id accessID) bool {
+	if tracker == nil {
+		return false
+	}
+	if _, ok := tracker.reads[id]; ok {
+		return true
+	}
+	return writeSetHasID(&tracker.writes, id)
+}
+
+// hottestAccessChain mirrors Vegeta's findMostFrequentKey/findLongestChain idea:
+// count each exact key at most once per transaction and return the transactions
+// touching the most frequently accessed key in the supplied deterministic order.
+// Cosmos iterator ranges have no direct Ethereum equivalent, so they participate
+// in conflict validation but not in the hot-key reorder heuristic.
+func hottestAccessChain(indices []int, trackers []*accessTracker) []int {
+	counts := make(map[accessID]int)
+	for _, idx := range indices {
+		if idx < 0 || idx >= len(trackers) || trackers[idx] == nil {
+			continue
+		}
+		seen := make(map[accessID]struct{}, len(trackers[idx].reads)+len(trackers[idx].writes.exact))
+		for id := range trackers[idx].reads {
+			seen[id] = struct{}{}
+		}
+		for id := range trackers[idx].writes.exact {
+			seen[id] = struct{}{}
+		}
+		for id := range trackers[idx].writes.collisions {
+			seen[id] = struct{}{}
+		}
+		for id := range seen {
+			counts[id]++
+		}
+	}
+	var hot accessID
+	maxCount := 0
+	found := false
+	for id, count := range counts {
+		if !found || count > maxCount || (count == maxCount && id < hot) {
+			hot = id
+			maxCount = count
+			found = true
+		}
+	}
+	if !found || maxCount == 0 {
+		return nil
+	}
+	chain := make([]int, 0, maxCount)
+	for _, idx := range indices {
+		if idx >= 0 && idx < len(trackers) && trackerTouchesID(trackers[idx], hot) {
+			chain = append(chain, idx)
+		}
+	}
+	return chain
+}
+
+func vegetaProposalOrder(trackers []*accessTracker) []int {
+	indices := make([]int, len(trackers))
+	for i := range indices {
+		indices[i] = i
+	}
+	chain := hottestAccessChain(indices, trackers)
+	if len(chain) == 0 {
+		return indices
+	}
+	inChain := make(map[int]struct{}, len(chain))
+	proposal := make([]int, 0, len(indices))
+	for _, idx := range chain {
+		inChain[idx] = struct{}{}
+		proposal = append(proposal, idx)
+	}
+	for _, idx := range indices {
+		if _, ok := inChain[idx]; !ok {
+			proposal = append(proposal, idx)
+		}
+	}
+	return proposal
+}
+
+func buildDependencyMatrix(order []int, trackers []*accessTracker) ([][]dependencyKinds, uint64) {
+	matrix := make([][]dependencyKinds, len(order))
+	var discovered uint64
+	for laterPos := range order {
+		matrix[laterPos] = make([]dependencyKinds, len(order))
+		for earlierPos := 0; earlierPos < laterPos; earlierPos++ {
+			kinds := vegetaDependencyBetween(trackers[order[earlierPos]], trackers[order[laterPos]])
+			matrix[laterPos][earlierPos] = kinds
+			if kinds != 0 {
+				discovered++
+			}
+		}
+	}
+	return matrix, discovered
+}
+
+// nextVegetaBatch is the direct deterministic analogue of upstream
+// popNextBatch: a transaction is ready when it has no remaining WAW dependency
+// and does not simultaneously retain RAW and WAR dependencies.
+func nextVegetaBatch(matrix [][]dependencyKinds, done []bool) []int {
+	batch := make([]int, 0)
+	for laterPos := range matrix {
+		if done[laterPos] {
+			continue
+		}
+		var hasDep, hasWAW, hasRAW, hasWAR bool
+		for earlierPos := 0; earlierPos < laterPos; earlierPos++ {
+			if done[earlierPos] {
+				continue
+			}
+			kinds := matrix[laterPos][earlierPos]
+			if kinds == 0 {
+				continue
+			}
+			hasDep = true
+			hasWAW = hasWAW || kinds&dependencyWAW != 0
+			hasRAW = hasRAW || kinds&dependencyRAW != 0
+			hasWAR = hasWAR || kinds&dependencyWAR != 0
+		}
+		if !hasDep || (!hasWAW && (!hasRAW || !hasWAR)) {
+			batch = append(batch, laterPos)
+		}
+	}
+	return batch
+}
+
+func addOrderEdge(edges map[int]map[int]struct{}, from, to int) {
+	if from == to {
+		return
+	}
+	if edges[from] == nil {
+		edges[from] = make(map[int]struct{})
+	}
+	edges[from][to] = struct{}{}
+}
+
+func topologicalOrder(nodes []int, edges map[int]map[int]struct{}) ([]int, error) {
+	inSet := make(map[int]struct{}, len(nodes))
+	indegree := make(map[int]int, len(nodes))
+	for _, node := range nodes {
+		inSet[node] = struct{}{}
+		indegree[node] = 0
+	}
+	for from, tos := range edges {
+		if _, ok := inSet[from]; !ok {
+			continue
+		}
+		for to := range tos {
+			if _, ok := inSet[to]; ok {
+				indegree[to]++
+			}
+		}
+	}
+	remaining := append([]int(nil), nodes...)
+	sort.Ints(remaining)
+	out := make([]int, 0, len(nodes))
+	for len(out) < len(nodes) {
+		picked := -1
+		for _, node := range remaining {
+			if indegree[node] == 0 {
+				picked = node
+				break
+			}
+		}
+		if picked < 0 {
+			return nil, fmt.Errorf("dependency graph is cyclic for nodes=%v", nodes)
+		}
+		out = append(out, picked)
+		indegree[picked] = -1
+		for to := range edges[picked] {
+			if _, ok := indegree[to]; ok && indegree[to] > 0 {
+				indegree[to]--
+			}
+		}
+	}
+	return out, nil
+}
+
+func serializationOrderForSnapshot(nodes []int, positions map[int]int, trackers []*accessTracker) ([]int, error) {
+	edges := make(map[int]map[int]struct{})
+	for i := 0; i < len(nodes); i++ {
+		for j := i + 1; j < len(nodes); j++ {
+			left, right := nodes[i], nodes[j]
+			if positions[left] > positions[right] {
+				left, right = right, left
+			}
+			kinds := dependencyBetween(trackers[left], trackers[right])
+			if kinds&dependencyRAW != 0 && (kinds&dependencyWAR != 0 || kinds&dependencyWAW != 0) {
+				return nil, fmt.Errorf("snapshot batch contains non-serializable mixed dependency earlier=%d later=%d kinds=%d", left, right, kinds)
+			}
+			if kinds&dependencyRAW != 0 {
+				// Later reader must serialize before the earlier writer because both
+				// executions observed the same batch-start snapshot.
+				addOrderEdge(edges, right, left)
+			} else if kinds&(dependencyWAR|dependencyWAW) != 0 {
+				addOrderEdge(edges, left, right)
+			}
+		}
+	}
+	return topologicalOrder(nodes, edges)
+}
+
+type vegetaUniverse struct {
+	known  map[accessID]struct{}
+	writes writeSet
+}
+
+func buildVegetaUniverse(trackers []*accessTracker) vegetaUniverse {
+	universe := vegetaUniverse{known: make(map[accessID]struct{}), writes: newWriteSet(64)}
+	for _, tracker := range trackers {
+		if tracker == nil {
+			continue
+		}
+		for id := range tracker.reads {
+			universe.known[id] = struct{}{}
+		}
+		for id := range tracker.writes.exact {
+			universe.known[id] = struct{}{}
+		}
+		for id := range tracker.writes.collisions {
+			universe.known[id] = struct{}{}
+		}
+		universe.writes.merge(tracker.writes)
+	}
+	return universe
+}
+
+func sameStoreRange(left, right storeRange) bool {
+	return left.store == right.store && bytes.Equal(left.start, right.start) && bytes.Equal(left.end, right.end)
+}
+
+func trackerContainsRange(tracker *accessTracker, target storeRange) bool {
+	if tracker == nil {
+		return false
+	}
+	for _, existing := range tracker.ranges {
+		if sameStoreRange(existing, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func trackerReadCoversLocation(tracker *accessTracker, id accessID, loc writeLocation) bool {
+	if tracker == nil {
+		return false
+	}
+	if _, ok := tracker.reads[id]; ok {
+		return true
+	}
+	for _, r := range tracker.ranges {
+		if r.store == loc.store && keyInRange(loc.key, r.start, r.end) {
+			return true
+		}
+	}
+	return false
+}
+
+func rangeOverlapsWrites(target storeRange, writes *writeSet) bool {
+	overlaps := false
+	forEachWrite(writes, func(_ accessID, loc writeLocation) {
+		if loc.store == target.store && keyInRange(loc.key, target.start, target.end) {
+			overlaps = true
+		}
+	})
+	return overlaps
+}
+
+type vegetaAccessChange struct {
+	changed         bool
+	newReadIDs      map[accessID]struct{}
+	newReadRanges   []storeRange
+	newWriteIDs     map[accessID]struct{}
+	newWriteEntries writeSet
+}
+
+func classifyVegetaAccessChange(pre, actual *accessTracker, universe vegetaUniverse) vegetaAccessChange {
+	change := vegetaAccessChange{
+		newReadIDs:      make(map[accessID]struct{}),
+		newWriteIDs:     make(map[accessID]struct{}),
+		newWriteEntries: newWriteSet(4),
+	}
+	if pre == nil || actual == nil {
+		change.changed = true
+		return change
+	}
+	for id := range actual.reads {
+		if _, ok := pre.reads[id]; ok {
+			continue
+		}
+		if _, known := universe.known[id]; known {
+			if writeSetHasID(&universe.writes, id) {
+				change.changed = true
+			}
+			continue
+		}
+		change.newReadIDs[id] = struct{}{}
+	}
+	for _, actualRange := range actual.ranges {
+		if trackerContainsRange(pre, actualRange) {
+			continue
+		}
+		rangeChanged := false
+		forEachWrite(&universe.writes, func(id accessID, loc writeLocation) {
+			if rangeChanged || loc.store != actualRange.store || !keyInRange(loc.key, actualRange.start, actualRange.end) {
+				return
+			}
+			if !trackerReadCoversLocation(pre, id, loc) {
+				rangeChanged = true
+			}
+		})
+		if rangeChanged {
+			change.changed = true
+		} else {
+			change.newReadRanges = append(change.newReadRanges, actualRange)
+		}
+	}
+	forEachWrite(&actual.writes, func(id accessID, loc writeLocation) {
+		if writeSetContainsLocation(&pre.writes, id, loc) {
+			return
+		}
+		if _, known := universe.known[id]; known {
+			change.changed = true
+			return
+		}
+		change.newWriteIDs[id] = struct{}{}
+		change.newWriteEntries.addLocation(id, loc)
+	})
+	return change
+}
+
+func vegetaValidateBatch(
+	batch []int,
+	positions map[int]int,
+	preTrackers []*accessTracker,
+	actualTrackers []*accessTracker,
+	universe vegetaUniverse,
+) (map[int]struct{}, map[int]struct{}, []int, error) {
+	changes := make(map[int]vegetaAccessChange, len(batch))
+	candidates := make(map[int]struct{}, len(batch))
+	deferred := make(map[int]struct{})
+	immediate := make(map[int]struct{})
+	for _, idx := range batch {
+		change := classifyVegetaAccessChange(preTrackers[idx], actualTrackers[idx], universe)
+		changes[idx] = change
+		if change.changed {
+			deferred[idx] = struct{}{}
+		} else {
+			candidates[idx] = struct{}{}
+		}
+	}
+
+	// New keys were absent from the speculative global key dictionary. They are
+	// safe unless a transaction newly reads a key/range that another currently
+	// accepted transaction newly writes in the same batch. Iteratively removing
+	// such readers mirrors Vegeta's new-key check while giving deferred writers a
+	// deterministic final-serial position.
+	for {
+		newWrites := newWriteSet(8)
+		writers := make(map[accessID]map[int]struct{})
+		for idx := range candidates {
+			for id := range changes[idx].newWriteIDs {
+				if writers[id] == nil {
+					writers[id] = make(map[int]struct{})
+				}
+				writers[id][idx] = struct{}{}
+			}
+			newWrites.merge(changes[idx].newWriteEntries)
+		}
+		var remove []int
+		for idx := range candidates {
+			unsafe := false
+			for id := range changes[idx].newReadIDs {
+				for writer := range writers[id] {
+					if writer != idx {
+						unsafe = true
+						break
+					}
+				}
+				if unsafe {
+					break
+				}
+			}
+			if !unsafe {
+				for _, readRange := range changes[idx].newReadRanges {
+					forEachWrite(&newWrites, func(_ accessID, loc writeLocation) {
+						if !unsafe && loc.store == readRange.store && keyInRange(loc.key, readRange.start, readRange.end) {
+							// Self-only writes are allowed, as in upstream Vegeta.
+							for writer := range candidates {
+								if writer == idx {
+									continue
+								}
+								if writeSetContainsLocation(&changes[writer].newWriteEntries, exactAccessID(loc.store, loc.key), loc) {
+									unsafe = true
+									break
+								}
+							}
+						}
+					})
+					if unsafe {
+						break
+					}
+				}
+			}
+			if unsafe {
+				remove = append(remove, idx)
+			}
+		}
+		if len(remove) == 0 {
+			break
+		}
+		for _, idx := range remove {
+			delete(candidates, idx)
+			immediate[idx] = struct{}{}
+		}
+	}
+
+	// A new mixed dependency can appear only because the replay accessed keys
+	// absent from speculation. Preserve correctness by deferring the later
+	// proposal transaction instead of pretending the original DAG covered it.
+	for {
+		var remove = -1
+		candidateList := make([]int, 0, len(candidates))
+		for idx := range candidates {
+			candidateList = append(candidateList, idx)
+		}
+		sort.Slice(candidateList, func(i, j int) bool { return positions[candidateList[i]] < positions[candidateList[j]] })
+		for i := 0; i < len(candidateList) && remove < 0; i++ {
+			for j := i + 1; j < len(candidateList); j++ {
+				earlier, later := candidateList[i], candidateList[j]
+				kinds := dependencyBetween(actualTrackers[earlier], actualTrackers[later])
+				if kinds&dependencyRAW != 0 && (kinds&dependencyWAR != 0 || kinds&dependencyWAW != 0) {
+					remove = later
+					break
+				}
+			}
+		}
+		if remove < 0 {
+			break
+		}
+		delete(candidates, remove)
+		deferred[remove] = struct{}{}
+	}
+
+	accepted := make([]int, 0, len(candidates))
+	for _, idx := range batch {
+		if _, ok := candidates[idx]; ok {
+			accepted = append(accepted, idx)
+		}
+	}
+	order, err := serializationOrderForSnapshot(accepted, positions, actualTrackers)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return deferred, immediate, order, nil
+}
+
+// ariaRule2ForwardFallbacks implements Aria's Rule 2 exactly at the access-set
+// level used by the attached Vegeta repository: a later transaction aborts on
+// WAW, or when it has both RAW and WAR dependencies against earlier TIDs.
 func ariaRule2ForwardFallbacks(trackers []*accessTracker) (map[int]struct{}, uint64) {
 	fallbacks := make(map[int]struct{})
 	var discovered uint64
@@ -729,15 +1268,13 @@ func ariaRule2ForwardFallbacks(trackers []*accessTracker) (map[int]struct{}, uin
 			if trackers[left] == nil {
 				continue
 			}
-			pairWAW := writeSetsConflict(&trackers[left].writes, &trackers[right].writes)
-			pairWAR := readsConflictWithWrites(trackers[left], &trackers[right].writes)
-			pairRAW := readsConflictWithWrites(trackers[right], &trackers[left].writes)
-			if pairWAW || pairWAR || pairRAW {
+			kinds := dependencyBetween(trackers[left], trackers[right])
+			if kinds != 0 {
 				discovered++
 			}
-			waw = waw || pairWAW
-			war = war || pairWAR
-			raw = raw || pairRAW
+			waw = waw || kinds&dependencyWAW != 0
+			raw = raw || kinds&dependencyRAW != 0
+			war = war || kinds&dependencyWAR != 0
 		}
 		if waw || (war && raw) {
 			fallbacks[right] = struct{}{}
@@ -746,19 +1283,140 @@ func ariaRule2ForwardFallbacks(trackers []*accessTracker) (map[int]struct{}, uin
 	return fallbacks, discovered
 }
 
-// AriaFBRunner is a same-Wasmd mechanism adaptation of the AriaFB baseline used
-// by the Rust harness: all transactions execute after consensus against one
-// block-start snapshot, Rule-2-like forward dependencies are proactively sent
-// to fallback, and canonical concrete read validation conservatively replays
-// any additional stale receipt. It intentionally preserves consensus-decided
-// transaction order rather than claiming source-code identity with Aria.
+func ariaAcceptedSerializationOrder(trackers []*accessTracker, fallbacks map[int]struct{}) ([]int, error) {
+	nodes := make([]int, 0, len(trackers)-len(fallbacks))
+	positions := make(map[int]int, len(trackers))
+	for idx := range trackers {
+		positions[idx] = idx
+		if _, fallback := fallbacks[idx]; !fallback {
+			nodes = append(nodes, idx)
+		}
+	}
+	return serializationOrderForSnapshot(nodes, positions, trackers)
+}
+
+func ariaDirectPredecessors(fallback []int, trackers []*accessTracker) map[int]map[int]struct{} {
+	preds := make(map[int]map[int]struct{}, len(fallback))
+	// reachByPos mirrors upstream BuildDAG/buildReach. For each transaction i,
+	// scan earlier fallback TIDs backwards. Once an earlier vertex is already
+	// reachable through a direct predecessor, do not add a transitive edge.
+	reachByPos := make([]map[int]struct{}, len(fallback))
+	for laterPos, later := range fallback {
+		reach := map[int]struct{}{laterPos: {}}
+		direct := make(map[int]struct{})
+		for earlierPos := laterPos - 1; earlierPos >= 0; earlierPos-- {
+			if _, alreadyReachable := reach[earlierPos]; alreadyReachable {
+				continue
+			}
+			earlier := fallback[earlierPos]
+			if dependencyBetween(trackers[earlier], trackers[later]) == 0 {
+				continue
+			}
+			direct[earlier] = struct{}{}
+			reach[earlierPos] = struct{}{}
+			for reachable := range reachByPos[earlierPos] {
+				reach[reachable] = struct{}{}
+			}
+		}
+		reachByPos[laterPos] = reach
+		preds[later] = direct
+	}
+	return preds
+}
+
+func ariaFallbackEdges(fallback []int, trackers []*accessTracker) map[int]map[int]struct{} {
+	edges := make(map[int]map[int]struct{})
+	if len(fallback) == 0 {
+		return edges
+	}
+	directPreds := ariaDirectPredecessors(fallback, trackers)
+	chain := hottestAccessChain(fallback, trackers)
+	inChain := make(map[int]struct{}, len(chain))
+	for _, idx := range chain {
+		inChain[idx] = struct{}{}
+	}
+
+	// BuildDAG stores direct earlier predecessors for each later transaction.
+	// replayAriaP reverses only the direct edges entering a hot-chain node, then
+	// removes chain nodes from the ordinary DAG and executes the chain serially.
+	for later, predecessors := range directPreds {
+		_, laterChain := inChain[later]
+		for earlier := range predecessors {
+			_, earlierChain := inChain[earlier]
+			switch {
+			case laterChain && !earlierChain:
+				addOrderEdge(edges, later, earlier)
+			case laterChain && earlierChain:
+				// The serial hot-chain order below replaces internal DAG edges.
+			default:
+				addOrderEdge(edges, earlier, later)
+			}
+		}
+	}
+	for i := 1; i < len(chain); i++ {
+		addOrderEdge(edges, chain[i-1], chain[i])
+	}
+	return edges
+}
+
+func nextDAGWave(nodes []int, completed map[int]struct{}, edges map[int]map[int]struct{}) []int {
+	incoming := make(map[int]int, len(nodes))
+	for _, node := range nodes {
+		if _, done := completed[node]; !done {
+			incoming[node] = 0
+		}
+	}
+	for from, tos := range edges {
+		if _, fromDone := completed[from]; fromDone {
+			continue
+		}
+		if _, active := incoming[from]; !active {
+			continue
+		}
+		for to := range tos {
+			if _, active := incoming[to]; active {
+				incoming[to]++
+			}
+		}
+	}
+	wave := make([]int, 0)
+	for node, degree := range incoming {
+		if degree == 0 {
+			wave = append(wave, node)
+		}
+	}
+	sort.Ints(wave)
+	return wave
+}
+
+func trackersConflict(indices []int, trackers []*accessTracker) bool {
+	for i := 0; i < len(indices); i++ {
+		for j := i + 1; j < len(indices); j++ {
+			if dependencyBetween(trackers[indices[i]], trackers[indices[j]]) != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// AriaFBRunner adapts the attached repository's AriaFB mechanism to Wasmd:
+// execute one Aria batch on the block-start snapshot, accept Rule-2 survivors in
+// a serialization order consistent with that snapshot, and send Rule-2 aborts
+// through a hot-chain-prioritized dependency-DAG fallback replay. The fallback
+// keeps a conservative dynamic-access safety replay for Cosmos iterator/key-set
+// changes, which Ethereum's address-level implementation does not need.
 type AriaFBRunner struct {
-	workers int
-	last    policyRunStats
+	workers            int
+	last               policyRunStats
+	serializationOrder []int
 }
 
 func NewAriaFBRunner(workers int) *AriaFBRunner   { return &AriaFBRunner{workers: workers} }
 func (r *AriaFBRunner) LastStats() policyRunStats { return r.last }
+func (r *AriaFBRunner) LastSerializationOrder() []int {
+	return append([]int(nil), r.serializationOrder...)
+}
 
 func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs [][]byte, deliverTx sdk.DeliverTxFunc) ([]*abci.ExecTxResult, error) {
 	indices := make([]int, len(txs))
@@ -766,51 +1424,131 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 		indices[i] = i
 	}
 	results := make([]*abci.ExecTxResult, len(txs))
+	r.serializationOrder = r.serializationOrder[:0]
 	if len(indices) == 0 {
 		r.last = policyRunStats{}
 		return results, nil
 	}
+
 	stats := policyRunStats{Speculated: uint64(len(indices))}
 	postStarted := time.Now()
-	spec := speculateIndices(ctx, r.workers, ms, txs, indices, deliverTx)
-
+	initial := speculateIndices(ctx, r.workers, ms, txs, indices, deliverTx)
 	trackers := make([]*accessTracker, len(txs))
-	for idx, result := range spec {
-		if result.store != nil {
-			trackers[idx] = result.store.tracker
+	for idx, result := range initial {
+		if result.store == nil {
+			return nil, fmt.Errorf("aria-fb missing initial execution tx=%d", idx)
 		}
+		if result.result != nil && result.result.Code != 0 {
+			return nil, fmt.Errorf("aria-fb initial tx %d failed: %s", idx, result.result.Log)
+		}
+		trackers[idx] = result.store.tracker
 	}
-	analysisStarted := time.Now()
-	forced, discovered := ariaRule2ForwardFallbacks(trackers)
-	stats.ConflictAnalysisNanos = uint64(time.Since(analysisStarted).Nanoseconds())
-	stats.DiscoveredConflicts = discovered
-	stats.ForwardFallbacks = uint64(len(forced))
 
-	var attempts atomic.Uint64
-	priorWrites := newWriteSet(64)
-	if err := commitSpeculationWithForcedReplay(ms, txs, indices, spec, deliverTx, results, &priorWrites, &attempts, &stats, forced); err != nil {
+	analysisStarted := time.Now()
+	fallbacks, discovered := ariaRule2ForwardFallbacks(trackers)
+	acceptedOrder, err := ariaAcceptedSerializationOrder(trackers, fallbacks)
+	if err != nil {
 		return nil, err
 	}
+	stats.ConflictAnalysisNanos = uint64(time.Since(analysisStarted).Nanoseconds())
+	stats.DiscoveredConflicts = discovered
+	stats.ForwardFallbacks = uint64(len(fallbacks))
+	stats.Attempts = uint64(len(indices))
+	stats.Reused = uint64(len(indices) - len(fallbacks))
+	stats.Replayed = uint64(len(fallbacks))
+
+	for _, idx := range acceptedOrder {
+		initial[idx].store.Write()
+		results[idx] = initial[idx].result
+		r.serializationOrder = append(r.serializationOrder, idx)
+	}
+
+	fallback := make([]int, 0, len(fallbacks))
+	for idx := range fallbacks {
+		fallback = append(fallback, idx)
+	}
+	sort.Ints(fallback)
+	if len(fallback) > 0 {
+		replayStarted := time.Now()
+		edges := ariaFallbackEdges(fallback, trackers)
+		completed := make(map[int]struct{}, len(fallback))
+		for len(completed) < len(fallback) {
+			wave := nextDAGWave(fallback, completed, edges)
+			if len(wave) == 0 {
+				return nil, fmt.Errorf("aria-fb fallback DAG stalled completed=%d total=%d", len(completed), len(fallback))
+			}
+			waveSpec := speculateIndices(ctx, r.workers, ms, txs, wave, deliverTx)
+			stats.Attempts += uint64(len(wave))
+			waveTrackers := make([]*accessTracker, len(txs))
+			for _, idx := range wave {
+				result, ok := waveSpec[idx]
+				if !ok || result.store == nil {
+					return nil, fmt.Errorf("aria-fb missing fallback execution tx=%d", idx)
+				}
+				waveTrackers[idx] = result.store.tracker
+			}
+			validationStarted := time.Now()
+			changedConflict := trackersConflict(wave, waveTrackers)
+			stats.ValidationNanos += uint64(time.Since(validationStarted).Nanoseconds())
+			if changedConflict {
+				// The pre-execution DAG missed a conflict because a Wasmd execution
+				// changed its concrete access set. Re-run this wave serially from the
+				// current canonical state rather than committing a non-serializable batch.
+				for _, idx := range wave {
+					final := replayOne(ms, txs[idx], idx, deliverTx)
+					stats.Attempts++
+					stats.SafetyReplays++
+					if final.result != nil && final.result.Code != 0 {
+						return nil, fmt.Errorf("aria-fb safety replay tx %d failed: %s", idx, final.result.Log)
+					}
+					final.store.Write()
+					results[idx] = final.result
+					r.serializationOrder = append(r.serializationOrder, idx)
+				}
+			} else {
+				for _, idx := range wave {
+					result := waveSpec[idx]
+					if result.result != nil && result.result.Code != 0 {
+						return nil, fmt.Errorf("aria-fb fallback tx %d failed: %s", idx, result.result.Log)
+					}
+					result.store.Write()
+					results[idx] = result.result
+					r.serializationOrder = append(r.serializationOrder, idx)
+				}
+			}
+			for _, idx := range wave {
+				completed[idx] = struct{}{}
+			}
+		}
+		stats.ReplayExecutionNanos = uint64(time.Since(replayStarted).Nanoseconds())
+	}
 	stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
-	a := attempts.Load()
-	stats.Attempts = a
-	stats.Reexecutions = a - uint64(len(txs))
+	stats.Reexecutions = stats.Attempts - uint64(len(txs))
 	r.last = stats
 	return results, ctx.Err()
 }
 
-// VegetaRunner is a Wasmd/Cosmos port of Vegeta's speculate-order-replay
-// concurrency-control shape: execute the block speculatively, derive actual
-// dependencies from execution, then replay invalidated transactions in original
-// deterministic order. It is intentionally implemented over the same SDK cache
-// store and deliver closure used by the other Wasmd baselines.
+// VegetaRunner ports the attached repository's SpeculateMod + ParallelMod
+// semantics to the same Wasmd/Cosmos substrate. Pre-consensus execution is used
+// only to discover actual accesses, choose the hot-key proposal reorder, and
+// build the dependency matrix. After consensus every transaction is replayed in
+// Rule-2-compatible DAG batches; only access-set changes that cannot be safely
+// committed under Vegeta's new-key rules are executed again at the end.
 type VegetaRunner struct {
-	workers int
-	last    policyRunStats
+	workers            int
+	last               policyRunStats
+	proposalOrder      []int
+	serializationOrder []int
 }
 
 func NewVegetaRunner(workers int) *VegetaRunner   { return &VegetaRunner{workers: workers} }
 func (r *VegetaRunner) LastStats() policyRunStats { return r.last }
+func (r *VegetaRunner) LastProposalOrder() []int {
+	return append([]int(nil), r.proposalOrder...)
+}
+func (r *VegetaRunner) LastSerializationOrder() []int {
+	return append([]int(nil), r.serializationOrder...)
+}
 
 func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs [][]byte, deliverTx sdk.DeliverTxFunc) ([]*abci.ExecTxResult, error) {
 	indices := make([]int, len(txs))
@@ -818,24 +1556,127 @@ func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 		indices[i] = i
 	}
 	results := make([]*abci.ExecTxResult, len(txs))
+	r.proposalOrder = r.proposalOrder[:0]
+	r.serializationOrder = r.serializationOrder[:0]
 	if len(indices) == 0 {
 		r.last = policyRunStats{}
 		return results, nil
 	}
+
 	stats := policyRunStats{Speculated: uint64(len(indices))}
 	preStarted := time.Now()
-	spec := speculateIndices(ctx, r.workers, ms, txs, indices, deliverTx)
+	preSpec := speculateIndices(ctx, r.workers, ms, txs, indices, deliverTx)
+	preTrackers := make([]*accessTracker, len(txs))
+	for idx, result := range preSpec {
+		if result.store == nil {
+			return nil, fmt.Errorf("vegeta missing speculative execution tx=%d", idx)
+		}
+		if result.result != nil && result.result.Code != 0 {
+			return nil, fmt.Errorf("vegeta speculative tx %d failed: %s", idx, result.result.Log)
+		}
+		preTrackers[idx] = result.store.tracker
+	}
+	analysisStarted := time.Now()
+	r.proposalOrder = vegetaProposalOrder(preTrackers)
+	matrix, discovered := buildDependencyMatrix(r.proposalOrder, preTrackers)
+	universe := buildVegetaUniverse(preTrackers)
+	stats.ConflictAnalysisNanos = uint64(time.Since(analysisStarted).Nanoseconds())
+	stats.DiscoveredConflicts = discovered
 	stats.PreConsensusNanos = uint64(time.Since(preStarted).Nanoseconds())
-	var attempts atomic.Uint64
-	priorWrites := newWriteSet(64)
+
+	positions := make(map[int]int, len(r.proposalOrder))
+	for pos, idx := range r.proposalOrder {
+		positions[idx] = pos
+	}
+	done := make([]bool, len(r.proposalOrder))
+	deferred := make(map[int]struct{})
 	postStarted := time.Now()
-	if err := commitSpeculation(ms, txs, indices, spec, deliverTx, results, &priorWrites, &attempts, &stats); err != nil {
-		return nil, err
+	for completed := 0; completed < len(r.proposalOrder); {
+		batchPositions := nextVegetaBatch(matrix, done)
+		if len(batchPositions) == 0 {
+			return nil, fmt.Errorf("vegeta replay DAG stalled completed=%d total=%d", completed, len(r.proposalOrder))
+		}
+		batch := make([]int, 0, len(batchPositions))
+		for _, pos := range batchPositions {
+			batch = append(batch, r.proposalOrder[pos])
+		}
+		postSpec := speculateIndices(ctx, r.workers, ms, txs, batch, deliverTx)
+		stats.Attempts += uint64(len(batch))
+		actualTrackers := make([]*accessTracker, len(txs))
+		for _, idx := range batch {
+			result, ok := postSpec[idx]
+			if !ok || result.store == nil {
+				return nil, fmt.Errorf("vegeta missing replay execution tx=%d", idx)
+			}
+			if result.result != nil && result.result.Code != 0 {
+				return nil, fmt.Errorf("vegeta replay tx %d failed: %s", idx, result.result.Log)
+			}
+			actualTrackers[idx] = result.store.tracker
+		}
+		validationStarted := time.Now()
+		batchDeferred, immediateReplay, acceptedOrder, err := vegetaValidateBatch(batch, positions, preTrackers, actualTrackers, universe)
+		stats.ValidationNanos += uint64(time.Since(validationStarted).Nanoseconds())
+		if err != nil {
+			return nil, err
+		}
+		for idx := range batchDeferred {
+			deferred[idx] = struct{}{}
+		}
+		for _, idx := range acceptedOrder {
+			postSpec[idx].store.Write()
+			results[idx] = postSpec[idx].result
+			stats.Reused++
+			r.serializationOrder = append(r.serializationOrder, idx)
+		}
+		if len(immediateReplay) > 0 {
+			replayStarted := time.Now()
+			for _, idx := range r.proposalOrder {
+				if _, ok := immediateReplay[idx]; !ok {
+					continue
+				}
+				final := replayOne(ms, txs[idx], idx, deliverTx)
+				stats.Attempts++
+				stats.SafetyReplays++
+				if final.result != nil && final.result.Code != 0 {
+					return nil, fmt.Errorf("vegeta new-key replay tx %d failed: %s", idx, final.result.Log)
+				}
+				final.store.Write()
+				results[idx] = final.result
+				r.serializationOrder = append(r.serializationOrder, idx)
+			}
+			stats.ReplayExecutionNanos += uint64(time.Since(replayStarted).Nanoseconds())
+		}
+		for _, pos := range batchPositions {
+			if !done[pos] {
+				done[pos] = true
+				completed++
+			}
+		}
+	}
+
+	if len(deferred) > 0 {
+		replayStarted := time.Now()
+		for _, idx := range r.proposalOrder {
+			if _, ok := deferred[idx]; !ok {
+				continue
+			}
+			final := replayOne(ms, txs[idx], idx, deliverTx)
+			stats.Attempts++
+			stats.Replayed++
+			if final.result != nil && final.result.Code != 0 {
+				return nil, fmt.Errorf("vegeta final re-execution tx %d failed: %s", idx, final.result.Log)
+			}
+			final.store.Write()
+			results[idx] = final.result
+			r.serializationOrder = append(r.serializationOrder, idx)
+		}
+		stats.ReplayExecutionNanos += uint64(time.Since(replayStarted).Nanoseconds())
 	}
 	stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
-	a := attempts.Load()
-	stats.Attempts = a
-	stats.Reexecutions = a - uint64(len(txs))
+	// Upstream ParallelMod reports needReexecute (known access-set changes) as
+	// its re-execution count; immediate new-key safety replays are reported
+	// separately here as SafetyReplays.
+	stats.Reexecutions = uint64(len(deferred))
 	r.last = stats
 	return results, ctx.Err()
 }

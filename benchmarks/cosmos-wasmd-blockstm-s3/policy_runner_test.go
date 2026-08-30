@@ -310,9 +310,8 @@ func TestAriaRule2ForwardFallbacksMatchesRustHarnessConditions(t *testing.T) {
 	trackers[0].write(store, []byte("k0"))
 	trackers[1].write(store, []byte("k0"))
 
-	// tx2 only reads k0 -> RAW from tx0, but no WAR/WAW, so Rule 2 alone
-	// does not proactively fallback tx2. Canonical read validation remains the
-	// conservative correctness boundary during commit.
+	// tx2 only reads k0 -> RAW from tx0, but no WAR/WAW, so Rule 2 does
+	// not fallback tx2. Its snapshot result serializes before tx0's write.
 	trackers[2].read(store, []byte("k0"))
 
 	// tx3 reads k0 (RAW) and writes a key tx0 read (WAR), so it has both
@@ -333,5 +332,184 @@ func TestAriaRule2ForwardFallbacksMatchesRustHarnessConditions(t *testing.T) {
 	}
 	if _, ok := fallbacks[3]; !ok {
 		t.Fatal("combined WAR+RAW transaction must be a Rule-2 fallback")
+	}
+}
+
+func TestVegetaProposalOrderMovesHottestChainFirst(t *testing.T) {
+	store := storeIDFromName("wasm")
+	trackers := make([]*accessTracker, 4)
+	for i := range trackers {
+		trackers[i] = newAccessTracker(nil)
+	}
+	trackers[0].read(store, []byte("hot"))
+	trackers[1].read(store, []byte("cold"))
+	trackers[2].write(store, []byte("hot"))
+	trackers[3].read(store, []byte("hot"))
+
+	got := vegetaProposalOrder(trackers)
+	want := []int{0, 2, 3, 1}
+	if len(got) != len(want) {
+		t.Fatalf("proposal=%v want=%v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("proposal=%v want=%v", got, want)
+		}
+	}
+}
+
+func TestNextVegetaBatchMatchesUpstreamRule2(t *testing.T) {
+	store := storeIDFromName("wasm")
+
+	t.Run("raw only is ready", func(t *testing.T) {
+		trackers := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+		trackers[0].write(store, []byte("k"))
+		trackers[1].read(store, []byte("k"))
+		matrix, _ := buildDependencyMatrix([]int{0, 1}, trackers)
+		got := nextVegetaBatch(matrix, []bool{false, false})
+		if len(got) != 2 || got[0] != 0 || got[1] != 1 {
+			t.Fatalf("RAW-only batch=%v want [0 1]", got)
+		}
+	})
+
+	t.Run("waw blocks later", func(t *testing.T) {
+		trackers := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+		trackers[0].write(store, []byte("k"))
+		trackers[1].write(store, []byte("k"))
+		matrix, _ := buildDependencyMatrix([]int{0, 1}, trackers)
+		got := nextVegetaBatch(matrix, []bool{false, false})
+		if len(got) != 1 || got[0] != 0 {
+			t.Fatalf("WAW batch=%v want [0]", got)
+		}
+	})
+
+	t.Run("raw from one predecessor plus war from another blocks later", func(t *testing.T) {
+		trackers := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil), newAccessTracker(nil)}
+		// tx2 has RAW from tx0 and WAR against tx1. Upstream stores one
+		// dependency class per pair, so the two directions must come from
+		// distinct predecessor relationships to make Rule 2 block tx2.
+		trackers[0].write(store, []byte("a"))
+		trackers[1].read(store, []byte("b"))
+		trackers[2].read(store, []byte("a"))
+		trackers[2].write(store, []byte("b"))
+		matrix, _ := buildDependencyMatrix([]int{0, 1, 2}, trackers)
+		got := nextVegetaBatch(matrix, []bool{false, false, false})
+		if len(got) != 2 || got[0] != 0 || got[1] != 1 {
+			t.Fatalf("RAW+WAR batch=%v want [0 1]", got)
+		}
+	})
+
+	t.Run("waw precedence matches upstream", func(t *testing.T) {
+		trackers := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+		trackers[0].write(store, []byte("a"))
+		trackers[0].read(store, []byte("b"))
+		trackers[1].write(store, []byte("a"))
+		trackers[1].read(store, []byte("a"))
+		trackers[1].write(store, []byte("b"))
+		matrix, _ := buildDependencyMatrix([]int{0, 1}, trackers)
+		if got := matrix[1][0]; got != dependencyWAW {
+			t.Fatalf("dependency class=%d want WAW precedence=%d", got, dependencyWAW)
+		}
+	})
+}
+
+func TestSnapshotSerializationReversesRawOnly(t *testing.T) {
+	store := storeIDFromName("wasm")
+	trackers := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+	trackers[0].write(store, []byte("k"))
+	trackers[1].read(store, []byte("k"))
+	order, err := serializationOrderForSnapshot(
+		[]int{0, 1},
+		map[int]int{0: 0, 1: 1},
+		trackers,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 2 || order[0] != 1 || order[1] != 0 {
+		t.Fatalf("RAW-only serialization=%v want [1 0]", order)
+	}
+}
+
+func TestAriaDirectPredecessorsRemoveTransitiveConflictEdge(t *testing.T) {
+	store := storeIDFromName("wasm")
+	trackers := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil), newAccessTracker(nil)}
+	// All three touch the same key, so conflicts exist for 0-1, 1-2, and
+	// 0-2. Upstream BuildDAG keeps 1->2 and 0->1; 0->2 is transitive.
+	trackers[0].write(store, []byte("k"))
+	trackers[1].write(store, []byte("k"))
+	trackers[2].write(store, []byte("k"))
+	preds := ariaDirectPredecessors([]int{0, 1, 2}, trackers)
+	if _, ok := preds[1][0]; !ok {
+		t.Fatalf("preds=%v; tx1 must directly depend on tx0", preds)
+	}
+	if _, ok := preds[2][1]; !ok {
+		t.Fatalf("preds=%v; tx2 must directly depend on tx1", preds)
+	}
+	if _, ok := preds[2][0]; ok {
+		t.Fatalf("preds=%v; transitive tx0->tx2 edge must be removed", preds)
+	}
+}
+
+func TestAriaFallbackHotChainPrecedesEarlierConflictingNonChain(t *testing.T) {
+	store := storeIDFromName("wasm")
+	trackers := make([]*accessTracker, 4)
+	for i := range trackers {
+		trackers[i] = newAccessTracker(nil)
+	}
+	// x conflicts only between tx0 and tx1. hot is touched by tx1/2/3, so the
+	// hot chain is [1 2 3]. replayAriaP reverses tx0->tx1 into tx1->tx0.
+	trackers[0].write(store, []byte("x"))
+	trackers[1].read(store, []byte("x"))
+	trackers[1].read(store, []byte("hot"))
+	trackers[2].read(store, []byte("hot"))
+	trackers[3].read(store, []byte("hot"))
+	edges := ariaFallbackEdges([]int{0, 1, 2, 3}, trackers)
+	if _, ok := edges[1][0]; !ok {
+		t.Fatalf("fallback edges=%v; hot-chain tx1 must precede conflicting earlier tx0", edges)
+	}
+}
+
+func TestVegetaAccessChangeAllowsUnknownReadWithoutWriter(t *testing.T) {
+	store := storeIDFromName("wasm")
+	pre := newAccessTracker(nil)
+	actual := newAccessTracker(nil)
+	actual.read(store, []byte("new-key"))
+	change := classifyVegetaAccessChange(pre, actual, buildVegetaUniverse([]*accessTracker{pre}))
+	if change.changed {
+		t.Fatal("previously unseen read with no speculative writer should not force re-execution")
+	}
+	if len(change.newReadIDs) != 1 {
+		t.Fatalf("new reads=%d want 1", len(change.newReadIDs))
+	}
+}
+
+func TestVegetaBatchDefersUnknownReadOfConcurrentUnknownWrite(t *testing.T) {
+	store := storeIDFromName("wasm")
+	pre := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+	actual := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+	actual[0].read(store, []byte("new-key"))
+	actual[1].write(store, []byte("new-key"))
+	deferred, immediate, accepted, err := vegetaValidateBatch(
+		[]int{0, 1},
+		map[int]int{0: 0, 1: 1},
+		pre,
+		actual,
+		buildVegetaUniverse(pre),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deferred) != 0 {
+		t.Fatalf("final deferred=%v; new-key reader should replay immediately, not at block end", deferred)
+	}
+	if _, ok := immediate[0]; !ok {
+		t.Fatalf("immediate=%v; new reader must replay after the batch", immediate)
+	}
+	if _, ok := immediate[1]; ok {
+		t.Fatalf("immediate=%v; write-only new-key transaction should remain accepted", immediate)
+	}
+	if len(accepted) != 1 || accepted[0] != 1 {
+		t.Fatalf("accepted=%v want [1]", accepted)
 	}
 }

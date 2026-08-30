@@ -44,8 +44,8 @@ const (
 	baselineScope        = "actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-prepared-payloads-no-ante-abci"
 	directSerialScope    = "actual-wasmd-wasmvm-cosmos-sdk-direct-keeper-serial-prepared-payloads-no-ante-abci"
 	symbGraphStaticScope = "actual-wasmd-wasmvm-cosmos-sdk-symbgraph-static-diagnostic-symbolic-predict-single-cache-fingerprint-validate-replay-no-ante-abci"
-	vegetaScope          = "actual-wasmd-wasmvm-cosmos-sdk-vegeta-prepared-payloads-single-cache-fingerprint-speculate-order-replay-no-ante-abci"
-	ariaFBScope          = "actual-wasmd-wasmvm-cosmos-sdk-ariafb-post-consensus-batch-rule2-canonical-validate-replay-no-ante-abci"
+	vegetaScope          = "actual-wasmd-wasmvm-cosmos-sdk-vegeta-upstream-hotkey-reorder-rule2-dag-accesschange-reexecute-no-ante-abci"
+	ariaFBScope          = "actual-wasmd-wasmvm-cosmos-sdk-ariafb-upstream-rule2-hotchain-dag-fallback-no-ante-abci"
 	profileBaselineScope = "actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-w4-pprof-unmeasured"
 	chainID              = "vegeta-s3-wasmd-blockstm"
 )
@@ -125,6 +125,7 @@ type Record struct {
 	Strategy               string  `json:"strategy"`
 	Workers                int     `json:"workers"`
 	MatchedSerialNanos     uint64  `json:"matched_serial_nanos"`
+	HistoricalSerialNanos  uint64  `json:"historical_serial_nanos"`
 	StrategyTotalNanos     uint64  `json:"strategy_total_nanos"`
 	PreConsensusNanos      uint64  `json:"pre_consensus_nanos,omitempty"`
 	PostConsensusNanos     uint64  `json:"post_consensus_nanos,omitempty"`
@@ -133,6 +134,7 @@ type Record struct {
 	ExecutionAttempts      uint64  `json:"execution_attempts"`
 	Reexecutions           uint64  `json:"reexecutions"`
 	SerialEquivalent       bool    `json:"serial_equivalent"`
+	SerialReferenceScope   string  `json:"serial_reference_scope"`
 	ComputeMetric          string  `json:"compute_calibration_metric"`
 	ComputeScale           float64 `json:"compute_scale"`
 	GoIterationsPerNano    float64 `json:"go_iterations_per_nano"`
@@ -147,6 +149,7 @@ type Record struct {
 	ConflictAnalysisNanos  uint64  `json:"conflict_analysis_nanos,omitempty"`
 	DiscoveredConflicts    uint64  `json:"discovered_conflicts,omitempty"`
 	ForwardFallbacks       uint64  `json:"forward_fallbacks,omitempty"`
+	SafetyReplays          uint64  `json:"safety_replays,omitempty"`
 
 	SymbGraphVariant                      string                `json:"symbgraph_variant,omitempty"`
 	SymbPlanNanos                         uint64                `json:"symb_plan_nanos,omitempty"`
@@ -499,6 +502,33 @@ func commitFinalizeState(a *wasmapp.WasmApp) error {
 	a.SimWriteState()
 	_, err := a.Commit()
 	return err
+}
+
+func executeSerialOrderReference(b *benchApp, header tmproto.Header, block ExecutionBlock, cal Calibration, order []int) (uint64, error) {
+	if len(order) != len(block.Transactions) {
+		return 0, fmt.Errorf("serial reference order length mismatch block=%d order=%d txs=%d", block.BlockNumber, len(order), len(block.Transactions))
+	}
+	seen := make([]bool, len(block.Transactions))
+	ctx := b.app.NewNextBlockContext(header)
+	started := time.Now()
+	for _, idx := range order {
+		if idx < 0 || idx >= len(block.Transactions) {
+			return 0, fmt.Errorf("serial reference order index out of range block=%d idx=%d", block.BlockNumber, idx)
+		}
+		if seen[idx] {
+			return 0, fmt.Errorf("serial reference order duplicates block=%d idx=%d", block.BlockNumber, idx)
+		}
+		seen[idx] = true
+		tx := block.Transactions[idx]
+		if err := b.executeTx(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); err != nil {
+			return 0, err
+		}
+	}
+	wall := uint64(time.Since(started).Nanoseconds())
+	if err := commitFinalizeState(b.app); err != nil {
+		return 0, err
+	}
+	return wall, nil
 }
 
 func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchApp, error) {
@@ -1200,6 +1230,27 @@ func main() {
 			rustBridge.Close()
 			panic(e)
 		}
+		ariaReference, e := newBenchApp(*repoRoot, manifest, blocks)
+		if e != nil {
+			serial.close()
+			stm.close()
+			aria.close()
+			symb.close()
+			vegeta.close()
+			rustBridge.Close()
+			panic(e)
+		}
+		vegetaReference, e := newBenchApp(*repoRoot, manifest, blocks)
+		if e != nil {
+			serial.close()
+			stm.close()
+			aria.close()
+			symb.close()
+			vegeta.close()
+			ariaReference.close()
+			rustBridge.Close()
+			panic(e)
+		}
 
 		func() {
 			defer rustBridge.Close()
@@ -1208,6 +1259,8 @@ func main() {
 			defer aria.close()
 			defer symb.close()
 			defer vegeta.close()
+			defer ariaReference.close()
+			defer vegetaReference.close()
 
 			const preEstimate = false
 			blockSTMRunner := txnrunner.NewSTMRunner(
@@ -1223,9 +1276,10 @@ func main() {
 			for blockOffset, block := range blocks {
 				header := tmproto.Header{ChainID: chainID, Height: int64(blockOffset + 2), Time: time.Unix(int64(block.Timestamp), 0)}
 
-				// One direct Wasmd serial execution is the matched control for all
-				// schedulers in this block. All runners start from independently built,
-				// byte-identical setup state and execute the same Wasm artifacts.
+				// Historical-order direct Wasmd serial is the common throughput control.
+				// Serial, BlockSTM, and Rust-ACG also use it as their correctness oracle.
+				// Vegeta and AriaFB time and verify independent serial references for
+				// their own legal derived serialization orders below.
 				serialCtx := serial.app.NewNextBlockContext(header)
 				serialStart := time.Now()
 				for _, tx := range block.Transactions {
@@ -1244,27 +1298,29 @@ func main() {
 					diagnosticSerialDigests[blockOffset] = serialDigest
 				}
 				serialRec := Record{
-					SchemaVersion:        1,
-					Dataset:              "vegeta-s3-wasmd-blockstm",
-					Sample:               sample,
-					BlockNumber:          block.BlockNumber,
-					Strategy:             "cosmos-wasmd-direct-serial",
-					Workers:              *workers,
-					MatchedSerialNanos:   serialNanos,
-					StrategyTotalNanos:   serialNanos,
-					PostConsensusNanos:   serialNanos,
-					MatchedSerialSpeedup: 1,
-					Transactions:         len(block.Transactions),
-					ExecutionAttempts:    uint64(len(block.Transactions)),
-					Reexecutions:         0,
-					SerialEquivalent:     true,
-					ComputeMetric:        "steps",
-					ComputeScale:         *scale,
-					GoIterationsPerNano:  *iterPerNs,
-					CosmosSDKVersion:     cosmosSDKVersion,
-					WasmdVersion:         wasmdVersion,
-					BaselineScope:        directSerialScope,
-					BlockSTMPreEstimate:  false,
+					SchemaVersion:         1,
+					Dataset:               "vegeta-s3-wasmd-blockstm",
+					Sample:                sample,
+					BlockNumber:           block.BlockNumber,
+					Strategy:              "cosmos-wasmd-direct-serial",
+					Workers:               *workers,
+					MatchedSerialNanos:    serialNanos,
+					HistoricalSerialNanos: serialNanos,
+					StrategyTotalNanos:    serialNanos,
+					PostConsensusNanos:    serialNanos,
+					MatchedSerialSpeedup:  1,
+					Transactions:          len(block.Transactions),
+					ExecutionAttempts:     uint64(len(block.Transactions)),
+					Reexecutions:          0,
+					SerialEquivalent:      true,
+					SerialReferenceScope:  "historical-block-order",
+					ComputeMetric:         "steps",
+					ComputeScale:          *scale,
+					GoIterationsPerNano:   *iterPerNs,
+					CosmosSDKVersion:      cosmosSDKVersion,
+					WasmdVersion:          wasmdVersion,
+					BaselineScope:         directSerialScope,
+					BlockSTMPreEstimate:   false,
 				}
 				if e := json.NewEncoder(w).Encode(&serialRec); e != nil {
 					panic(e)
@@ -1296,7 +1352,7 @@ func main() {
 						panic(fmt.Sprintf("block-stm state mismatch sample=%d block=%d", sample, block.BlockNumber))
 					}
 					stmA := stmAttempts.Load()
-					stmRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-block-stm", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(stmWall.Nanoseconds()), PostConsensusNanos: uint64(stmWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: stmA, Reexecutions: stmA - uint64(len(block.Transactions)), SerialEquivalent: stmEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: baselineScope, BlockSTMPreEstimate: preEstimate}
+					stmRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-block-stm", Workers: *workers, MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: uint64(stmWall.Nanoseconds()), PostConsensusNanos: uint64(stmWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: stmA, Reexecutions: stmA - uint64(len(block.Transactions)), SerialEquivalent: stmEq, SerialReferenceScope: "historical-block-order", ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: baselineScope, BlockSTMPreEstimate: preEstimate}
 					if stmRec.StrategyTotalNanos > 0 {
 						stmRec.MatchedSerialSpeedup = float64(stmRec.MatchedSerialNanos) / float64(stmRec.StrategyTotalNanos)
 					}
@@ -1307,10 +1363,10 @@ func main() {
 				}
 
 				if !*rustACGOnly {
-					// AriaFB mechanism adaptation on the same Wasmd/WasmVM state machine.
-					// The whole batch executes after consensus against one block-start
-					// snapshot; Rule-2-like forward dependencies are proactively replayed,
-					// with canonical concrete validation as the final correctness boundary.
+					// AriaFB on the same Wasmd/WasmVM state machine. The initial Aria
+					// batch executes after consensus from one block-start snapshot. Rule-2
+					// survivors commit in a valid Aria serialization order; aborts use the
+					// attached Vegeta repository's hot-chain dependency-DAG fallback.
 					ariaBlockCtx := aria.app.NewNextBlockContext(header)
 					ariaStart := time.Now()
 					_, e = ariaRunner.Run(context.Background(), ariaBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
@@ -1328,18 +1384,22 @@ func main() {
 					if e := commitFinalizeState(aria.app); e != nil {
 						panic(e)
 					}
-					ariaEq := serialDigest == digestApp(aria.app)
+					ariaSerialNanos, e := executeSerialOrderReference(ariaReference, header, block, cal, ariaRunner.LastSerializationOrder())
+					if e != nil {
+						panic(e)
+					}
+					ariaEq := digestApp(ariaReference.app) == digestApp(aria.app)
 					if !ariaEq {
-						panic(fmt.Sprintf("aria-fb state mismatch sample=%d block=%d", sample, block.BlockNumber))
+						panic(fmt.Sprintf("aria-fb serialization mismatch sample=%d block=%d order=%v", sample, block.BlockNumber, ariaRunner.LastSerializationOrder()))
 					}
 					ariaStats := ariaRunner.LastStats()
 					ariaRec := Record{
 						SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-aria-fb", Workers: *workers,
-						MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(ariaWall.Nanoseconds()), PostConsensusNanos: ariaStats.PostConsensusNanos, Transactions: len(block.Transactions),
-						ExecutionAttempts: ariaStats.Attempts, Reexecutions: ariaStats.Reexecutions, SerialEquivalent: ariaEq, ComputeMetric: "steps", ComputeScale: *scale,
+						MatchedSerialNanos: ariaSerialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: uint64(ariaWall.Nanoseconds()), PostConsensusNanos: ariaStats.PostConsensusNanos, Transactions: len(block.Transactions),
+						ExecutionAttempts: ariaStats.Attempts, Reexecutions: ariaStats.Reexecutions, SerialEquivalent: ariaEq, SerialReferenceScope: "aria-derived-serialization", ComputeMetric: "steps", ComputeScale: *scale,
 						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: ariaFBScope, BlockSTMPreEstimate: false,
 						SpeculatedTransactions: ariaStats.Speculated, ReusedTransactions: ariaStats.Reused, ValidationNanos: ariaStats.ValidationNanos, ReplayExecutionNanos: ariaStats.ReplayExecutionNanos,
-						ConflictAnalysisNanos: ariaStats.ConflictAnalysisNanos, DiscoveredConflicts: ariaStats.DiscoveredConflicts, ForwardFallbacks: ariaStats.ForwardFallbacks,
+						ConflictAnalysisNanos: ariaStats.ConflictAnalysisNanos, DiscoveredConflicts: ariaStats.DiscoveredConflicts, ForwardFallbacks: ariaStats.ForwardFallbacks, SafetyReplays: ariaStats.SafetyReplays,
 					}
 					if ariaRec.StrategyTotalNanos > 0 {
 						ariaRec.MatchedSerialSpeedup = float64(ariaRec.MatchedSerialNanos) / float64(ariaRec.StrategyTotalNanos)
@@ -1385,9 +1445,9 @@ func main() {
 				symbPlan := symbRunner.LastPlan()
 				symbRec := Record{
 					SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber,
-					Strategy: "cosmos-wasmd-symbgraph-rust", Workers: *workers, MatchedSerialNanos: serialNanos,
+					Strategy: "cosmos-wasmd-symbgraph-rust", Workers: *workers, MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos,
 					StrategyTotalNanos: uint64(symbWall.Nanoseconds()), PreConsensusNanos: symbStats.PreConsensusNanos, PostConsensusNanos: symbStats.PostConsensusNanos, Transactions: len(block.Transactions), ExecutionAttempts: symbStats.Attempts,
-					Reexecutions: symbStats.Reexecutions, SerialEquivalent: symbEq, ComputeMetric: "steps", ComputeScale: *scale,
+					Reexecutions: symbStats.Reexecutions, SerialEquivalent: symbEq, SerialReferenceScope: "historical-block-order", ComputeMetric: "steps", ComputeScale: *scale,
 					GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion,
 					BaselineScope: rustRunnerOptions.Scope(), BlockSTMPreEstimate: false, SpeculatedTransactions: symbStats.Speculated,
 					ReusedTransactions: symbStats.Reused, ValidationNanos: symbDiag.ValidationNanos, ReplayExecutionNanos: symbDiag.ReplayExecutionNanos,
@@ -1432,9 +1492,10 @@ func main() {
 				}
 
 				if !*rustACGOnly {
-					// Vegeta port: speculate all transactions on the same block-start
-					// snapshot, derive dependencies from actual Wasmd accesses, then
-					// deterministic order/replay against the shared SDK store.
+					// Vegeta SpeculateMod + ParallelMod adaptation: pre-consensus
+					// execution discovers actual accesses and a hot-key proposal reorder;
+					// after consensus every transaction executes in Rule-2-compatible DAG
+					// batches and only unsafe access-set changes are executed again.
 					vegetaBlockCtx := vegeta.app.NewNextBlockContext(header)
 					vegetaStart := time.Now()
 					_, e = vegetaRunner.Run(context.Background(), vegetaBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
@@ -1452,12 +1513,23 @@ func main() {
 					if e := commitFinalizeState(vegeta.app); e != nil {
 						panic(e)
 					}
-					vegetaEq := serialDigest == digestApp(vegeta.app)
+					vegetaSerialNanos, e := executeSerialOrderReference(vegetaReference, header, block, cal, vegetaRunner.LastSerializationOrder())
+					if e != nil {
+						panic(e)
+					}
+					vegetaEq := digestApp(vegetaReference.app) == digestApp(vegeta.app)
 					if !vegetaEq {
-						panic(fmt.Sprintf("vegeta state mismatch sample=%d block=%d", sample, block.BlockNumber))
+						panic(fmt.Sprintf("vegeta serialization mismatch sample=%d block=%d proposal=%v serialization=%v", sample, block.BlockNumber, vegetaRunner.LastProposalOrder(), vegetaRunner.LastSerializationOrder()))
 					}
 					vegetaStats := vegetaRunner.LastStats()
-					vegetaRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-vegeta", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(vegetaWall.Nanoseconds()), PreConsensusNanos: vegetaStats.PreConsensusNanos, PostConsensusNanos: vegetaStats.PostConsensusNanos, Transactions: len(block.Transactions), ExecutionAttempts: vegetaStats.Attempts, Reexecutions: vegetaStats.Reexecutions, SerialEquivalent: vegetaEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: vegetaScope, BlockSTMPreEstimate: false, SpeculatedTransactions: vegetaStats.Speculated, ReusedTransactions: vegetaStats.Reused, ValidationNanos: vegetaStats.ValidationNanos, ReplayExecutionNanos: vegetaStats.ReplayExecutionNanos}
+					vegetaRec := Record{
+						SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-vegeta", Workers: *workers,
+						MatchedSerialNanos: vegetaSerialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: uint64(vegetaWall.Nanoseconds()), PreConsensusNanos: vegetaStats.PreConsensusNanos, PostConsensusNanos: vegetaStats.PostConsensusNanos, Transactions: len(block.Transactions),
+						ExecutionAttempts: vegetaStats.Attempts, Reexecutions: vegetaStats.Reexecutions, SerialEquivalent: vegetaEq, SerialReferenceScope: "vegeta-derived-serialization", ComputeMetric: "steps", ComputeScale: *scale,
+						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: vegetaScope, BlockSTMPreEstimate: false,
+						SpeculatedTransactions: vegetaStats.Speculated, ReusedTransactions: vegetaStats.Reused, ValidationNanos: vegetaStats.ValidationNanos, ReplayExecutionNanos: vegetaStats.ReplayExecutionNanos,
+						ConflictAnalysisNanos: vegetaStats.ConflictAnalysisNanos, DiscoveredConflicts: vegetaStats.DiscoveredConflicts, ForwardFallbacks: vegetaStats.ForwardFallbacks, SafetyReplays: vegetaStats.SafetyReplays,
+					}
 					if vegetaRec.StrategyTotalNanos > 0 {
 						vegetaRec.MatchedSerialSpeedup = float64(vegetaRec.MatchedSerialNanos) / float64(vegetaRec.StrategyTotalNanos)
 					}
