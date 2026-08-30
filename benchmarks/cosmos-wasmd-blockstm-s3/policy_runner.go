@@ -1188,7 +1188,8 @@ func vegetaValidateBatch(
 								if writer == idx {
 									continue
 								}
-								if writeSetContainsLocation(&changes[writer].newWriteEntries, exactAccessID(loc.store, loc.key), loc) {
+								writerChange := changes[writer]
+								if writeSetContainsLocation(&writerChange.newWriteEntries, exactAccessID(loc.store, loc.key), loc) {
 									unsafe = true
 									break
 								}
