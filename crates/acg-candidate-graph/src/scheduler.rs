@@ -459,7 +459,11 @@ struct SchedulingAnalysis<'graph> {
     soft_neighbors: Vec<Vec<(TxIndex, f64, f64)>>,
     compact_soft_groups: Vec<CompactSoftGroup>,
     compact_soft_memberships: Vec<Vec<usize>>,
-    edge_classes: BTreeMap<(TxIndex, TxIndex), EdgeClass>,
+    parallel_soft_pairs: Vec<(TxIndex, TxIndex)>,
+    // Dense edge-indexed classification aligned with CandidateGraph::edges(). The candidate graph
+    // already assigns deterministic dense edge indexes, so a tree map keyed by transaction pairs
+    // only adds allocation and O(log E) lookup cost to the online scheduler hot path.
+    edge_classes: Vec<EdgeClass>,
     hard_dependency_candidates: Vec<ScheduledDependency>,
     reduced_hard_dependencies: Vec<ScheduledDependency>,
 }
@@ -473,21 +477,22 @@ impl<'graph> SchedulingAnalysis<'graph> {
             soft_neighbors: vec![Vec::new(); transaction_count],
             compact_soft_groups: Vec::new(),
             compact_soft_memberships: vec![Vec::new(); transaction_count],
-            edge_classes: BTreeMap::new(),
+            parallel_soft_pairs: Vec::new(),
+            edge_classes: vec![EdgeClass::Low; graph.edges().len()],
             hard_dependency_candidates: Vec::new(),
             reduced_hard_dependencies: Vec::new(),
         };
 
         // Explicit edges belonging to a compact provenance are representation edges only. The
         // group below carries the complete logical clique semantics, including mature Soft risk.
-        for edge in graph.edges() {
-            if graph.provenance_is_compact(edge.provenance) {
+        for (edge_index, edge) in graph.edges().iter().enumerate() {
+            if graph.provenance_is_compact(edge.provenance)
+                || graph.pair_is_parallel(edge.source, edge.target)
+            {
                 continue;
             }
             let class = config.classify(edge);
-            analysis
-                .edge_classes
-                .insert((edge.source, edge.target), class);
+            analysis.edge_classes[edge_index] = class;
             match class {
                 EdgeClass::Low => {}
                 EdgeClass::Soft => {
@@ -514,6 +519,65 @@ impl<'graph> SchedulingAnalysis<'graph> {
                             class: EdgeClass::Hard,
                         });
                 }
+            }
+        }
+
+        // Atomic transactions may have several distinct profile relationships contributing to
+        // the same transaction pair. Treat them as one physical pair while preserving the exact
+        // original scheduling semantics: any Hard evidence makes the pair Hard; otherwise Soft
+        // evidence combines as `1 - Π(1-p)`. Exploration uncertainty remains the maximum
+        // uncertainty among the constituent soft relationships that individually exceed the
+        // production risk budget, exactly matching the former parallel-edge representation.
+        for group in graph.parallel_groups() {
+            let mut has_hard = false;
+            let mut has_soft = false;
+            let mut independence_probability = 1.0_f64;
+            let mut exploration_uncertainty = 0.0_f64;
+            for evidence in group.evidences() {
+                if graph.provenance_is_compact(evidence.provenance) {
+                    continue;
+                }
+                match config.classify(evidence) {
+                    EdgeClass::Low => {}
+                    EdgeClass::Hard => {
+                        has_hard = true;
+                    }
+                    EdgeClass::Soft => {
+                        has_soft = true;
+                        let risk = evidence.scheduling_risk();
+                        independence_probability *= 1.0 - risk;
+                        if risk > config.risk_budget {
+                            exploration_uncertainty = exploration_uncertainty
+                                .max((1.0 - evidence.confidence()).clamp(0.0, 1.0));
+                        }
+                    }
+                }
+            }
+            let (predecessor, successor) = analysis.canonical_pair(group.source(), group.target());
+            if has_hard {
+                analysis
+                    .hard_dependency_candidates
+                    .push(ScheduledDependency {
+                        predecessor,
+                        successor,
+                        class: EdgeClass::Hard,
+                    });
+            } else if has_soft {
+                let scheduling_risk = 1.0 - independence_probability;
+                // soft_neighbors stores confidence because the exploration path consumes
+                // `1-confidence`; encode the exact group-level uncertainty computed above.
+                let confidence = (1.0 - exploration_uncertainty).clamp(0.0, 1.0);
+                analysis.soft_neighbors[group.source().0 as usize].push((
+                    group.target(),
+                    scheduling_risk,
+                    confidence,
+                ));
+                analysis.soft_neighbors[group.target().0 as usize].push((
+                    group.source(),
+                    scheduling_risk,
+                    confidence,
+                ));
+                analysis.parallel_soft_pairs.push((predecessor, successor));
             }
         }
 
@@ -606,15 +670,13 @@ impl<'graph> SchedulingAnalysis<'graph> {
             }
         }
 
-        for edge in self.graph.edges() {
-            if self.graph.provenance_is_compact(edge.provenance) {
+        for (edge_index, edge) in self.graph.edges().iter().enumerate() {
+            if self.graph.provenance_is_compact(edge.provenance)
+                || self.graph.pair_is_parallel(edge.source, edge.target)
+            {
                 continue;
             }
-            let class = self
-                .edge_classes
-                .get(&(edge.source, edge.target))
-                .copied()
-                .unwrap_or(EdgeClass::Low);
+            let class = self.edge_classes[edge_index];
             if class != EdgeClass::Soft {
                 continue;
             }
@@ -636,6 +698,28 @@ impl<'graph> SchedulingAnalysis<'graph> {
                     predecessor,
                     successor,
                     class,
+                });
+            }
+        }
+
+        for &(predecessor, successor) in &self.parallel_soft_pairs {
+            let predecessor_wave = assigned_wave[predecessor.0 as usize]
+                .ok_or(SchedulingError::MissingTransactions)?;
+            let successor_wave =
+                assigned_wave[successor.0 as usize].ok_or(SchedulingError::MissingTransactions)?;
+            if predecessor_wave > successor_wave {
+                return Err(SchedulingError::SoftOrderingViolation {
+                    predecessor,
+                    successor,
+                    predecessor_wave,
+                    successor_wave,
+                });
+            }
+            if predecessor_wave < successor_wave {
+                dependencies.push(ScheduledDependency {
+                    predecessor,
+                    successor,
+                    class: EdgeClass::Soft,
                 });
             }
         }
@@ -916,7 +1000,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        finish_graph, quantize_q16, CandidateTransaction, EdgeProvenance, TransactionEdge,
+        finish_graph, finish_graph_with_parallel, quantize_q16, CandidateTransaction,
+        EdgeProvenance, ParallelCandidateGroup, TransactionEdge,
     };
 
     fn tx(id: u64, predicted_position: u32) -> CandidateTransaction {
@@ -1014,6 +1099,67 @@ mod tests {
             independent_observations_before_softening: 8,
             softening_min_confidence: 0.25,
         }
+    }
+
+    #[test]
+    fn parallel_evidence_group_preserves_explicit_soft_risk_composition() {
+        let transactions = vec![tx(0, 0), tx(1, 1)];
+        let first = soft_unknown(0, 1, 0.15);
+        let mut second = soft_unknown(0, 1, 0.15);
+        second.provenance = EdgeProvenance::Static {
+            profile_edge_index: ProfileEdgeIndex(1),
+        };
+        let explicit = finish_graph(transactions.clone(), vec![first, second], Vec::new()).unwrap();
+        let grouped = finish_graph_with_parallel(
+            transactions,
+            vec![first],
+            vec![ParallelCandidateGroup {
+                source: TxIndex(0),
+                target: TxIndex(1),
+                evidences: vec![first, second],
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+
+        let scheduler = RiskBoundedScheduler::new(config(0.10, 0.90, 0.20)).unwrap();
+        let explicit_schedule = scheduler.schedule(&explicit).unwrap();
+        let grouped_schedule = scheduler.schedule(&grouped).unwrap();
+        assert_eq!(grouped_schedule.waves, explicit_schedule.waves);
+        assert_eq!(
+            grouped_schedule.ordering_dependencies,
+            explicit_schedule.ordering_dependencies
+        );
+        assert_eq!(grouped.physical_edge_count(), 1);
+        assert_eq!(grouped.logical_edge_count(), 2);
+    }
+
+    #[test]
+    fn parallel_evidence_group_preserves_hard_dominance() {
+        let transactions = vec![tx(0, 0), tx(1, 1)];
+        let hard = true_edge(0, 1, 0.05);
+        let mut soft = soft_unknown(0, 1, 0.25);
+        soft.provenance = EdgeProvenance::Static {
+            profile_edge_index: ProfileEdgeIndex(1),
+        };
+        let grouped = finish_graph_with_parallel(
+            transactions,
+            vec![hard],
+            vec![ParallelCandidateGroup {
+                source: TxIndex(0),
+                target: TxIndex(1),
+                evidences: vec![hard, soft],
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let schedule = RiskBoundedScheduler::new(config(0.20, 0.80, 0.50))
+            .unwrap()
+            .schedule(&grouped)
+            .unwrap();
+        assert_eq!(schedule.waves.len(), 2);
+        assert_eq!(schedule.ordering_dependencies.len(), 1);
+        assert_eq!(schedule.ordering_dependencies[0].class, EdgeClass::Hard);
     }
 
     #[test]

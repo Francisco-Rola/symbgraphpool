@@ -6,7 +6,7 @@ storage keys to native planning, state priming, symbolic analysis, or scheduling
 Run after the exact/hybrid SLOAD/SSTORE corpus and native execution outputs exist:
 
 ```bash
-bash scripts/run-vegeta-s3-exact-followup.sh
+bash tools/legacy-scripts/run-vegeta-s3-exact-followup.sh
 ```
 
 The wrapper fails if a previously frozen pre-execution gate fails. The gate file is

@@ -40,7 +40,7 @@ additive: for example, host storage callbacks happen inside Wasm entrypoint/requ
 ## Running the profiler
 
 ```bash
-bash scripts/run-vegeta-s3-runtime-concurrency-profile.sh
+bash tools/legacy-scripts/run-vegeta-s3-runtime-concurrency-profile.sh
 ```
 
 Outputs are written by default to:

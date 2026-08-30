@@ -8,6 +8,7 @@ members = [
     "crates/acg-benchmark-harness",
     "crates/acg-miniwarehouse-workload",
     "crates/acg-vegeta-native-s3-executor",
+    "crates/acg-wasmd-scheduler-ffi",
 ]
 resolver = "2"
 

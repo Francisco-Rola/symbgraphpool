@@ -9,7 +9,7 @@ full 101-block extraction:
 
 ```bash
 ETH_RPC_URL=https://YOUR_ETHEREUM_RPC \
-python3 scripts/vegeta/extract-vegeta-ethereum.py \
+python3 tools/vegeta/extract-vegeta-ethereum.py \
   --trace-mode public-rpc \
   --start-block 16774645 \
   --output-dir benchmarks/corpora/vegeta-ethereum/s3 \
@@ -20,12 +20,12 @@ Then reconstruct S3:
 
 ```bash
 ETH_RPC_URL=https://YOUR_ETHEREUM_RPC \
-python3 scripts/vegeta/extract-vegeta-ethereum.py \
+python3 tools/vegeta/extract-vegeta-ethereum.py \
   --trace-mode public-rpc \
   --output-dir benchmarks/corpora/vegeta-ethereum/s3 \
   --resume
 
-python3 scripts/vegeta/validate-vegeta-corpus.py \
+python3 tools/vegeta/validate-vegeta-corpus.py \
   benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl
 ```
 
@@ -50,7 +50,7 @@ mode remains available:
 
 ```bash
 ETH_RPC_URL=http://127.0.0.1:8545 \
-python3 scripts/vegeta/extract-vegeta-ethereum.py \
+python3 tools/vegeta/extract-vegeta-ethereum.py \
   --trace-mode custom-js \
   --output-dir benchmarks/corpora/vegeta-ethereum/s3 \
   --resume

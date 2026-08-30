@@ -76,7 +76,7 @@ A record that is complete and correct but violates an explicitly configured thre
 unexpected, and duplicate run identities, and per-run issues plus derived overhead/speedup ratios.
 Reports serialize deterministically to JSON.
 
-The `acg-evaluate` binary and `scripts/internal/validate-experiment-records.sh` provide the common command-line
+The `acg-evaluate` binary and `tools/internal/validate-experiment-records.sh` provide the common command-line
 gate for future ConflictLab, MiniWarehouse, and external benchmark campaigns.
 
 ## Focused validation
@@ -84,7 +84,7 @@ gate for future ConflictLab, MiniWarehouse, and external benchmark campaigns.
 Phase-5F acceptance regressions and the full source/test/lint checkpoint are both covered by:
 
 ```bash
-./scripts/run-all-tests.sh
+./scripts/test-all.sh
 ```
 
 Long benchmark campaigns remain separate from per-patch validation.

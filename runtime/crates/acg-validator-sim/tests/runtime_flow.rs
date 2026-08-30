@@ -5,8 +5,8 @@ use acg_cosmwasm_engine::{
     NativeContract, TransactionId,
 };
 use acg_validator_sim::{
-    BlockExecutionError, BlockProducer, BlockProducerConfig, BlockScheduler, DirectDagBlockExecutor,
-    ExecutionDependency, ExecutionDependencyClass, ExecutionPlan,
+    BlockExecutionError, BlockProducer, BlockProducerConfig, BlockScheduler,
+    DirectDagBlockExecutor, ExecutionDependency, ExecutionDependencyClass, ExecutionPlan,
     ExecutionWave, FifoScheduler, IngressConfig, Mempool, ProducedBlock, RateControlledIngress,
     SchedulingError, SerialBlockExecutor, SingleValidatorRuntime, DEFAULT_BENCHMARK_INGRESS_TPS,
 };
@@ -275,7 +275,6 @@ fn scheduler_is_a_pluggable_execution_order_boundary() {
     assert_eq!(value["count"], 10);
 }
 
-
 #[test]
 fn direct_dag_executor_runs_independent_wave_against_canonical_state() {
     let engine = CosmWasmEngine::default();
@@ -385,8 +384,12 @@ fn direct_dag_executor_reuses_pool_across_blocks_and_commits_dependencies() {
         let plan = ExecutionPlan {
             transaction_count: 2,
             waves: vec![
-                ExecutionWave { transaction_indices: vec![0] },
-                ExecutionWave { transaction_indices: vec![1] },
+                ExecutionWave {
+                    transaction_indices: vec![0],
+                },
+                ExecutionWave {
+                    transaction_indices: vec![1],
+                },
             ],
             dependencies: vec![ExecutionDependency {
                 predecessor_index: 0,

@@ -3,22 +3,20 @@
 The canonical repository gate is:
 
 ```bash
-./scripts/run-all-tests.sh
+bash scripts/test-all.sh
 ```
 
-It formats the root/runtime/benchmark workspaces, checks shell and Python syntax, runs all Cargo
-workspace tests and doctests, runs Clippy with warnings denied, and executes the evaluation-tool
-regression suite.
+It performs non-mutating Rust formatting checks, Cargo unit/integration tests and doctests for the
+core/runtime/benchmark workspaces, Clippy with warnings denied, Python tooling tests, Cosmos SDK
+BlockSTM Go tests, and Wasmd Go tests both with and without the Rust ACG FFI bridge. It also checks
+shell/Python syntax and `git diff --check`.
 
-Long performance evaluations are separate:
+Performance evaluation is intentionally separate from the unit-test gate:
 
 ```bash
-./scripts/run-conflictlab-v1-evaluation.sh
-./scripts/run-conflictlab-parallelism-evaluation.sh
+bash scripts/eval-wasmd-debug.sh
+bash scripts/eval-wasmd-paper.sh
 ```
 
-ConflictLab 1.0 is the broad correctness/mechanism suite. The parallelism-ceiling experiment is the
-focused six-worker study for oracle-vs-obtained parallelism and overhead attribution.
-
-For final artifact runs, use a clean frozen commit and preserve raw `records.jsonl`, acceptance
-reports, environment metadata, summaries and aggregate CSVs.
+Publication runs should use a clean frozen commit and preserve `records.jsonl`, `environment.txt`,
+compute-weight metadata, summary CSV/JSON/text and the records SHA-256 file.

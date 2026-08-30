@@ -14,7 +14,7 @@ use acg_feedback::{
     AdaptiveFeedbackConfig, AdaptiveFeedbackStore, EdgeEstimate, FeedbackError, ReplayCostEstimate,
     RuntimeEdgeId, SerializationCostEstimate,
 };
-use acg_predicate::{CompiledPredicate, InputBindings, PredicateResult};
+use acg_predicate::{CompiledPredicate, InputBindings, PredicateEquivalenceKey, PredicateResult};
 use acg_profile_graph::ProfileGraph;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -43,6 +43,100 @@ impl CandidateTransaction {
             });
         }
         Ok(())
+    }
+}
+
+/// One symbolic contract entrypoint participating in an atomic block transaction.
+///
+/// Profiles remain the unit of offline conflict modeling, but schedulers operate on the atomic
+/// transaction that owns one or more of these components.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CandidateComponent {
+    pub profile_id: ProfileId,
+    pub instance_id: InstanceId,
+    pub input_bindings: InputBindings,
+}
+
+/// One atomic block transaction described by zero or more symbolic entrypoint profiles.
+///
+/// The original ACG architecture builds a transaction graph from profile relationships. This type
+/// lets workload adapters preserve that boundary when one execution request contains multiple
+/// contract calls: component profiles provide conflict evidence, while this parent remains the
+/// scheduling/commit unit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AtomicCandidateTransaction {
+    pub tx_id: TxId,
+    pub predicted_position: u32,
+    pub inclusion_probability: f32,
+    pub estimated_execution_cost: u32,
+    pub components: Vec<CandidateComponent>,
+}
+
+impl AtomicCandidateTransaction {
+    pub fn validate(&self) -> Result<(), CandidateGraphError> {
+        if !self.inclusion_probability.is_finite()
+            || !(0.0..=1.0).contains(&self.inclusion_probability)
+        {
+            return Err(CandidateGraphError::InvalidInclusionProbability {
+                tx_id: self.tx_id,
+                value: self.inclusion_probability,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Result of instantiating an atomic transaction graph from profile-level evidence.
+///
+/// `logical_component_edges` counts concrete component relationships that would have been
+/// materialized by a component-node graph. `graph` contains only atomic transaction nodes/edges,
+/// while `candidate_provenances` preserves every profile/fallback relationship contributing to an
+/// atomic edge so runtime feedback can continue refining the original symbolic model.
+#[derive(Clone, Debug)]
+pub struct AtomicCandidateGraphBuild {
+    graph: CandidateGraph,
+    logical_component_edges: usize,
+    candidate_provenances: BTreeMap<(TxIndex, TxIndex), BTreeSet<EdgeProvenance>>,
+}
+
+impl AtomicCandidateGraphBuild {
+    pub fn graph(&self) -> &CandidateGraph {
+        &self.graph
+    }
+
+    pub fn into_graph(self) -> CandidateGraph {
+        self.graph
+    }
+
+    pub fn logical_component_edges(&self) -> usize {
+        self.logical_component_edges
+    }
+
+    pub fn candidate_provenances_between(
+        &self,
+        left: TxIndex,
+        right: TxIndex,
+    ) -> BTreeSet<EdgeProvenance> {
+        let pair = canonical_tx_pair(left, right);
+        let mut output = self
+            .candidate_provenances
+            .get(&pair)
+            .cloned()
+            .unwrap_or_default();
+        for group in self.graph.compact_groups() {
+            if group.members().binary_search(&left).is_ok()
+                && group.members().binary_search(&right).is_ok()
+            {
+                output.insert(group.provenance());
+            }
+        }
+        output
+    }
+
+    pub fn candidate_provenance_map(
+        &self,
+    ) -> &BTreeMap<(TxIndex, TxIndex), BTreeSet<EdgeProvenance>> {
+        &self.candidate_provenances
     }
 }
 
@@ -209,10 +303,37 @@ impl CompactCandidateGroup {
 }
 
 #[derive(Clone, Debug)]
+pub struct ParallelCandidateGroup {
+    source: TxIndex,
+    target: TxIndex,
+    evidences: Vec<TransactionEdge>,
+}
+
+impl ParallelCandidateGroup {
+    pub fn source(&self) -> TxIndex {
+        self.source
+    }
+
+    pub fn target(&self) -> TxIndex {
+        self.target
+    }
+
+    /// Distinct profile/runtime relationships contributing scheduling evidence for this atomic
+    /// transaction pair. These remain separate so classification, soft-risk composition and
+    /// adaptive feedback retain the original ACG semantics.
+    pub fn evidences(&self) -> &[TransactionEdge] {
+        &self.evidences
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct CandidateGraph {
     transactions: Vec<CandidateTransaction>,
     edges: Vec<TransactionEdge>,
+    parallel_groups: Vec<ParallelCandidateGroup>,
+    parallel_pairs: BTreeSet<(TxIndex, TxIndex)>,
     compact_groups: Vec<CompactCandidateGroup>,
+    compact_provenances: BTreeSet<EdgeProvenance>,
     compact_memberships: Vec<Vec<u32>>,
     adjacency_offsets: Vec<u32>,
     adjacency_entries: Vec<TransactionAdjacency>,
@@ -271,23 +392,44 @@ impl CandidateGraph {
         &self.compact_groups
     }
 
+    pub fn parallel_groups(&self) -> &[ParallelCandidateGroup] {
+        &self.parallel_groups
+    }
+
+    pub fn pair_is_parallel(&self, left: TxIndex, right: TxIndex) -> bool {
+        self.parallel_pairs
+            .contains(&canonical_tx_pair(left, right))
+    }
+
+    /// Number of physical pair relationships represented in the graph. A parallel evidence group
+    /// counts once even though it retains several profile-level evidence records internally.
+    pub fn physical_edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
     pub fn logical_edge_count(&self) -> usize {
-        self.edges.len().saturating_add(
-            self.compact_groups
-                .iter()
-                .map(|group| {
-                    group
-                        .logical_edges
-                        .saturating_sub(group.members.len().saturating_sub(1))
-                })
-                .sum::<usize>(),
-        )
+        let parallel_extra = self
+            .parallel_groups
+            .iter()
+            .map(|group| group.evidences.len().saturating_sub(1))
+            .sum::<usize>();
+        self.edges
+            .len()
+            .saturating_add(parallel_extra)
+            .saturating_add(
+                self.compact_groups
+                    .iter()
+                    .map(|group| {
+                        group
+                            .logical_edges
+                            .saturating_sub(group.members.len().saturating_sub(1))
+                    })
+                    .sum::<usize>(),
+            )
     }
 
     pub fn provenance_is_compact(&self, provenance: EdgeProvenance) -> bool {
-        self.compact_groups
-            .iter()
-            .any(|group| group.provenance == provenance)
+        self.compact_provenances.contains(&provenance)
     }
 
     pub fn transaction(&self, index: TxIndex) -> Option<&CandidateTransaction> {
@@ -463,36 +605,69 @@ impl WeightedCandidateGraphConfig {
     }
 }
 
+/// Immutable, profile-graph-specific candidate construction state.
+///
+/// Symbolic documents and their predicates are parsed/compiled before block execution. Keeping
+/// this object across blocks ensures the online path only instantiates concrete transactions,
+/// buckets them by already-resolved profiles/instances, and evaluates precompiled relationships.
+#[derive(Clone, Copy, Debug)]
+struct PreparedProfileRelationship {
+    edge_index: ProfileEdgeIndex,
+    source: ProfileId,
+    target: ProfileId,
+    conflict_kinds: ConflictKinds,
+}
+
 #[derive(Debug)]
-pub struct CandidateGraphBuilder<'graph> {
-    profile_graph: &'graph ProfileGraph,
+pub struct PreparedCandidateGraphBuilder {
     compiled_predicates: Vec<CompiledPredicate>,
+    relationships: Vec<PreparedProfileRelationship>,
+    relationship_adjacency: Vec<Vec<u32>>,
     profile_count: usize,
 }
 
-impl<'graph> CandidateGraphBuilder<'graph> {
-    pub fn new(profile_graph: &'graph ProfileGraph) -> Self {
+impl PreparedCandidateGraphBuilder {
+    pub fn new(profile_graph: &ProfileGraph) -> Self {
         let compiled_predicates = profile_graph
             .edges()
             .iter()
             .map(|edge| CompiledPredicate::compile(&edge.predicate))
             .collect();
+        let relationships = profile_graph
+            .edges()
+            .iter()
+            .map(|edge| PreparedProfileRelationship {
+                edge_index: edge.index,
+                source: edge.source,
+                target: edge.target,
+                conflict_kinds: edge.conflict_kinds,
+            })
+            .collect::<Vec<_>>();
+        let mut relationship_adjacency = vec![Vec::<u32>::new(); profile_graph.profiles().len()];
+        for (offset, relationship) in relationships.iter().enumerate() {
+            let offset =
+                u32::try_from(offset).expect("profile-edge indexes are represented by u32");
+            relationship_adjacency[relationship.source.0 as usize].push(offset);
+            if relationship.target != relationship.source {
+                relationship_adjacency[relationship.target.0 as usize].push(offset);
+            }
+        }
         Self {
-            profile_graph,
             compiled_predicates,
+            relationships,
+            relationship_adjacency,
             profile_count: profile_graph.profiles().len(),
         }
     }
 
-    /// Builds the pre-Phase-4 binary graph.
-    ///
-    /// Materialized symbolic edges carry probability 1.0 and confidence 0.0. Keeping this path
-    /// intact provides the binary-graph baseline and preserves existing callers while Phase 4
-    /// introduces adaptive construction through [`Self::build_weighted`].
+    /// Builds the pre-Phase-4 binary graph using predicates compiled when this prepared builder
+    /// was created. `profile_graph` must be the immutable graph used to prepare this builder.
     pub fn build(
         &self,
+        profile_graph: &ProfileGraph,
         transactions: Vec<CandidateTransaction>,
     ) -> Result<CandidateGraph, CandidateGraphError> {
+        self.debug_assert_compatible(profile_graph);
         let (buckets, instance_buckets) = self.prepare_transactions(&transactions)?;
         let mut edges = Vec::<TransactionEdge>::new();
         let mut compact_groups = Vec::<CompactCandidateGroup>::new();
@@ -502,7 +677,7 @@ impl<'graph> CandidateGraphBuilder<'graph> {
             instance_buckets: &instance_buckets,
             compiled_predicates: &self.compiled_predicates,
         };
-        let mut visited_profile_edges = BTreeSet::<ProfileEdgeIndex>::new();
+        let mut visited_profile_edges = vec![false; self.compiled_predicates.len()];
 
         for (profile_offset, bucket) in buckets.iter().enumerate() {
             if bucket.is_empty() {
@@ -511,13 +686,15 @@ impl<'graph> CandidateGraphBuilder<'graph> {
             let profile_id = ProfileId(
                 u32::try_from(profile_offset).expect("profile count is represented by ProfileId"),
             );
-            for adjacency in self.profile_graph.neighbors(profile_id) {
+            for adjacency in profile_graph.neighbors(profile_id) {
+                let edge_offset = adjacency.edge_index.0 as usize;
                 if buckets[adjacency.neighbor.0 as usize].is_empty()
-                    || !visited_profile_edges.insert(adjacency.edge_index)
+                    || visited_profile_edges[edge_offset]
                 {
                     continue;
                 }
-                let profile_edge = &self.profile_graph.edges()[adjacency.edge_index.0 as usize];
+                visited_profile_edges[edge_offset] = true;
+                let profile_edge = &profile_graph.edges()[edge_offset];
                 materialize_static_profile_edge(
                     &materialization_context,
                     &mut edges,
@@ -531,18 +708,18 @@ impl<'graph> CandidateGraphBuilder<'graph> {
         finish_graph(transactions, edges, compact_groups)
     }
 
-    /// Builds an adaptive weighted candidate graph from symbolic predicates plus runtime history.
-    ///
-    /// The profile posterior is the primary probability estimate. A concrete `False` predicate is
-    /// still pruned unless concrete execution has previously recorded a candidate miss for that
-    /// static edge. Runtime-discovered fallback topology is traversed alongside static adjacency.
+    /// Builds an adaptive weighted candidate graph from the immutable profile topology plus
+    /// persistent runtime observations. Only concrete block transactions are instantiated here;
+    /// symbolic predicate compilation stays outside the online path.
     pub fn build_weighted(
         &self,
+        profile_graph: &ProfileGraph,
         transactions: Vec<CandidateTransaction>,
         feedback_store: &AdaptiveFeedbackStore,
         feedback_config: &AdaptiveFeedbackConfig,
         config: WeightedCandidateGraphConfig,
     ) -> Result<CandidateGraph, CandidateGraphError> {
+        self.debug_assert_compatible(profile_graph);
         config.validate()?;
         feedback_config.validate()?;
         let (buckets, instance_buckets) = self.prepare_transactions(&transactions)?;
@@ -554,7 +731,7 @@ impl<'graph> CandidateGraphBuilder<'graph> {
             instance_buckets: &instance_buckets,
             compiled_predicates: &self.compiled_predicates,
         };
-        let mut visited_profile_edges = BTreeSet::<ProfileEdgeIndex>::new();
+        let mut visited_profile_edges = vec![false; self.compiled_predicates.len()];
         let mut visited_runtime_edges = BTreeSet::<RuntimeEdgeId>::new();
 
         for (profile_offset, bucket) in buckets.iter().enumerate() {
@@ -565,12 +742,14 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                 u32::try_from(profile_offset).expect("profile count is represented by ProfileId"),
             );
 
-            for adjacency in self.profile_graph.neighbors(profile_id) {
+            for adjacency in profile_graph.neighbors(profile_id) {
+                let edge_offset = adjacency.edge_index.0 as usize;
                 if buckets[adjacency.neighbor.0 as usize].is_empty()
-                    || !visited_profile_edges.insert(adjacency.edge_index)
+                    || visited_profile_edges[edge_offset]
                 {
                     continue;
                 }
+                visited_profile_edges[edge_offset] = true;
                 let estimate = feedback_store.estimate_static_edge(
                     adjacency.edge_index,
                     config.epoch,
@@ -586,7 +765,7 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                     config.epoch,
                     feedback_config,
                 )?;
-                let profile_edge = &self.profile_graph.edges()[adjacency.edge_index.0 as usize];
+                let profile_edge = &profile_graph.edges()[edge_offset];
                 let adaptive_materialization = AdaptiveMaterialization {
                     estimate,
                     replay_cost,
@@ -604,6 +783,9 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                 )?;
             }
 
+            // Persisted topology misses are part of the online model and are intentionally
+            // traversed beside the immutable symbolic adjacency. Preparing predicates must not
+            // erase the feedback path that lets concrete execution refine candidate topology.
             for fallback in feedback_store.fallback_edges_for_profile(profile_id) {
                 if !visited_runtime_edges.insert(fallback.id) {
                     continue;
@@ -646,6 +828,166 @@ impl<'graph> CandidateGraphBuilder<'graph> {
         finish_graph(transactions, edges, compact_groups)
     }
 
+    /// Build the scheduling graph directly at the atomic transaction level while retaining
+    /// profile-level conflict evidence.
+    ///
+    /// This is the compound-request counterpart to [`Self::build_weighted`]. Symbolic profiles
+    /// remain the offline conflict model, but multiple entrypoint components owned by one runtime
+    /// transaction are aggregated before `RiskBoundedScheduler` sees the graph. This avoids
+    /// constructing and reducing a large component-node graph only to project it back onto the
+    /// atomic commit units afterward.
+    pub fn build_weighted_atomic(
+        &self,
+        profile_graph: &ProfileGraph,
+        transactions: Vec<AtomicCandidateTransaction>,
+        feedback_store: &AdaptiveFeedbackStore,
+        feedback_config: &AdaptiveFeedbackConfig,
+        config: WeightedCandidateGraphConfig,
+    ) -> Result<AtomicCandidateGraphBuild, CandidateGraphError> {
+        self.debug_assert_compatible(profile_graph);
+        config.validate()?;
+        feedback_config.validate()?;
+        let prepared = prepare_atomic_transactions(&transactions, self.profile_count)?;
+        let scheduler_transactions = atomic_scheduler_transactions(&transactions);
+        let mut evidence = AtomicEvidenceMap::new();
+        let mut compact_groups = Vec::<CompactCandidateGroup>::new();
+        let mut logical_component_edges = 0_usize;
+
+        // Static profile relationships are an immutable execution plan prepared when the symbolic
+        // graph is loaded. Online work only checks which endpoint buckets are active, projects the
+        // current feedback estimate, and evaluates the already-compiled predicate.
+        let mut visited_relationships = vec![false; self.relationships.len()];
+        for (profile_offset, bucket) in prepared.buckets.iter().enumerate() {
+            if bucket.is_empty() {
+                continue;
+            }
+            for &relationship_offset in &self.relationship_adjacency[profile_offset] {
+                let relationship_offset = relationship_offset as usize;
+                if visited_relationships[relationship_offset] {
+                    continue;
+                }
+                visited_relationships[relationship_offset] = true;
+                let relationship = self.relationships[relationship_offset];
+                if prepared.buckets[relationship.source.0 as usize].is_empty()
+                    || prepared.buckets[relationship.target.0 as usize].is_empty()
+                {
+                    continue;
+                }
+                let estimate = feedback_store.estimate_static_edge(
+                    relationship.edge_index,
+                    config.epoch,
+                    feedback_config,
+                )?;
+                let replay_cost = feedback_store.estimate_static_replay_cost(
+                    relationship.edge_index,
+                    config.epoch,
+                    feedback_config,
+                )?;
+                let serialization_cost = feedback_store.estimate_static_serialization_cost(
+                    relationship.edge_index,
+                    config.epoch,
+                    feedback_config,
+                )?;
+                let adaptive = AdaptiveMaterialization {
+                    estimate,
+                    replay_cost,
+                    serialization_cost,
+                    edge_materialization_threshold: config.edge_materialization_threshold,
+                    cost_policy: config.cost_policy,
+                    compact_immature_equivalence_edges: config.compact_immature_equivalence_edges,
+                };
+                materialize_atomic_static_relationship(
+                    &transactions,
+                    &prepared,
+                    &self.compiled_predicates,
+                    &mut evidence,
+                    &mut compact_groups,
+                    &mut logical_component_edges,
+                    relationship,
+                    StaticMaterialization::Adaptive(&adaptive),
+                )?;
+            }
+        }
+
+        // Runtime-discovered topology is persistent adaptive state. Because fallback relationships
+        // have no input predicate, collapse component multiplicity directly to parent pairs while
+        // preserving the logical component-pair count for diagnostics.
+        for fallback in feedback_store.fallback_edges() {
+            if prepared.buckets[fallback.source.0 as usize].is_empty()
+                || prepared.buckets[fallback.target.0 as usize].is_empty()
+            {
+                continue;
+            }
+            let estimate = feedback_store.estimate_fallback_edge(
+                fallback.id,
+                config.epoch,
+                feedback_config,
+            )?;
+            let replay_cost = feedback_store.estimate_fallback_replay_cost(
+                fallback.id,
+                config.epoch,
+                feedback_config,
+            )?;
+            let serialization_cost = feedback_store.estimate_fallback_serialization_cost(
+                fallback.id,
+                config.epoch,
+                feedback_config,
+            )?;
+            materialize_atomic_runtime_fallback(
+                &prepared.buckets,
+                &mut evidence,
+                &mut logical_component_edges,
+                fallback,
+                edge_metrics(
+                    estimate,
+                    replay_cost,
+                    serialization_cost,
+                    config.cost_policy,
+                ),
+            );
+        }
+
+        // One physical adjacency relationship per atomic transaction pair. Distinct profile-level
+        // relationships remain inside a parallel evidence group so the scheduler can reproduce the
+        // exact per-profile classification and `1 - Π(1-p)` soft-risk semantics without storing
+        // thousands of duplicate pair entries in the physical graph.
+        let mut edges = Vec::with_capacity(evidence.len());
+        let mut parallel_groups = Vec::new();
+        let mut candidate_provenances = BTreeMap::new();
+        for (pair, per_provenance) in evidence {
+            candidate_provenances.insert(pair, per_provenance.keys().copied().collect());
+            let mut pair_evidence = per_provenance
+                .into_iter()
+                .map(|(provenance, item)| atomic_evidence_edge(pair, provenance, item))
+                .collect::<Vec<_>>();
+            pair_evidence.sort_by_key(|edge| edge.provenance);
+            if pair_evidence.len() == 1 {
+                edges.push(pair_evidence.pop().expect("one atomic evidence edge"));
+            } else {
+                // Keep one representative in the ordinary adjacency so existing neighbor-based
+                // diagnostics remain pair-oriented. Scheduling skips this representative and
+                // consumes the complete evidence group below.
+                edges.push(pair_evidence[0]);
+                parallel_groups.push(ParallelCandidateGroup {
+                    source: pair.0,
+                    target: pair.1,
+                    evidences: pair_evidence,
+                });
+            }
+        }
+        let graph = finish_graph_with_parallel(
+            scheduler_transactions,
+            edges,
+            parallel_groups,
+            compact_groups,
+        )?;
+        Ok(AtomicCandidateGraphBuild {
+            graph,
+            logical_component_edges,
+            candidate_provenances,
+        })
+    }
+
     fn prepare_transactions(
         &self,
         transactions: &[CandidateTransaction],
@@ -673,6 +1015,57 @@ impl<'graph> CandidateGraphBuilder<'graph> {
                 .push(tx_index);
         }
         Ok((buckets, instance_buckets))
+    }
+
+    fn debug_assert_compatible(&self, profile_graph: &ProfileGraph) {
+        debug_assert_eq!(self.profile_count, profile_graph.profiles().len());
+        debug_assert_eq!(self.compiled_predicates.len(), profile_graph.edges().len());
+        debug_assert_eq!(self.relationships.len(), profile_graph.edges().len());
+        debug_assert_eq!(
+            self.relationship_adjacency.len(),
+            profile_graph.profiles().len()
+        );
+    }
+}
+
+/// Backward-compatible convenience wrapper for callers that build against one borrowed graph.
+/// Long-lived runtimes should retain [`PreparedCandidateGraphBuilder`] across blocks instead of
+/// recompiling immutable symbolic predicates for every candidate block.
+#[derive(Debug)]
+pub struct CandidateGraphBuilder<'graph> {
+    profile_graph: &'graph ProfileGraph,
+    prepared: PreparedCandidateGraphBuilder,
+}
+
+impl<'graph> CandidateGraphBuilder<'graph> {
+    pub fn new(profile_graph: &'graph ProfileGraph) -> Self {
+        Self {
+            profile_graph,
+            prepared: PreparedCandidateGraphBuilder::new(profile_graph),
+        }
+    }
+
+    pub fn build(
+        &self,
+        transactions: Vec<CandidateTransaction>,
+    ) -> Result<CandidateGraph, CandidateGraphError> {
+        self.prepared.build(self.profile_graph, transactions)
+    }
+
+    pub fn build_weighted(
+        &self,
+        transactions: Vec<CandidateTransaction>,
+        feedback_store: &AdaptiveFeedbackStore,
+        feedback_config: &AdaptiveFeedbackConfig,
+        config: WeightedCandidateGraphConfig,
+    ) -> Result<CandidateGraph, CandidateGraphError> {
+        self.prepared.build_weighted(
+            self.profile_graph,
+            transactions,
+            feedback_store,
+            feedback_config,
+            config,
+        )
     }
 }
 
@@ -749,6 +1142,507 @@ impl StaticMaterialization<'_> {
                 adaptive.cost_policy,
             ),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct AtomicComponentRef {
+    parent: TxIndex,
+    component: u32,
+}
+
+struct AtomicPreparedBuckets {
+    buckets: Vec<Vec<AtomicComponentRef>>,
+    instance_buckets: Vec<BTreeMap<InstanceId, Vec<AtomicComponentRef>>>,
+}
+
+#[derive(Clone, Copy)]
+struct AtomicEvidenceAccumulator {
+    predicate_result: PredicateResult,
+    conflict_kinds: ConflictKinds,
+    metrics: EdgeMetrics,
+}
+
+type AtomicEvidenceMap =
+    BTreeMap<(TxIndex, TxIndex), BTreeMap<EdgeProvenance, AtomicEvidenceAccumulator>>;
+
+fn canonical_tx_pair(left: TxIndex, right: TxIndex) -> (TxIndex, TxIndex) {
+    if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+fn prepare_atomic_transactions(
+    transactions: &[AtomicCandidateTransaction],
+    profile_count: usize,
+) -> Result<AtomicPreparedBuckets, CandidateGraphError> {
+    u32::try_from(transactions.len())
+        .map_err(|_| CandidateGraphError::TooManyTransactions(transactions.len()))?;
+    let mut buckets = vec![Vec::<AtomicComponentRef>::new(); profile_count];
+    let mut instance_buckets =
+        vec![BTreeMap::<InstanceId, Vec<AtomicComponentRef>>::new(); profile_count];
+    for (parent_offset, transaction) in transactions.iter().enumerate() {
+        transaction.validate()?;
+        let parent = TxIndex(u32::try_from(parent_offset).expect("transaction count validated"));
+        for (component_offset, component) in transaction.components.iter().enumerate() {
+            let profile_offset = component.profile_id.0 as usize;
+            if profile_offset >= profile_count {
+                return Err(CandidateGraphError::UnknownProfileId {
+                    tx_id: transaction.tx_id,
+                    profile_id: component.profile_id,
+                });
+            }
+            let component_ref = AtomicComponentRef {
+                parent,
+                component: u32::try_from(component_offset).map_err(|_| {
+                    CandidateGraphError::TooManyComponents {
+                        tx_id: transaction.tx_id,
+                        components: transaction.components.len(),
+                    }
+                })?,
+            };
+            buckets[profile_offset].push(component_ref);
+            instance_buckets[profile_offset]
+                .entry(component.instance_id)
+                .or_default()
+                .push(component_ref);
+        }
+    }
+    Ok(AtomicPreparedBuckets {
+        buckets,
+        instance_buckets,
+    })
+}
+
+fn atomic_scheduler_transactions(
+    transactions: &[AtomicCandidateTransaction],
+) -> Vec<CandidateTransaction> {
+    transactions
+        .iter()
+        .map(|transaction| {
+            let representative = transaction.components.first();
+            CandidateTransaction {
+                tx_id: transaction.tx_id,
+                predicted_position: transaction.predicted_position,
+                inclusion_probability: transaction.inclusion_probability,
+                // Symbolic profile/instance/bindings are consumed while building the atomic graph.
+                // The scheduler only reads ordering/cost fields from these parent nodes afterward;
+                // keep a deterministic representative for diagnostics/source compatibility.
+                profile_id: representative.map_or(ProfileId(0), |component| component.profile_id),
+                instance_id: representative
+                    .map_or(InstanceId(0), |component| component.instance_id),
+                input_bindings: representative.map_or_else(InputBindings::empty, |component| {
+                    component.input_bindings.clone()
+                }),
+                estimated_execution_cost: transaction.estimated_execution_cost,
+            }
+        })
+        .collect()
+}
+
+fn atomic_component(
+    transactions: &[AtomicCandidateTransaction],
+    component_ref: AtomicComponentRef,
+) -> &CandidateComponent {
+    &transactions[component_ref.parent.0 as usize].components[component_ref.component as usize]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_atomic_static_relationship(
+    transactions: &[AtomicCandidateTransaction],
+    prepared: &AtomicPreparedBuckets,
+    compiled_predicates: &[CompiledPredicate],
+    evidence: &mut AtomicEvidenceMap,
+    compact_groups: &mut Vec<CompactCandidateGroup>,
+    logical_component_edges: &mut usize,
+    relationship: PreparedProfileRelationship,
+    mode: StaticMaterialization<'_>,
+) -> Result<(), CandidateGraphError> {
+    let source_bucket = &prepared.buckets[relationship.source.0 as usize];
+    let target_bucket = &prepared.buckets[relationship.target.0 as usize];
+    let predicate = &compiled_predicates[relationship.edge_index.0 as usize];
+    let provenance = EdgeProvenance::Static {
+        profile_edge_index: relationship.edge_index,
+    };
+    let may_use_instance_fast_path =
+        predicate.requires_same_instance() && !mode.has_candidate_miss_history();
+
+    if relationship.source == relationship.target
+        && may_use_instance_fast_path
+        && mode.may_compact_equivalence_clique()
+        && materialize_atomic_equivalence_groups(
+            transactions,
+            evidence,
+            compact_groups,
+            logical_component_edges,
+            predicate,
+            source_bucket,
+            provenance,
+            relationship.conflict_kinds,
+            mode,
+        )?
+    {
+        return Ok(());
+    }
+
+    if may_use_instance_fast_path {
+        let source_instances = &prepared.instance_buckets[relationship.source.0 as usize];
+        let target_instances = &prepared.instance_buckets[relationship.target.0 as usize];
+        if relationship.source == relationship.target {
+            for bucket in source_instances.values() {
+                materialize_atomic_same_bucket_pairs(
+                    transactions,
+                    evidence,
+                    logical_component_edges,
+                    predicate,
+                    bucket,
+                    provenance,
+                    relationship.conflict_kinds,
+                    mode,
+                );
+            }
+        } else {
+            for (instance, left_bucket) in source_instances {
+                let Some(right_bucket) = target_instances.get(instance) else {
+                    continue;
+                };
+                materialize_atomic_cross_bucket_pairs(
+                    transactions,
+                    evidence,
+                    logical_component_edges,
+                    predicate,
+                    left_bucket,
+                    right_bucket,
+                    provenance,
+                    relationship.conflict_kinds,
+                    mode,
+                );
+            }
+        }
+    } else if relationship.source == relationship.target {
+        materialize_atomic_same_bucket_pairs(
+            transactions,
+            evidence,
+            logical_component_edges,
+            predicate,
+            source_bucket,
+            provenance,
+            relationship.conflict_kinds,
+            mode,
+        );
+    } else {
+        materialize_atomic_cross_bucket_pairs(
+            transactions,
+            evidence,
+            logical_component_edges,
+            predicate,
+            source_bucket,
+            target_bucket,
+            provenance,
+            relationship.conflict_kinds,
+            mode,
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_atomic_equivalence_groups(
+    transactions: &[AtomicCandidateTransaction],
+    evidence: &mut AtomicEvidenceMap,
+    compact_groups: &mut Vec<CompactCandidateGroup>,
+    logical_component_edges: &mut usize,
+    predicate: &CompiledPredicate,
+    bucket: &[AtomicComponentRef],
+    provenance: EdgeProvenance,
+    conflict_kinds: ConflictKinds,
+    mode: StaticMaterialization<'_>,
+) -> Result<bool, CandidateGraphError> {
+    let groups = if predicate.is_unconditional_same_instance_whole_resource() {
+        let mut groups = BTreeMap::<InstanceId, Vec<AtomicComponentRef>>::new();
+        for &component_ref in bucket {
+            groups
+                .entry(atomic_component(transactions, component_ref).instance_id)
+                .or_default()
+                .push(component_ref);
+        }
+        groups.into_values().collect::<Vec<_>>()
+    } else {
+        let mut groups = BTreeMap::<PredicateEquivalenceKey, Vec<AtomicComponentRef>>::new();
+        for &component_ref in bucket {
+            let component = atomic_component(transactions, component_ref);
+            let Some(key) =
+                predicate.equivalence_key(component.instance_id, &component.input_bindings)
+            else {
+                return Ok(false);
+            };
+            groups.entry(key).or_default().push(component_ref);
+        }
+        groups.into_values().collect::<Vec<_>>()
+    };
+
+    let metrics = mode.edge_metrics();
+    for group in groups {
+        let mut counts = BTreeMap::<TxIndex, usize>::new();
+        for component_ref in &group {
+            *counts.entry(component_ref.parent).or_default() += 1;
+        }
+        if counts.len() < 2 {
+            continue;
+        }
+        let total_pairs = group.len().saturating_mul(group.len().saturating_sub(1)) / 2;
+        let internal_pairs = counts
+            .values()
+            .map(|count| count.saturating_mul(count.saturating_sub(1)) / 2)
+            .sum::<usize>();
+        *logical_component_edges =
+            (*logical_component_edges).saturating_add(total_pairs.saturating_sub(internal_pairs));
+        let members = counts.keys().copied().collect::<Vec<_>>();
+        let logical_parent_edges = members
+            .len()
+            .saturating_mul(members.len().saturating_sub(1))
+            / 2;
+        for pair in members.windows(2) {
+            record_atomic_evidence(
+                evidence,
+                pair[0],
+                pair[1],
+                provenance,
+                PredicateResult::True,
+                conflict_kinds,
+                metrics,
+            );
+        }
+        let edge_template = TransactionEdge {
+            source: members[0],
+            target: members[1],
+            provenance,
+            predicate_result: PredicateResult::True,
+            conflict_kinds,
+            probability_q16: metrics.probability_q16,
+            confidence_q16: metrics.confidence_q16,
+            concrete_conflict_observations: metrics.concrete_conflict_observations,
+            concrete_independent_observations: metrics.concrete_independent_observations,
+            scheduling_risk_q16: metrics.scheduling_risk_q16,
+            expected_replay_cost_nanos: metrics.expected_replay_cost_nanos,
+            expected_invalidated_descendants_milli: metrics.expected_invalidated_descendants_milli,
+            replay_cost_confidence_q16: metrics.replay_cost_confidence_q16,
+            expected_serialization_cost_nanos: metrics.expected_serialization_cost_nanos,
+            serialization_cost_confidence_q16: metrics.serialization_cost_confidence_q16,
+        };
+        compact_groups.push(CompactCandidateGroup {
+            provenance,
+            members,
+            logical_edges: logical_parent_edges,
+            edge_template,
+        });
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_atomic_same_bucket_pairs(
+    transactions: &[AtomicCandidateTransaction],
+    evidence: &mut AtomicEvidenceMap,
+    logical_component_edges: &mut usize,
+    predicate: &CompiledPredicate,
+    bucket: &[AtomicComponentRef],
+    provenance: EdgeProvenance,
+    conflict_kinds: ConflictKinds,
+    mode: StaticMaterialization<'_>,
+) {
+    for (left_offset, &left) in bucket.iter().enumerate() {
+        for &right in bucket.iter().skip(left_offset + 1) {
+            maybe_materialize_atomic_static_pair(
+                transactions,
+                evidence,
+                logical_component_edges,
+                predicate,
+                left,
+                right,
+                provenance,
+                conflict_kinds,
+                mode,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_atomic_cross_bucket_pairs(
+    transactions: &[AtomicCandidateTransaction],
+    evidence: &mut AtomicEvidenceMap,
+    logical_component_edges: &mut usize,
+    predicate: &CompiledPredicate,
+    left_bucket: &[AtomicComponentRef],
+    right_bucket: &[AtomicComponentRef],
+    provenance: EdgeProvenance,
+    conflict_kinds: ConflictKinds,
+    mode: StaticMaterialization<'_>,
+) {
+    for &left in left_bucket {
+        for &right in right_bucket {
+            maybe_materialize_atomic_static_pair(
+                transactions,
+                evidence,
+                logical_component_edges,
+                predicate,
+                left,
+                right,
+                provenance,
+                conflict_kinds,
+                mode,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn maybe_materialize_atomic_static_pair(
+    transactions: &[AtomicCandidateTransaction],
+    evidence: &mut AtomicEvidenceMap,
+    logical_component_edges: &mut usize,
+    predicate: &CompiledPredicate,
+    left: AtomicComponentRef,
+    right: AtomicComponentRef,
+    provenance: EdgeProvenance,
+    conflict_kinds: ConflictKinds,
+    mode: StaticMaterialization<'_>,
+) {
+    if left.parent == right.parent {
+        return;
+    }
+    let left_component = atomic_component(transactions, left);
+    let right_component = atomic_component(transactions, right);
+    let result = predicate.evaluate(
+        left_component.instance_id,
+        &left_component.input_bindings,
+        right_component.instance_id,
+        &right_component.input_bindings,
+    );
+    if !mode.should_materialize(result) {
+        return;
+    }
+    *logical_component_edges = (*logical_component_edges).saturating_add(1);
+    record_atomic_evidence(
+        evidence,
+        left.parent,
+        right.parent,
+        provenance,
+        result,
+        conflict_kinds,
+        mode.edge_metrics(),
+    );
+}
+
+fn materialize_atomic_runtime_fallback(
+    buckets: &[Vec<AtomicComponentRef>],
+    evidence: &mut AtomicEvidenceMap,
+    logical_component_edges: &mut usize,
+    fallback: &acg_feedback::RuntimeDiscoveredEdge,
+    metrics: EdgeMetrics,
+) {
+    let source_counts = atomic_parent_counts(&buckets[fallback.source.0 as usize]);
+    let target_counts = atomic_parent_counts(&buckets[fallback.target.0 as usize]);
+    let provenance = EdgeProvenance::RuntimeDiscovered {
+        runtime_edge_id: fallback.id,
+    };
+    if fallback.source == fallback.target {
+        let parents = source_counts.into_iter().collect::<Vec<_>>();
+        for (offset, (left, left_count)) in parents.iter().copied().enumerate() {
+            for (right, right_count) in parents.iter().copied().skip(offset + 1) {
+                *logical_component_edges = (*logical_component_edges)
+                    .saturating_add(left_count.saturating_mul(right_count));
+                record_atomic_evidence(
+                    evidence,
+                    left,
+                    right,
+                    provenance,
+                    PredicateResult::Unknown,
+                    fallback.conflict_kinds,
+                    metrics,
+                );
+            }
+        }
+    } else {
+        for (left, left_count) in &source_counts {
+            for (right, right_count) in &target_counts {
+                if left == right {
+                    continue;
+                }
+                *logical_component_edges = (*logical_component_edges)
+                    .saturating_add(left_count.saturating_mul(*right_count));
+                record_atomic_evidence(
+                    evidence,
+                    *left,
+                    *right,
+                    provenance,
+                    PredicateResult::Unknown,
+                    fallback.conflict_kinds,
+                    metrics,
+                );
+            }
+        }
+    }
+}
+
+fn atomic_parent_counts(bucket: &[AtomicComponentRef]) -> BTreeMap<TxIndex, usize> {
+    let mut counts = BTreeMap::new();
+    for component in bucket {
+        *counts.entry(component.parent).or_default() += 1;
+    }
+    counts
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_atomic_evidence(
+    evidence: &mut AtomicEvidenceMap,
+    left: TxIndex,
+    right: TxIndex,
+    provenance: EdgeProvenance,
+    predicate_result: PredicateResult,
+    conflict_kinds: ConflictKinds,
+    metrics: EdgeMetrics,
+) {
+    let pair = canonical_tx_pair(left, right);
+    evidence
+        .entry(pair)
+        .or_default()
+        .entry(provenance)
+        .and_modify(|existing| {
+            existing.predicate_result = existing.predicate_result.or(predicate_result);
+            existing.conflict_kinds |= conflict_kinds;
+        })
+        .or_insert(AtomicEvidenceAccumulator {
+            predicate_result,
+            conflict_kinds,
+            metrics,
+        });
+}
+
+fn atomic_evidence_edge(
+    pair: (TxIndex, TxIndex),
+    provenance: EdgeProvenance,
+    item: AtomicEvidenceAccumulator,
+) -> TransactionEdge {
+    TransactionEdge {
+        source: pair.0,
+        target: pair.1,
+        provenance,
+        predicate_result: item.predicate_result,
+        conflict_kinds: item.conflict_kinds,
+        probability_q16: item.metrics.probability_q16,
+        confidence_q16: item.metrics.confidence_q16,
+        concrete_conflict_observations: item.metrics.concrete_conflict_observations,
+        concrete_independent_observations: item.metrics.concrete_independent_observations,
+        scheduling_risk_q16: item.metrics.scheduling_risk_q16,
+        expected_replay_cost_nanos: item.metrics.expected_replay_cost_nanos,
+        expected_invalidated_descendants_milli: item.metrics.expected_invalidated_descendants_milli,
+        replay_cost_confidence_q16: item.metrics.replay_cost_confidence_q16,
+        expected_serialization_cost_nanos: item.metrics.expected_serialization_cost_nanos,
+        serialization_cost_confidence_q16: item.metrics.serialization_cost_confidence_q16,
     }
 }
 
@@ -854,21 +1748,37 @@ fn materialize_equivalence_chains(
     bucket: &[TxIndex],
     mode: StaticMaterialization<'_>,
 ) -> Result<bool, CandidateGraphError> {
-    let mut groups = BTreeMap::new();
-    for &tx_index in bucket {
-        let transaction = &transactions[tx_index.0 as usize];
-        let Some(key) =
-            predicate.equivalence_key(transaction.instance_id, &transaction.input_bindings)
-        else {
-            return Ok(false);
-        };
-        groups.entry(key).or_insert_with(Vec::new).push(tx_index);
-    }
+    let groups = if predicate.is_unconditional_same_instance_whole_resource() {
+        // Whole-resource self-profile conflicts are also a true equivalence relation: within one
+        // contract instance every member conflicts with every other member. Preserve the complete
+        // logical clique while materializing only the compact group chain.
+        let mut groups = BTreeMap::<InstanceId, Vec<TxIndex>>::new();
+        for &tx_index in bucket {
+            let transaction = &transactions[tx_index.0 as usize];
+            groups
+                .entry(transaction.instance_id)
+                .or_default()
+                .push(tx_index);
+        }
+        groups.into_values().collect::<Vec<_>>()
+    } else {
+        let mut groups = BTreeMap::new();
+        for &tx_index in bucket {
+            let transaction = &transactions[tx_index.0 as usize];
+            let Some(key) =
+                predicate.equivalence_key(transaction.instance_id, &transaction.input_bindings)
+            else {
+                return Ok(false);
+            };
+            groups.entry(key).or_insert_with(Vec::new).push(tx_index);
+        }
+        groups.into_values().collect::<Vec<_>>()
+    };
     let metrics = mode.edge_metrics();
     let provenance = EdgeProvenance::Static {
         profile_edge_index: profile_edge.index,
     };
-    for members in groups.into_values().filter(|members| members.len() >= 2) {
+    for members in groups.into_iter().filter(|members| members.len() >= 2) {
         let logical_edges = members
             .len()
             .saturating_mul(members.len().saturating_sub(1))
@@ -1185,10 +2095,25 @@ fn push_edge(
 
 fn finish_graph(
     transactions: Vec<CandidateTransaction>,
+    edges: Vec<TransactionEdge>,
+    compact_groups: Vec<CompactCandidateGroup>,
+) -> Result<CandidateGraph, CandidateGraphError> {
+    finish_graph_with_parallel(transactions, edges, Vec::new(), compact_groups)
+}
+
+fn finish_graph_with_parallel(
+    transactions: Vec<CandidateTransaction>,
     mut edges: Vec<TransactionEdge>,
+    mut parallel_groups: Vec<ParallelCandidateGroup>,
     compact_groups: Vec<CompactCandidateGroup>,
 ) -> Result<CandidateGraph, CandidateGraphError> {
     edges.sort_by_key(|edge| (edge.source, edge.target, edge.provenance));
+    parallel_groups.sort_by_key(|group| (group.source, group.target));
+    for group in &mut parallel_groups {
+        group
+            .evidences
+            .sort_by_key(|edge| (edge.source, edge.target, edge.provenance));
+    }
     let mut adjacency = vec![Vec::<TransactionAdjacency>::new(); transactions.len()];
     for (edge_offset, edge) in edges.iter().enumerate() {
         let edge_index = u32::try_from(edge_offset)
@@ -1215,6 +2140,10 @@ fn finish_graph(
         );
     }
 
+    let compact_provenances = compact_groups
+        .iter()
+        .map(|group| group.provenance)
+        .collect::<BTreeSet<_>>();
     let mut compact_memberships = vec![Vec::<u32>::new(); transactions.len()];
     for (group_index, group) in compact_groups.iter().enumerate() {
         let group_index = u32::try_from(group_index)
@@ -1227,10 +2156,18 @@ fn finish_graph(
         memberships.sort_unstable();
     }
 
+    let parallel_pairs = parallel_groups
+        .iter()
+        .map(|group| canonical_tx_pair(group.source, group.target))
+        .collect::<BTreeSet<_>>();
+
     Ok(CandidateGraph {
         transactions,
         edges,
+        parallel_groups,
+        parallel_pairs,
         compact_groups,
+        compact_provenances,
         compact_memberships,
         adjacency_offsets,
         adjacency_entries,
@@ -1252,6 +2189,10 @@ pub enum CandidateGraphError {
     TooManyTransactions(usize),
     #[error("candidate graph contains too many edges for u32 indexes: {0}")]
     TooManyEdges(usize),
+    #[error(
+        "transaction {tx_id:?} contains too many symbolic components for u32 indexes: {components}"
+    )]
+    TooManyComponents { tx_id: TxId, components: usize },
     #[error("candidate graph contains too many adjacency entries for u32 offsets")]
     TooManyAdjacencyEntries,
     #[error("transaction {tx_id:?} references unknown profile {profile_id:?}")]

@@ -41,10 +41,7 @@ pub enum EngineError {
     #[error("unsupported Cosmos message: {0}")]
     UnsupportedMessage(String),
     #[error("bundle call {call_index} failed: {error}")]
-    BundleCallFailed {
-        call_index: usize,
-        error: String,
-    },
+    BundleCallFailed { call_index: usize, error: String },
     #[error("contract returned an error: {0}")]
     Contract(String),
     #[error("native contract error: {0}")]

@@ -1,6 +1,7 @@
 use acg_candidate_graph::{
-    CandidateGraphBuilder, CandidateGraphError, CandidateTransaction, CostAwareEdgePolicyConfig,
-    EdgeClass, EdgeProvenance, RiskBoundedSchedulerConfig, WeightedCandidateGraphConfig,
+    AtomicCandidateTransaction, CandidateComponent, CandidateGraphBuilder, CandidateGraphError,
+    CandidateTransaction, CostAwareEdgePolicyConfig, EdgeClass, EdgeProvenance,
+    PreparedCandidateGraphBuilder, RiskBoundedSchedulerConfig, WeightedCandidateGraphConfig,
 };
 use acg_core::{ConflictKinds, ContractCodeHash, InstanceId, RuntimeId, TxId, TxIndex};
 use acg_feedback::{
@@ -74,6 +75,47 @@ fn weighted_config(epoch: u64, threshold: f64) -> WeightedCandidateGraphConfig {
         cost_policy: Default::default(),
         compact_immature_equivalence_edges: false,
         independent_observations_before_softening: 8,
+    }
+}
+
+#[test]
+fn prepared_builder_matches_borrowed_builder_semantics() {
+    let graph = graph();
+    let store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let feedback_config = feedback_config();
+    let transactions = || {
+        vec![
+            tx(&graph, 1, "execute::Credit", 1, json!({"account":"alice"})),
+            tx(&graph, 2, "execute::Credit", 1, json!({"account":"alice"})),
+            tx(&graph, 3, "execute::Credit", 1, json!({"account":"bob"})),
+        ]
+    };
+    let config = WeightedCandidateGraphConfig {
+        compact_immature_equivalence_edges: true,
+        ..weighted_config(0, 0.0)
+    };
+
+    let borrowed = CandidateGraphBuilder::new(&graph)
+        .build_weighted(transactions(), &store, &feedback_config, config)
+        .unwrap();
+    let prepared = PreparedCandidateGraphBuilder::new(&graph)
+        .build_weighted(&graph, transactions(), &store, &feedback_config, config)
+        .unwrap();
+
+    assert_eq!(prepared.edges(), borrowed.edges());
+    assert_eq!(prepared.logical_edge_count(), borrowed.logical_edge_count());
+    assert_eq!(
+        prepared.compact_groups().len(),
+        borrowed.compact_groups().len()
+    );
+    for (left, right) in prepared
+        .compact_groups()
+        .iter()
+        .zip(borrowed.compact_groups())
+    {
+        assert_eq!(left.provenance(), right.provenance());
+        assert_eq!(left.members(), right.members());
+        assert_eq!(left.logical_edges(), right.logical_edges());
     }
 }
 
@@ -746,6 +788,37 @@ fn learned_serialization_cost_changes_risk_while_preserving_replay_and_probabili
 }
 
 #[test]
+fn unconditional_whole_resource_self_profile_clique_is_compacted() {
+    let graph = graph();
+    let _edge_index = static_edge(&graph, "instantiate", "instantiate");
+    let store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let feedback_config = feedback_config();
+    let transactions = (0..8_u64)
+        .map(|offset| tx(&graph, offset + 1, "instantiate", 1, json!({})))
+        .collect();
+
+    let candidate = CandidateGraphBuilder::new(&graph)
+        .build_weighted(
+            transactions,
+            &store,
+            &feedback_config,
+            WeightedCandidateGraphConfig {
+                epoch: 0,
+                edge_materialization_threshold: 0.0,
+                cost_policy: Default::default(),
+                compact_immature_equivalence_edges: true,
+                independent_observations_before_softening: 8,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(candidate.logical_edge_count(), 28);
+    assert_eq!(candidate.edges().len(), 7);
+    assert_eq!(candidate.compact_groups().len(), 1);
+    assert!(candidate.contains_candidate_pair(TxIndex(0), TxIndex(7)));
+}
+
+#[test]
 fn immature_equivalence_clique_is_materialized_as_a_chain_with_logical_coverage() {
     let graph = graph();
     let store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
@@ -908,4 +981,174 @@ fn consensus_phase_cost_weights_must_be_finite_and_positive() {
         invalid_post.validate().unwrap_err(),
         CandidateGraphError::InvalidPhaseWeight(value) if value.is_nan()
     ));
+}
+
+fn atomic_component(
+    graph: &ProfileGraph,
+    entrypoint: &str,
+    instance: u32,
+    bindings: serde_json::Value,
+) -> CandidateComponent {
+    CandidateComponent {
+        profile_id: profile_id(graph, entrypoint),
+        instance_id: InstanceId(instance),
+        input_bindings: InputBindings::from_value(bindings),
+    }
+}
+
+fn atomic_tx(
+    graph: &ProfileGraph,
+    id: u64,
+    components: Vec<(&str, u32, serde_json::Value)>,
+) -> AtomicCandidateTransaction {
+    AtomicCandidateTransaction {
+        tx_id: TxId(id),
+        predicted_position: id as u32,
+        inclusion_probability: 1.0,
+        estimated_execution_cost: 10,
+        components: components
+            .into_iter()
+            .map(|(entrypoint, instance, bindings)| {
+                atomic_component(graph, entrypoint, instance, bindings)
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn atomic_builder_collapses_component_multiplicity_per_profile_relationship() {
+    let graph = graph();
+    let store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let feedback_config = feedback_config();
+    let builder = PreparedCandidateGraphBuilder::new(&graph);
+    let build = builder
+        .build_weighted_atomic(
+            &graph,
+            vec![
+                atomic_tx(
+                    &graph,
+                    0,
+                    vec![
+                        ("execute::Credit", 1, json!({"account":"alice"})),
+                        ("execute::Credit", 1, json!({"account":"alice"})),
+                    ],
+                ),
+                atomic_tx(
+                    &graph,
+                    1,
+                    vec![
+                        ("execute::Credit", 1, json!({"account":"alice"})),
+                        ("execute::Credit", 1, json!({"account":"alice"})),
+                    ],
+                ),
+            ],
+            &store,
+            &feedback_config,
+            weighted_config(0, 0.0),
+        )
+        .unwrap();
+
+    assert_eq!(build.graph().transactions().len(), 2);
+    assert_eq!(build.graph().edges().len(), 1);
+    assert_eq!(build.logical_component_edges(), 4);
+    assert_eq!(
+        build
+            .candidate_provenances_between(TxIndex(0), TxIndex(1))
+            .len(),
+        1,
+        "duplicate component pairs must retain one profile relationship"
+    );
+}
+
+#[test]
+fn atomic_builder_preserves_distinct_profile_relationships_for_feedback_and_risk() {
+    let graph = graph();
+    let store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let feedback_config = feedback_config();
+    let builder = PreparedCandidateGraphBuilder::new(&graph);
+    let build = builder
+        .build_weighted_atomic(
+            &graph,
+            vec![
+                atomic_tx(
+                    &graph,
+                    0,
+                    vec![
+                        ("execute::Credit", 1, json!({"account":"alice"})),
+                        ("execute::IncrementCounter", 1, json!({"shard_id":7})),
+                    ],
+                ),
+                atomic_tx(
+                    &graph,
+                    1,
+                    vec![
+                        ("execute::Credit", 1, json!({"account":"alice"})),
+                        ("execute::IncrementCounter", 1, json!({"shard_id":7})),
+                    ],
+                ),
+            ],
+            &store,
+            &feedback_config,
+            weighted_config(0, 0.0),
+        )
+        .unwrap();
+
+    assert_eq!(build.graph().edges().len(), 1);
+    assert_eq!(build.graph().parallel_groups().len(), 1);
+    assert_eq!(build.graph().parallel_groups()[0].evidences().len(), 2);
+    assert_eq!(build.logical_component_edges(), 2);
+    assert_eq!(
+        build
+            .candidate_provenances_between(TxIndex(0), TxIndex(1))
+            .len(),
+        2,
+        "distinct profile relationships remain separate scheduler evidence"
+    );
+}
+
+#[test]
+fn atomic_single_component_path_matches_regular_candidate_semantics() {
+    let graph = graph();
+    let store = AdaptiveFeedbackStore::from_graph(&graph, 0).unwrap();
+    let feedback_config = feedback_config();
+    let config = weighted_config(0, 0.0);
+    let builder = PreparedCandidateGraphBuilder::new(&graph);
+    let ordinary = builder
+        .build_weighted(
+            &graph,
+            vec![
+                tx(&graph, 0, "execute::Credit", 1, json!({"account":"alice"})),
+                tx(&graph, 1, "execute::Credit", 1, json!({"account":"alice"})),
+            ],
+            &store,
+            &feedback_config,
+            config,
+        )
+        .unwrap();
+    let atomic = builder
+        .build_weighted_atomic(
+            &graph,
+            vec![
+                atomic_tx(
+                    &graph,
+                    0,
+                    vec![("execute::Credit", 1, json!({"account":"alice"}))],
+                ),
+                atomic_tx(
+                    &graph,
+                    1,
+                    vec![("execute::Credit", 1, json!({"account":"alice"}))],
+                ),
+            ],
+            &store,
+            &feedback_config,
+            config,
+        )
+        .unwrap();
+
+    assert_eq!(
+        atomic.logical_component_edges(),
+        ordinary.logical_edge_count()
+    );
+    assert_eq!(atomic.graph().edges(), ordinary.edges());
 }

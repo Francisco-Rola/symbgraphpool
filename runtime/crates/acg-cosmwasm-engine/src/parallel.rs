@@ -155,7 +155,8 @@ impl ContractExecutionDiagnostics {
         self.aggregate_host_storage += other.aggregate_host_storage;
         self.aggregate_host_query += other.aggregate_host_query;
         self.aggregate_transaction_lock_wait += other.aggregate_transaction_lock_wait;
-        self.aggregate_canonical_state_read_lock_wait += other.aggregate_canonical_state_read_lock_wait;
+        self.aggregate_canonical_state_read_lock_wait +=
+            other.aggregate_canonical_state_read_lock_wait;
         self.aggregate_canonical_state_read_hold += other.aggregate_canonical_state_read_hold;
         self.aggregate_mvcc_storage_point += other.aggregate_mvcc_storage_point;
         self.aggregate_mvcc_storage_range += other.aggregate_mvcc_storage_range;
@@ -424,7 +425,9 @@ impl ExecutionHotPathDiagnostics {
             aggregate_host_storage: duration(&self.host_storage_ns),
             aggregate_host_query: duration(&self.host_query_ns),
             aggregate_transaction_lock_wait: duration(&self.transaction_lock_wait_ns),
-            aggregate_canonical_state_read_lock_wait: duration(&self.canonical_state_read_lock_wait_ns),
+            aggregate_canonical_state_read_lock_wait: duration(
+                &self.canonical_state_read_lock_wait_ns,
+            ),
             aggregate_canonical_state_read_hold: duration(&self.canonical_state_read_hold_ns),
             aggregate_mvcc_storage_point: duration(&self.mvcc_storage_point_ns),
             aggregate_mvcc_storage_range: duration(&self.mvcc_storage_range_ns),

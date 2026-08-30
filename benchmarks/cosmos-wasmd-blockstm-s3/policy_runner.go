@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	abci "github.com/cometbft/cometbft/abci/types"
 	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
@@ -16,11 +17,18 @@ import (
 // policyRunStats records actual execution attempts. An attempt beyond the
 // transaction count is a validation-triggered replay.
 type policyRunStats struct {
-	Attempts     uint64
-	Reexecutions uint64
-	Speculated   uint64
-	Reused       uint64
-	Replayed     uint64
+	Attempts              uint64
+	Reexecutions          uint64
+	Speculated            uint64
+	Reused                uint64
+	Replayed              uint64
+	PreConsensusNanos     uint64
+	PostConsensusNanos    uint64
+	ValidationNanos       uint64
+	ReplayExecutionNanos  uint64
+	ConflictAnalysisNanos uint64
+	DiscoveredConflicts   uint64
+	ForwardFallbacks      uint64
 }
 
 type storeID uint64
@@ -71,11 +79,15 @@ func storeIDFromName(name string) storeID {
 }
 
 type storeIDRegistry struct {
-	ids map[storetypes.StoreKey]storeID
+	ids  map[storetypes.StoreKey]storeID
+	keys map[storeID]storetypes.StoreKey
 }
 
 func newStoreIDRegistry() *storeIDRegistry {
-	return &storeIDRegistry{ids: make(map[storetypes.StoreKey]storeID, 16)}
+	return &storeIDRegistry{
+		ids:  make(map[storetypes.StoreKey]storeID, 16),
+		keys: make(map[storeID]storetypes.StoreKey, 16),
+	}
 }
 
 func (r *storeIDRegistry) id(key storetypes.StoreKey) storeID {
@@ -84,7 +96,17 @@ func (r *storeIDRegistry) id(key storetypes.StoreKey) storeID {
 	}
 	id := storeIDFromName(key.Name())
 	r.ids[key] = id
+	// Hash collisions are conservatively treated as one store by access validation.
+	// Keep the first concrete StoreKey so transaction-local deltas can be captured.
+	if _, exists := r.keys[id]; !exists {
+		r.keys[id] = key
+	}
 	return id
+}
+
+func (r *storeIDRegistry) key(id storeID) (storetypes.StoreKey, bool) {
+	key, ok := r.keys[id]
+	return key, ok
 }
 
 func exactAccessID(store storeID, key []byte) accessID {
@@ -104,7 +126,13 @@ func cloneBytes(bz []byte) []byte {
 	if bz == nil {
 		return nil
 	}
-	return append([]byte(nil), bz...)
+	// make+copy preserves the distinction between nil and a valid,
+	// zero-length value. append([]byte(nil), bz...) collapses []byte{}
+	// to nil, which makes store/v2 reject the value when a captured delta
+	// is materialized with KVStore.Set.
+	out := make([]byte, len(bz))
+	copy(out, bz)
+	return out
 }
 
 func sameWriteLocation(a writeLocation, store storeID, key []byte) bool {
@@ -265,66 +293,176 @@ func mergeWrites(dst *writeSet, tracker *accessTracker) {
 // semantics to the SDK cache store itself.
 type trackingKVStore struct {
 	storetypes.KVStore
-	store   storeID
-	tracker *accessTracker
+	storeKey storetypes.StoreKey
+	store    storeID
+	tracker  *accessTracker
+	readView *rustMvccReadView
+	overlay  *rustLocalOverlay
 }
 
 func (s trackingKVStore) Get(key []byte) []byte {
 	s.tracker.read(s.store, key)
+	if mutation, ok := s.overlay.lookupBytes(s.storeKey, key); ok {
+		if mutation.deleted {
+			return nil
+		}
+		return cloneBytes(mutation.value)
+	}
+	if value, deleted, ok := s.readView.bytesValue(s.storeKey, key); ok {
+		if deleted {
+			return nil
+		}
+		return value
+	}
 	return s.KVStore.Get(key)
 }
 func (s trackingKVStore) Has(key []byte) bool {
 	s.tracker.read(s.store, key)
+	if mutation, ok := s.overlay.lookupBytes(s.storeKey, key); ok {
+		return !mutation.deleted
+	}
+	if _, deleted, ok := s.readView.bytesValue(s.storeKey, key); ok {
+		return !deleted
+	}
 	return s.KVStore.Has(key)
 }
 func (s trackingKVStore) Set(key, value []byte) {
 	s.tracker.write(s.store, key)
+	s.overlay.setBytes(s.storeKey, key, value)
 	s.KVStore.Set(key, value)
 }
 func (s trackingKVStore) Delete(key []byte) {
 	s.tracker.write(s.store, key)
+	s.overlay.deleteBytes(s.storeKey, key)
 	s.KVStore.Delete(key)
 }
-func (s trackingKVStore) Iterator(start, end []byte) storetypes.Iterator {
+func (s trackingKVStore) iterator(start, end []byte, reverse bool) storetypes.Iterator {
 	s.tracker.readRange(s.store, start, end)
-	return s.KVStore.Iterator(start, end)
+	var underlying storetypes.Iterator
+	if reverse {
+		underlying = s.KVStore.ReverseIterator(start, end)
+	} else {
+		underlying = s.KVStore.Iterator(start, end)
+	}
+	values, err := collectByteIterator(underlying)
+	if err != nil {
+		return rustByteErrorIterator(start, end, err)
+	}
+	for raw, mutation := range s.readView.bytesRange(s.storeKey, start, end) {
+		if mutation.deleted {
+			delete(values, raw)
+		} else {
+			values[raw] = cloneBytes(mutation.value)
+		}
+	}
+	for _, layer := range s.overlay.chainRootFirst() {
+		for raw, mutation := range layer.bytes[s.storeKey] {
+			key := []byte(raw)
+			if !keyInRange(key, start, end) {
+				continue
+			}
+			if mutation.deleted {
+				delete(values, raw)
+			} else {
+				values[raw] = cloneBytes(mutation.value)
+			}
+		}
+	}
+	return rustByteIterator(start, end, values, reverse)
+}
+func (s trackingKVStore) Iterator(start, end []byte) storetypes.Iterator {
+	return s.iterator(start, end, false)
 }
 func (s trackingKVStore) ReverseIterator(start, end []byte) storetypes.Iterator {
-	s.tracker.readRange(s.store, start, end)
-	return s.KVStore.ReverseIterator(start, end)
+	return s.iterator(start, end, true)
 }
 
 // ObjKVStore is generic over any in store/v2. Track it as well so scheduler
 // correctness does not depend on a keeper choosing byte-backed vs object stores.
 type trackingObjKVStore struct {
 	storetypes.ObjKVStore
-	store   storeID
-	tracker *accessTracker
+	storeKey storetypes.StoreKey
+	store    storeID
+	tracker  *accessTracker
+	readView *rustMvccReadView
+	overlay  *rustLocalOverlay
 }
 
 func (s trackingObjKVStore) Get(key []byte) any {
 	s.tracker.read(s.store, key)
+	if mutation, ok := s.overlay.lookupObject(s.storeKey, key); ok {
+		if mutation.deleted {
+			return nil
+		}
+		return mutation.value
+	}
+	if value, deleted, ok := s.readView.objectValue(s.storeKey, key); ok {
+		if deleted {
+			return nil
+		}
+		return value
+	}
 	return s.ObjKVStore.Get(key)
 }
 func (s trackingObjKVStore) Has(key []byte) bool {
 	s.tracker.read(s.store, key)
+	if mutation, ok := s.overlay.lookupObject(s.storeKey, key); ok {
+		return !mutation.deleted
+	}
+	if _, deleted, ok := s.readView.objectValue(s.storeKey, key); ok {
+		return !deleted
+	}
 	return s.ObjKVStore.Has(key)
 }
 func (s trackingObjKVStore) Set(key []byte, value any) {
 	s.tracker.write(s.store, key)
+	s.overlay.setObject(s.storeKey, key, value)
 	s.ObjKVStore.Set(key, value)
 }
 func (s trackingObjKVStore) Delete(key []byte) {
 	s.tracker.write(s.store, key)
+	s.overlay.deleteObject(s.storeKey, key)
 	s.ObjKVStore.Delete(key)
 }
-func (s trackingObjKVStore) Iterator(start, end []byte) storetypes.ObjIterator {
+func (s trackingObjKVStore) iterator(start, end []byte, reverse bool) storetypes.ObjIterator {
 	s.tracker.readRange(s.store, start, end)
-	return s.ObjKVStore.Iterator(start, end)
+	var underlying storetypes.ObjIterator
+	if reverse {
+		underlying = s.ObjKVStore.ReverseIterator(start, end)
+	} else {
+		underlying = s.ObjKVStore.Iterator(start, end)
+	}
+	values, err := collectObjectIterator(underlying)
+	if err != nil {
+		return rustObjectErrorIterator(start, end, err)
+	}
+	for raw, mutation := range s.readView.objectRange(s.storeKey, start, end) {
+		if mutation.deleted {
+			delete(values, raw)
+		} else {
+			values[raw] = mutation.value
+		}
+	}
+	for _, layer := range s.overlay.chainRootFirst() {
+		for raw, mutation := range layer.objects[s.storeKey] {
+			key := []byte(raw)
+			if !keyInRange(key, start, end) {
+				continue
+			}
+			if mutation.deleted {
+				delete(values, raw)
+			} else {
+				values[raw] = mutation.value
+			}
+		}
+	}
+	return rustObjectIterator(start, end, values, reverse)
+}
+func (s trackingObjKVStore) Iterator(start, end []byte) storetypes.ObjIterator {
+	return s.iterator(start, end, false)
 }
 func (s trackingObjKVStore) ReverseIterator(start, end []byte) storetypes.ObjIterator {
-	s.tracker.readRange(s.store, start, end)
-	return s.ObjKVStore.ReverseIterator(start, end)
+	return s.iterator(start, end, true)
 }
 
 // cacheMultiStoreDelegate deliberately wraps CacheMultiStore one level down
@@ -337,27 +475,35 @@ type cacheMultiStoreDelegate struct {
 
 type trackingMultiStore struct {
 	cacheMultiStoreDelegate
-	tracker *accessTracker
-	stores  *storeIDRegistry
+	tracker  *accessTracker
+	stores   *storeIDRegistry
+	readView *rustMvccReadView
+	overlay  *rustLocalOverlay
 }
 
-func wrapTrackingCacheMultiStore(store storetypes.CacheMultiStore, parent *accessTracker, stores *storeIDRegistry) *trackingMultiStore {
+func wrapTrackingCacheMultiStore(store storetypes.CacheMultiStore, parent *accessTracker, stores *storeIDRegistry, readView *rustMvccReadView, parentOverlay *rustLocalOverlay) *trackingMultiStore {
 	return &trackingMultiStore{
 		cacheMultiStoreDelegate: cacheMultiStoreDelegate{CacheMultiStore: store},
 		tracker:                 newAccessTracker(parent),
 		stores:                  stores,
+		readView:                readView,
+		overlay:                 newRustLocalOverlay(parentOverlay),
 	}
 }
 
 func newTrackingMultiStore(parent storetypes.MultiStore) *trackingMultiStore {
-	return wrapTrackingCacheMultiStore(parent.CacheMultiStore(), nil, newStoreIDRegistry())
+	return wrapTrackingCacheMultiStore(parent.CacheMultiStore(), nil, newStoreIDRegistry(), nil, nil)
+}
+
+func newTrackingMultiStoreWithMVCC(parent storetypes.MultiStore, readView *rustMvccReadView) *trackingMultiStore {
+	return wrapTrackingCacheMultiStore(parent.CacheMultiStore(), nil, newStoreIDRegistry(), readView, nil)
 }
 
 func (m *trackingMultiStore) CacheWrap() storetypes.CacheWrap { return m.CacheMultiStore() }
 
 func (m *trackingMultiStore) CacheMultiStore() storetypes.CacheMultiStore {
 	child := m.cacheMultiStoreDelegate.CacheMultiStore.CacheMultiStore()
-	return wrapTrackingCacheMultiStore(child, m.tracker, m.stores)
+	return wrapTrackingCacheMultiStore(child, m.tracker, m.stores, m.readView, m.overlay)
 }
 
 func (m *trackingMultiStore) CacheMultiStoreWithVersion(version int64) (storetypes.CacheMultiStore, error) {
@@ -365,39 +511,46 @@ func (m *trackingMultiStore) CacheMultiStoreWithVersion(version int64) (storetyp
 	if err != nil {
 		return nil, err
 	}
-	return wrapTrackingCacheMultiStore(child, m.tracker, m.stores), nil
+	return wrapTrackingCacheMultiStore(child, m.tracker, m.stores, m.readView, m.overlay), nil
 }
 
 func (m *trackingMultiStore) GetStore(key storetypes.StoreKey) storetypes.Store {
 	store := m.cacheMultiStoreDelegate.CacheMultiStore.GetStore(key)
 	if kv, ok := store.(storetypes.KVStore); ok {
-		return trackingKVStore{KVStore: kv, store: m.stores.id(key), tracker: m.tracker}
+		return trackingKVStore{KVStore: kv, storeKey: key, store: m.stores.id(key), tracker: m.tracker, readView: m.readView, overlay: m.overlay}
 	}
 	if obj, ok := store.(storetypes.ObjKVStore); ok {
-		return trackingObjKVStore{ObjKVStore: obj, store: m.stores.id(key), tracker: m.tracker}
+		return trackingObjKVStore{ObjKVStore: obj, storeKey: key, store: m.stores.id(key), tracker: m.tracker, readView: m.readView, overlay: m.overlay}
 	}
 	return store
 }
 
 func (m *trackingMultiStore) GetKVStore(key storetypes.StoreKey) storetypes.KVStore {
 	return trackingKVStore{
-		KVStore: m.cacheMultiStoreDelegate.CacheMultiStore.GetKVStore(key),
-		store:   m.stores.id(key),
-		tracker: m.tracker,
+		KVStore:  m.cacheMultiStoreDelegate.CacheMultiStore.GetKVStore(key),
+		storeKey: key,
+		store:    m.stores.id(key),
+		tracker:  m.tracker,
+		readView: m.readView,
+		overlay:  m.overlay,
 	}
 }
 
 func (m *trackingMultiStore) GetObjKVStore(key storetypes.StoreKey) storetypes.ObjKVStore {
 	return trackingObjKVStore{
 		ObjKVStore: m.cacheMultiStoreDelegate.CacheMultiStore.GetObjKVStore(key),
+		storeKey:   key,
 		store:      m.stores.id(key),
 		tracker:    m.tracker,
+		readView:   m.readView,
+		overlay:    m.overlay,
 	}
 }
 
 func (m *trackingMultiStore) Write() {
 	m.cacheMultiStoreDelegate.CacheMultiStore.Write()
 	m.tracker.mergeIntoParent()
+	m.overlay.mergeIntoParent()
 }
 
 type speculativeResult struct {
@@ -489,6 +642,21 @@ func commitSpeculation(
 	attempts *atomic.Uint64,
 	stats *policyRunStats,
 ) error {
+	return commitSpeculationWithForcedReplay(ms, txs, indices, spec, deliverTx, results, priorWrites, attempts, stats, nil)
+}
+
+func commitSpeculationWithForcedReplay(
+	ms storetypes.MultiStore,
+	txs [][]byte,
+	indices []int,
+	spec map[int]speculativeResult,
+	deliverTx sdk.DeliverTxFunc,
+	results []*abci.ExecTxResult,
+	priorWrites *writeSet,
+	attempts *atomic.Uint64,
+	stats *policyRunStats,
+	forcedReplay map[int]struct{},
+) error {
 	sort.Ints(indices)
 	for _, idx := range indices {
 		r, ok := spec[idx]
@@ -499,9 +667,15 @@ func commitSpeculation(
 		if r.result != nil && r.result.Code != 0 {
 			return fmt.Errorf("speculative tx %d failed: %s", idx, r.result.Log)
 		}
-		if readsConflictWithWrites(r.store.tracker, priorWrites) {
+		_, force := forcedReplay[idx]
+		validationStarted := time.Now()
+		invalid := force || readsConflictWithWrites(r.store.tracker, priorWrites)
+		stats.ValidationNanos += uint64(time.Since(validationStarted).Nanoseconds())
+		if invalid {
 			stats.Replayed++
+			replayStarted := time.Now()
 			r = replayOne(ms, txs[idx], idx, deliverTx)
+			stats.ReplayExecutionNanos += uint64(time.Since(replayStarted).Nanoseconds())
 			attempts.Add(1)
 			if r.result != nil && r.result.Code != 0 {
 				return fmt.Errorf("replayed tx %d failed: %s", idx, r.result.Log)
@@ -514,6 +688,115 @@ func commitSpeculation(
 		results[idx] = r.result
 	}
 	return nil
+}
+
+func writeSetsConflict(left, right *writeSet) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	for id := range left.exact {
+		if _, ok := right.exact[id]; ok {
+			return true
+		}
+		if _, ok := right.collisions[id]; ok {
+			return true
+		}
+	}
+	for id := range left.collisions {
+		if _, ok := right.exact[id]; ok {
+			return true
+		}
+		if _, ok := right.collisions[id]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ariaRule2ForwardFallbacks implements the same AriaFB Rule-2-like adaptation
+// used by the Rust benchmark harness. For a later transaction j, force fallback
+// when it has a WAW dependency, or when it has both WAR and RAW dependencies
+// against earlier transactions in the consensus-decided order.
+func ariaRule2ForwardFallbacks(trackers []*accessTracker) (map[int]struct{}, uint64) {
+	fallbacks := make(map[int]struct{})
+	var discovered uint64
+	for right := 0; right < len(trackers); right++ {
+		if trackers[right] == nil {
+			continue
+		}
+		var waw, war, raw bool
+		for left := 0; left < right; left++ {
+			if trackers[left] == nil {
+				continue
+			}
+			pairWAW := writeSetsConflict(&trackers[left].writes, &trackers[right].writes)
+			pairWAR := readsConflictWithWrites(trackers[left], &trackers[right].writes)
+			pairRAW := readsConflictWithWrites(trackers[right], &trackers[left].writes)
+			if pairWAW || pairWAR || pairRAW {
+				discovered++
+			}
+			waw = waw || pairWAW
+			war = war || pairWAR
+			raw = raw || pairRAW
+		}
+		if waw || (war && raw) {
+			fallbacks[right] = struct{}{}
+		}
+	}
+	return fallbacks, discovered
+}
+
+// AriaFBRunner is a same-Wasmd mechanism adaptation of the AriaFB baseline used
+// by the Rust harness: all transactions execute after consensus against one
+// block-start snapshot, Rule-2-like forward dependencies are proactively sent
+// to fallback, and canonical concrete read validation conservatively replays
+// any additional stale receipt. It intentionally preserves consensus-decided
+// transaction order rather than claiming source-code identity with Aria.
+type AriaFBRunner struct {
+	workers int
+	last    policyRunStats
+}
+
+func NewAriaFBRunner(workers int) *AriaFBRunner   { return &AriaFBRunner{workers: workers} }
+func (r *AriaFBRunner) LastStats() policyRunStats { return r.last }
+
+func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs [][]byte, deliverTx sdk.DeliverTxFunc) ([]*abci.ExecTxResult, error) {
+	indices := make([]int, len(txs))
+	for i := range indices {
+		indices[i] = i
+	}
+	results := make([]*abci.ExecTxResult, len(txs))
+	if len(indices) == 0 {
+		r.last = policyRunStats{}
+		return results, nil
+	}
+	stats := policyRunStats{Speculated: uint64(len(indices))}
+	postStarted := time.Now()
+	spec := speculateIndices(ctx, r.workers, ms, txs, indices, deliverTx)
+
+	trackers := make([]*accessTracker, len(txs))
+	for idx, result := range spec {
+		if result.store != nil {
+			trackers[idx] = result.store.tracker
+		}
+	}
+	analysisStarted := time.Now()
+	forced, discovered := ariaRule2ForwardFallbacks(trackers)
+	stats.ConflictAnalysisNanos = uint64(time.Since(analysisStarted).Nanoseconds())
+	stats.DiscoveredConflicts = discovered
+	stats.ForwardFallbacks = uint64(len(forced))
+
+	var attempts atomic.Uint64
+	priorWrites := newWriteSet(64)
+	if err := commitSpeculationWithForcedReplay(ms, txs, indices, spec, deliverTx, results, &priorWrites, &attempts, &stats, forced); err != nil {
+		return nil, err
+	}
+	stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
+	a := attempts.Load()
+	stats.Attempts = a
+	stats.Reexecutions = a - uint64(len(txs))
+	r.last = stats
+	return results, ctx.Err()
 }
 
 // VegetaRunner is a Wasmd/Cosmos port of Vegeta's speculate-order-replay
@@ -540,12 +823,16 @@ func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 		return results, nil
 	}
 	stats := policyRunStats{Speculated: uint64(len(indices))}
+	preStarted := time.Now()
 	spec := speculateIndices(ctx, r.workers, ms, txs, indices, deliverTx)
+	stats.PreConsensusNanos = uint64(time.Since(preStarted).Nanoseconds())
 	var attempts atomic.Uint64
 	priorWrites := newWriteSet(64)
+	postStarted := time.Now()
 	if err := commitSpeculation(ms, txs, indices, spec, deliverTx, results, &priorWrites, &attempts, &stats); err != nil {
 		return nil, err
 	}
+	stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
 	a := attempts.Load()
 	stats.Attempts = a
 	stats.Reexecutions = a - uint64(len(txs))

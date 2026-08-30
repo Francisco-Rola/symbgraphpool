@@ -198,7 +198,7 @@ be used before reporting high-percentile latency.
 
 ## Required invariants
 
-`scripts/internal/validate-conflictlab-v1.py` rejects a complete dataset unless:
+`tools/internal/validate-conflictlab-v1.py` rejects a complete dataset unless:
 
 - all expected campaign counts are present;
 - every record is schema 3, real Wasm, within the fixed six-worker/six-physical-core budget, and
@@ -225,21 +225,21 @@ research run can be inspected without silently presenting it as an artifact-read
 First run the authoritative repository gate:
 
 ```bash
-./scripts/run-all-tests.sh
+./scripts/test-all.sh
 ```
 
 Then execute the complete suite:
 
 ```bash
-./scripts/run-conflictlab-v1-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh
 ```
 
 The second optional argument chooses a shorter evidence profile:
 
 ```bash
-./scripts/run-conflictlab-v1-evaluation.sh <output-dir> core
-./scripts/run-conflictlab-v1-evaluation.sh <output-dir> mechanisms
-./scripts/run-conflictlab-v1-evaluation.sh <output-dir> full
+./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh <output-dir> core
+./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh <output-dir> mechanisms
+./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh <output-dir> full
 ```
 
 `full` is the canonical 4,630-record suite. The runner is resumable: when the same output directory
@@ -283,7 +283,7 @@ When V1 post-processing fails, `run-conflictlab-v1-evaluation.sh` writes `valida
 to create a self-contained upload bundle under `debug-bundles/`. It can also be generated manually:
 
 ```bash
-./scripts/internal/collect-conflictlab-v1-debug-bundle.sh benchmark-results/conflictlab-v1-core
+./tools/internal/collect-conflictlab-v1-debug-bundle.sh benchmark-results/conflictlab-v1-core
 ```
 
 The ZIP contains the combined `records.jsonl`, validation/summary output, campaign manifests and

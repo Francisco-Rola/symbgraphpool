@@ -1,55 +1,47 @@
 # Adaptive Conflict Graph
 
 Adaptive Conflict Graph (ACG) is a Rust/CosmWasm research runtime for conflict-aware speculative
-transaction execution. It builds a symbolic candidate graph, schedules a READY-DAG, executes against
-block-local MVCC state, validates in canonical order, selectively replays invalid work, and feeds
-runtime evidence back into later scheduling decisions.
+transaction execution. Offline symbolic entrypoint profiles build a persistent conflict model;
+blocks instantiate an atomic transaction candidate graph; runtime feedback refines conflict risk;
+Rust emits a reduced dependency-ready DAG; Wasmd/WasmVM executes speculatively; canonical validation
+and selective replay preserve serial-equivalent state.
 
-## Implemented
+## Maintained commands
 
-- **Phases 1–2:** symbolic profiles and concrete transaction candidate graphs.
-- **Phases 3–4:** runtime conflict feedback, learned probabilities, and risk-bounded scheduling.
-- **Phase 5:** detached speculative receipts, canonical validation/replay, READY-DAG + MVCC,
-  replay/serialization-cost feedback, stable experiment records, and acceptance gates.
-- **Benchmark harness:** deterministic serial reference plus static, probability-only, and cost-aware
-  policy runs.
-- **ConflictLab 1.0:** 15-campaign real-Wasm correctness/performance suite on six workers.
-
-VM lifecycle experiments that are not part of the normal runtime remain under `research/vm-lifecycle/`.
-
-## Main commands
-
-Run the repository gate after code changes:
+Run the complete repository validation gate:
 
 ```bash
-./scripts/run-all-tests.sh
+bash scripts/test-all.sh
 ```
 
-Run the complete ConflictLab 1.0 suite:
+Run the controlled Wasmd comparison locally (2/4/6 workers on a six-core host):
 
 ```bash
-./scripts/run-conflictlab-v1-evaluation.sh
+bash scripts/eval-wasmd-debug.sh
 ```
 
-Run the focused six-worker parallelism-ceiling/overhead experiment:
+Run the publication-style single-machine campaign from a clean committed tree:
 
 ```bash
-./scripts/run-conflictlab-parallelism-evaluation.sh
+bash scripts/eval-wasmd-paper.sh
 ```
 
-The long evaluations are intentionally separate from the normal test gate.
+The maintained comparison is Serial vs Cosmos BlockSTM vs AriaFB-style vs Vegeta-style vs Rust-ACG,
+all on the same Wasmd/WasmVM/Cosmos SDK state machine. See `evaluation/wasmd/README.md` for metric
+definitions and the publication roadmap.
 
 ## Repository map
 
 ```text
-crates/       symbolic graph, candidate graph, predictor and scheduler
-runtime/      CosmWasm engine, MVCC/READY-DAG execution, feedback and evaluation harness
-benchmarks/   ConflictLab and MiniWarehouse contracts + symbolic profiles
-evaluation/   current experiment definitions and acceptance policies
-scripts/      current test/evaluation entrypoints and their small helper tools
-docs/         architecture, phase notes and tuning documentation
-research/     quarantined experiments
+crates/       symbolic profiles, predicates, candidate graph, adaptive feedback and scheduler
+runtime/      CosmWasm runtime/executors, MVCC, reconciliation, FFI and benchmark harnesses
+benchmarks/   contracts, Wasmd comparison machinery and symbolic profile corpus
+evaluation/   maintained experiment definitions and publication methodology
+tools/        internal data-preparation, validation and summarization utilities
+scripts/      small set of maintained user-facing entrypoints
+tools/legacy-scripts/ historical campaign wrappers retained only for reproducibility
+docs/         architecture, implementation summary and phase history
+research/     quarantined/archived research experiments
 ```
 
-See `evaluation/conflictlab/README.md` for the active ConflictLab experiments and
-`docs/implementation-status.md` for the current implementation snapshot.
+Start with `docs/implementation-summary.md` for the current end-to-end design.

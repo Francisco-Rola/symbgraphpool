@@ -1,0 +1,22 @@
+[package]
+name = "acg-wasmd-scheduler-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+acg-core.workspace = true
+acg-symbolic-json.workspace = true
+acg-profile-graph.workspace = true
+acg-predicate.workspace = true
+acg-candidate-graph.workspace = true
+acg-feedback.workspace = true
+acg-runtime-feedback.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3 = "=1.5.4"

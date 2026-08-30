@@ -96,7 +96,7 @@ coverage is now subsumed by ConflictLab 1.0. Use the current suite instead of th
 runner:
 
 ```bash
-./scripts/run-conflictlab-v1-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh
 ```
 
 ## Repository gate
@@ -104,7 +104,7 @@ runner:
 Run after every patch:
 
 ```bash
-./scripts/run-all-tests.sh
+./scripts/test-all.sh
 ```
 
 It runs `cargo fmt --all` for every Cargo workspace, `git diff --check`, shell/Python syntax checks,

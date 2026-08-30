@@ -22,11 +22,10 @@ use crate::mvcc::{BlockMvccState, MvccReadView, VisibilityMask};
 use crate::native::{NativeCallContext, NativeContract};
 use crate::parallel::{
     CanonicalCommitDiagnostics, ContractExecutionDiagnostics, DependencyPreexecutionDiagnostics,
-    ExecutionHotPathDiagnostics,
-    ParallelExecutionConfig, ParallelSpeculativeExecutionMetrics, PostConsensusTimings,
-    PredictionMatchMetrics, PreparedSpeculativeBlock, ReconciliationDependencyEvidence,
-    SpeculativeDependency, SpeculativeDependencyClass, SpeculativeWave,
-    SplitPhaseSpeculativeBlockOutcome,
+    ExecutionHotPathDiagnostics, ParallelExecutionConfig, ParallelSpeculativeExecutionMetrics,
+    PostConsensusTimings, PredictionMatchMetrics, PreparedSpeculativeBlock,
+    ReconciliationDependencyEvidence, SpeculativeDependency, SpeculativeDependencyClass,
+    SpeculativeWave, SplitPhaseSpeculativeBlockOutcome,
 };
 use crate::querier::{EngineQuerier, EngineQuerierBinding};
 use crate::speculative::{
@@ -38,15 +37,13 @@ use crate::state::{code_id_of, SharedTx, SharedWorld, TransactionState, WorldSta
 use crate::storage::{EngineStorage, EngineStorageBinding};
 use crate::types::{
     AccessKind, Address, BlockContext, BundleCall, BundleCallAccessSpan, BundleCallFailure,
-    BundleExecutionOutcome,
-    BundleQueryResult, BundleRevertedScopeOutcome, ScopedBundleCall,
-    CodeChecksum, CodeId, CodeKind, CodeMetadata, ContractMetadata, ExecutionOutcome,
-    ExecutionRequest, QueryOutcome, TransactionId,
+    BundleExecutionOutcome, BundleQueryResult, BundleRevertedScopeOutcome, CodeChecksum, CodeId,
+    CodeKind, CodeMetadata, ContractMetadata, ExecutionOutcome, ExecutionRequest, QueryOutcome,
+    ScopedBundleCall, TransactionId,
 };
 use crate::validation::{
     apply_write_set, apply_write_sets, apply_write_sets_with_diagnostics, validate_dependencies,
-    write_set_touches_conflict,
-    ValidationOutcome,
+    write_set_touches_conflict, ValidationOutcome,
 };
 
 const EXECUTE_RESPONSE_TYPE_URL: &str = "/cosmwasm.wasm.v1.MsgExecuteContractResponse";
@@ -117,6 +114,11 @@ pub(crate) struct EngineCore {
 #[derive(Clone)]
 pub struct CosmWasmEngine {
     core: Arc<EngineCore>,
+}
+
+struct BundleCallOutputs<'a> {
+    events: &'a mut Vec<Event>,
+    query_results: &'a mut Vec<BundleQueryResult>,
 }
 
 /// Execute a fixed amount of deterministic CPU-only work for workload calibration.
@@ -1203,7 +1205,11 @@ impl CosmWasmEngine {
         &self,
         block: BlockContext,
         request: ExecutionRequest,
-    ) -> (EngineResult<ExecutionOutcome>, StateWriteSet, ContractExecutionDiagnostics) {
+    ) -> (
+        EngineResult<ExecutionOutcome>,
+        StateWriteSet,
+        ContractExecutionDiagnostics,
+    ) {
         let diagnostics = Arc::new(ExecutionHotPathDiagnostics::default());
         let transaction_id = request.transaction_id();
         let tx = Arc::new(parking_lot::Mutex::new(
@@ -1383,8 +1389,10 @@ impl CosmWasmEngine {
                     block.clone(),
                     index,
                     &calls[index].call,
-                    &mut events,
-                    &mut query_results,
+                    BundleCallOutputs {
+                        events: &mut events,
+                        query_results: &mut query_results,
+                    },
                 );
                 let access_end = tx.lock().accesses.len();
                 call_access_spans.push(BundleCallAccessSpan {
@@ -1422,7 +1430,8 @@ impl CosmWasmEngine {
             let mut failure = None;
             let mut last_executed = first;
 
-            for call_index in first..end {
+            for (offset, scoped_call) in calls[first..end].iter().enumerate() {
+                let call_index = first + offset;
                 last_executed = call_index;
                 let local_start = child.lock().accesses.len().saturating_sub(access_start);
                 let result = self.execute_bundle_call(
@@ -1430,9 +1439,11 @@ impl CosmWasmEngine {
                     transaction_id,
                     block.clone(),
                     call_index,
-                    &calls[call_index].call,
-                    &mut child_events,
-                    &mut child_queries,
+                    &scoped_call.call,
+                    BundleCallOutputs {
+                        events: &mut child_events,
+                        query_results: &mut child_queries,
+                    },
                 );
                 let local_end = child.lock().accesses.len().saturating_sub(access_start);
                 call_access_spans.push(BundleCallAccessSpan {
@@ -1492,8 +1503,7 @@ impl CosmWasmEngine {
         block: BlockContext,
         call_index: usize,
         call: &BundleCall,
-        events: &mut Vec<Event>,
-        query_results: &mut Vec<BundleQueryResult>,
+        outputs: BundleCallOutputs<'_>,
     ) -> EngineResult<()> {
         match call {
             BundleCall::Execute {
@@ -1511,24 +1521,26 @@ impl CosmWasmEngine {
                     funds.clone(),
                     msg.clone(),
                 )
-                .map(|outcome| events.extend(outcome.events)),
-            BundleCall::Query { contract, msg } => validate_public_address(contract).and_then(|_| {
-                query_contract_shared(
-                    self.core.clone(),
-                    tx,
-                    block,
-                    contract.clone(),
-                    msg.clone(),
-                    0,
-                )
-                .map(|data| {
-                    query_results.push(BundleQueryResult {
-                        call_index,
-                        contract: contract.clone(),
-                        data,
-                    });
+                .map(|outcome| outputs.events.extend(outcome.events)),
+            BundleCall::Query { contract, msg } => {
+                validate_public_address(contract).and_then(|_| {
+                    query_contract_shared(
+                        self.core.clone(),
+                        tx,
+                        block,
+                        contract.clone(),
+                        msg.clone(),
+                        0,
+                    )
+                    .map(|data| {
+                        outputs.query_results.push(BundleQueryResult {
+                            call_index,
+                            contract: contract.clone(),
+                            data,
+                        });
+                    })
                 })
-            }),
+            }
             BundleCall::BankSend { from, to, coins } => validate_public_address(from)
                 .and_then(|_| validate_public_address(to))
                 .and_then(|_| tx.lock().transfer(from, to, coins, from, 0)),
@@ -1565,8 +1577,10 @@ impl CosmWasmEngine {
                 block.clone(),
                 call_index,
                 call,
-                &mut events,
-                &mut query_results,
+                BundleCallOutputs {
+                    events: &mut events,
+                    query_results: &mut query_results,
+                },
             );
             let access_end = tx.lock().accesses.len();
             call_access_spans.push(BundleCallAccessSpan {
@@ -1747,8 +1761,10 @@ impl CosmWasmEngine {
                         block.clone(),
                         call_index,
                         &scoped.call,
-                        &mut events,
-                        &mut query_results,
+                        BundleCallOutputs {
+                            events: &mut events,
+                            query_results: &mut query_results,
+                        },
                     )
                     .is_err()
                 {
@@ -1785,8 +1801,10 @@ impl CosmWasmEngine {
                     block.clone(),
                     index,
                     &calls[index].call,
-                    &mut events,
-                    &mut query_results,
+                    BundleCallOutputs {
+                        events: &mut events,
+                        query_results: &mut query_results,
+                    },
                 )
                 .map_err(|error| EngineError::BundleCallFailed {
                     call_index: index,
@@ -1813,15 +1831,18 @@ impl CosmWasmEngine {
             let child = Arc::new(parking_lot::Mutex::new(child_state));
             let mut child_events = Vec::new();
             let mut child_queries = Vec::new();
-            for call_index in first..end {
+            for (offset, scoped_call) in calls[first..end].iter().enumerate() {
+                let call_index = first + offset;
                 let result = self.execute_bundle_call(
                     child.clone(),
                     transaction_id,
                     block.clone(),
                     call_index,
-                    &calls[call_index].call,
-                    &mut child_events,
-                    &mut child_queries,
+                    &scoped_call.call,
+                    BundleCallOutputs {
+                        events: &mut child_events,
+                        query_results: &mut child_queries,
+                    },
                 );
                 if result.is_err() {
                     break;

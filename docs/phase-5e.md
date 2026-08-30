@@ -97,7 +97,7 @@ concrete receipt dependencies, canonical-order validation, and replay.
 These checks are part of the canonical repository gate:
 
 ```bash
-./scripts/run-all-tests.sh
+./scripts/test-all.sh
 ```
 
 The regression coverage checks:

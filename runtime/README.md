@@ -14,12 +14,12 @@ The runtime workspace contains ACG's execution and evaluation path.
 ## Validate
 
 ```bash
-./scripts/run-all-tests.sh
+./scripts/test-all.sh
 ```
 
 For performance work use the current ConflictLab runners from the repository root:
 
 ```bash
-./scripts/run-conflictlab-v1-evaluation.sh
-./scripts/run-conflictlab-parallelism-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-parallelism-evaluation.sh
 ```

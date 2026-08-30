@@ -6,11 +6,11 @@ use std::{
 
 use acg_cosmwasm_engine::{
     CanonicalCommitDiagnostics, CanonicalTransaction, CanonicalTxDisposition,
-    ContractExecutionDiagnostics, CosmWasmEngine,
-    EngineError, ExecutionOutcome, ParallelExecutionConfig, PostConsensusTimings,
-    PredictionMatchMetrics, PreparedSpeculativeBlock, ReconciliationDependencyEvidence,
-    SpeculativeDependency, SpeculativeDependencyClass, SpeculativeExecutionMetrics,
-    SpeculativeWave, SplitPhaseSpeculativeBlockOutcome, StateSnapshot, StateWriteSet, TransactionId,
+    ContractExecutionDiagnostics, CosmWasmEngine, EngineError, ExecutionOutcome,
+    ParallelExecutionConfig, PostConsensusTimings, PredictionMatchMetrics,
+    PreparedSpeculativeBlock, ReconciliationDependencyEvidence, SpeculativeDependency,
+    SpeculativeDependencyClass, SpeculativeExecutionMetrics, SpeculativeWave,
+    SplitPhaseSpeculativeBlockOutcome, StateSnapshot, StateWriteSet, TransactionId,
     ValidationOutcome,
 };
 use thiserror::Error;
@@ -215,7 +215,6 @@ pub struct SplitPhaseSpeculativeExecutionReport {
     pub dependency_evidence: Vec<ReconciliationDependencyEvidence>,
 }
 
-
 /// Aggregate runtime diagnostics for exact dependency-DAG direct replay.
 ///
 /// Worker-time fields may exceed wall time because workers overlap. The nested contract timings are
@@ -279,7 +278,8 @@ impl DirectDagBlockExecutor {
         block: &ProducedBlock,
         plan: &ExecutionPlan,
     ) -> Result<BlockExecutionReport, BlockExecutionError> {
-        self.execute_internal(block, plan, false).map(|(report, _)| report)
+        self.execute_internal(block, plan, false)
+            .map(|(report, _)| report)
     }
 
     pub fn execute_with_diagnostics(

@@ -10,7 +10,9 @@ Unknown analyzer information is preserved conservatively.
 ## Phase 2 — concrete candidate graph
 
 Runtime transaction inputs refine symbolic relationships into concrete candidate conflicts. Clause-
-level matching, stable contract identity, and compact equivalence groups are implemented.
+level matching, stable contract identity, and compact equivalence groups are implemented. Compound
+runtime requests can retain multiple entrypoint profiles as evidence while scheduling one atomic
+transaction node, avoiding component-graph projection without changing profile-level feedback.
 
 ## Phase 3 — runtime feedback
 

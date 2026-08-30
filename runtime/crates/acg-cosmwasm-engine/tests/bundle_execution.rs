@@ -75,7 +75,9 @@ impl NativeContract for Fixture {
 
 fn setup() -> (CosmWasmEngine, Address) {
     let engine = CosmWasmEngine::new(EngineConfig::default());
-    let code = engine.register_native("bundle-fixture", Arc::new(Fixture)).unwrap();
+    let code = engine
+        .register_native("bundle-fixture", Arc::new(Fixture))
+        .unwrap();
     let contract = engine
         .instantiate(
             TransactionId(1),
@@ -112,7 +114,10 @@ fn bundle_query_observes_prior_write_and_success_commits_once() {
                 },
                 BundleCall::Query {
                     contract: contract.clone(),
-                    msg: to_json_binary(&QueryMsg::Value { key: "k".to_owned() }).unwrap(),
+                    msg: to_json_binary(&QueryMsg::Value {
+                        key: "k".to_owned(),
+                    })
+                    .unwrap(),
                 },
             ],
         )
@@ -125,7 +130,10 @@ fn bundle_query_observes_prior_write_and_success_commits_once() {
         serde_json::from_slice(outcome.query_results[0].data.as_slice()).unwrap();
     assert_eq!(observed, Some(b"v".to_vec()));
     assert_eq!(engine.raw_storage(&contract, b"k"), Some(b"v".to_vec()));
-    assert!(outcome.accesses.iter().all(|a| a.transaction_id == TransactionId(2)));
+    assert!(outcome
+        .accesses
+        .iter()
+        .all(|a| a.transaction_id == TransactionId(2)));
     assert_eq!(outcome.call_access_spans.len(), 2);
     assert_eq!(outcome.call_access_spans[0].call_index, 0);
     assert_eq!(outcome.call_access_spans[1].call_index, 1);
@@ -190,7 +198,6 @@ fn reverted_bundle_exposes_accesses_without_committing() {
     assert_eq!(engine.raw_storage(&contract, b"k"), None);
 }
 
-
 #[test]
 fn tolerant_reverted_bundle_stops_on_native_error_and_keeps_failure_accesses() {
     let (engine, contract) = setup();
@@ -230,7 +237,10 @@ fn tolerant_reverted_bundle_stops_on_native_error_and_keeps_failure_accesses() {
         .unwrap();
 
     assert!(!outcome.committed);
-    let failure = outcome.failure.as_ref().expect("native failure must be retained");
+    let failure = outcome
+        .failure
+        .as_ref()
+        .expect("native failure must be retained");
     assert_eq!(failure.call_index, 1);
     assert!(failure.error.contains("fixture failure"));
     assert!(outcome.accesses.iter().all(|a| a.reverted));
@@ -242,7 +252,6 @@ fn tolerant_reverted_bundle_stops_on_native_error_and_keeps_failure_accesses() {
     assert_eq!(engine.raw_storage(&contract, b"before"), None);
     assert_eq!(engine.raw_storage(&contract, b"after"), None);
 }
-
 
 #[test]
 fn strict_bundle_error_reports_failing_call_index() {
@@ -280,7 +289,6 @@ fn strict_bundle_error_reports_failing_call_index() {
         other => panic!("expected BundleCallFailed, got {other:?}"),
     }
 }
-
 
 #[test]
 fn successful_outer_bundle_discards_caught_internal_revert_scope() {
@@ -372,7 +380,11 @@ fn successful_outer_bundle_discards_caught_internal_revert_scope() {
         .iter()
         .any(|a| a.key == b"outer_after" && !a.reverted));
     assert_eq!(
-        outcome.call_access_spans.iter().map(|s| s.call_index).collect::<Vec<_>>(),
+        outcome
+            .call_access_spans
+            .iter()
+            .map(|s| s.call_index)
+            .collect::<Vec<_>>(),
         vec![0, 1, 2, 3]
     );
     for span in &outcome.call_access_spans {
@@ -431,7 +443,10 @@ fn reverted_scope_observes_prior_outer_write_without_committing_inner_write() {
 
     assert_eq!(outcome.reverted_scopes.len(), 1);
     assert!(outcome.reverted_scopes[0].failure.is_none());
-    assert_eq!(engine.raw_storage(&contract, b"visible"), Some(b"outer".to_vec()));
+    assert_eq!(
+        engine.raw_storage(&contract, b"visible"),
+        Some(b"outer".to_vec())
+    );
     assert_eq!(engine.raw_storage(&contract, b"discard"), None);
     assert!(outcome
         .accesses
@@ -442,7 +457,6 @@ fn reverted_scope_observes_prior_outer_write_without_committing_inner_write() {
         .iter()
         .any(|a| a.key == b"discard" && a.reverted));
 }
-
 
 #[test]
 fn bundle_request_speculation_reuses_successful_atomic_write_set() {

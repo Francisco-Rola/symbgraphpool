@@ -215,6 +215,21 @@ impl CompiledPredicate {
                 .all(|clause| clause.require_same_contract_instance)
     }
 
+    /// True when every alternative clause is an unconditional whole-resource conflict within
+    /// one contract instance. Such a self-profile relationship is an equivalence clique: every
+    /// transaction for the same instance conflicts with every other transaction, so candidate
+    /// construction may preserve the full logical clique with a compact group representation.
+    pub fn is_unconditional_same_instance_whole_resource(&self) -> bool {
+        !self.clauses.is_empty()
+            && self.clauses.iter().all(|clause| {
+                clause.require_same_contract_instance
+                    && clause.resolution != ClauseResolution::Unknown
+                    && clause.left_guard.is_unconditional_true()
+                    && clause.right_guard.is_unconditional_true()
+                    && matches!(&clause.key_match, CompiledKeyMatch::WholeResource)
+            })
+    }
+
     /// Return a grouping key only when this predicate is structurally equivalent to
     /// "same contract instance AND the same single resolved input key". All alternative clauses
     /// must use the same symmetric input expression and unconditional guards, making clique-to-

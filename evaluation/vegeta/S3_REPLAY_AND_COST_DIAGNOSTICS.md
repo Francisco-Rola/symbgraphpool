@@ -7,7 +7,7 @@ This patch adds two diagnostic evaluations without changing the default seven-st
 Run:
 
 ```bash
-bash scripts/run-vegeta-s3-replay-scaling.sh
+bash tools/legacy-scripts/run-vegeta-s3-replay-scaling.sh
 ```
 
 Defaults to worker counts `1,2,4,6,8,16` and three samples. Override with:
@@ -15,7 +15,7 @@ Defaults to worker counts `1,2,4,6,8,16` and three samples. Override with:
 ```bash
 VEGETA_S3_REPLAY_WORKERS=1,2,4,8,16 \
 VEGETA_S3_REPLAY_SAMPLES=3 \
-bash scripts/run-vegeta-s3-replay-scaling.sh
+bash tools/legacy-scripts/run-vegeta-s3-replay-scaling.sh
 ```
 
 The diagnostic runs only `serial`, `exact-direct`, and `exact-access`:
@@ -41,7 +41,7 @@ Outputs are written under `native-execution/replay-scaling/` by default.
 Run:
 
 ```bash
-bash scripts/run-vegeta-s3-cost-fidelity.sh
+bash tools/legacy-scripts/run-vegeta-s3-cost-fidelity.sh
 ```
 
 This replays the native plan serially while recording `native_execution_nanos` per transaction, joins those rows to the frozen exact EVM traces by `(block, tx_index, tx_hash)`, and compares native wall cost with source `gasUsed` and `steps`. The native replay also uses `WasmInstanceLifecycle::Reuse`.
@@ -98,7 +98,7 @@ than re-timing the calibration primitive independently for each run.
 The default experiment is:
 
 ```bash
-bash scripts/run-vegeta-s3-compute-calibration-sweep.sh
+bash tools/legacy-scripts/run-vegeta-s3-compute-calibration-sweep.sh
 ```
 
 Defaults:
@@ -118,7 +118,7 @@ For a publication-quality selected profile, increase samples after the explorato
 VEGETA_S3_COMPUTE_METRICS=steps \
 VEGETA_S3_COMPUTE_SCALES=1,2 \
 VEGETA_S3_COMPUTE_SAMPLES=3 \
-  bash scripts/run-vegeta-s3-compute-calibration-sweep.sh
+  bash tools/legacy-scripts/run-vegeta-s3-compute-calibration-sweep.sh
 ```
 
 Outputs live under:

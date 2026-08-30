@@ -21,8 +21,7 @@ use crate::{parameter, BenchmarkWorkload, HarnessError, PreparedBenchmark};
 
 const VEGETA_TRACE_SYMBOLIC: &[u8] =
     include_bytes!("../../../../benchmarks/symbolic/vegeta-trace.symbolic.json");
-const DEFAULT_CORPUS_RELATIVE_PATH: &str =
-    "benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl";
+const DEFAULT_CORPUS_RELATIVE_PATH: &str = "benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl";
 const DEFAULT_WASM_RELATIVE_PATH: &str =
     "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_vegeta_trace.wasm";
 const S3_START_BLOCK: u64 = 16_774_645;
@@ -180,7 +179,10 @@ impl BenchmarkWorkload for VegetaEthWorkload {
             "vegeta_paper_s3_longest_chain_sum".to_owned(),
             S3_EXPECTED_LONGEST_CHAIN_SUM.to_string(),
         );
-        environment.insert("vegeta_paper_weth_hotspot".to_owned(), WETH_MAINNET.to_owned());
+        environment.insert(
+            "vegeta_paper_weth_hotspot".to_owned(),
+            WETH_MAINNET.to_owned(),
+        );
 
         Ok(Box::new(PreparedVegetaEth {
             engine,
@@ -213,11 +215,7 @@ impl VegetaEthConfig {
             .get("vegeta.corpus_path")
             .map(PathBuf::from)
             .unwrap_or_else(default_corpus_path);
-        let measured_block = parameter(
-            &run.parameters,
-            "vegeta.measured_block",
-            S3_END_BLOCK,
-        )?;
+        let measured_block = parameter(&run.parameters, "vegeta.measured_block", S3_END_BLOCK)?;
         let warmup_blocks = parameter(&run.parameters, "warmup_blocks", 4_usize)?;
         let history_blocks = parameter(
             &run.parameters,
@@ -239,16 +237,9 @@ impl VegetaEthConfig {
             "vegeta.prediction_max_keys_per_method",
             32_usize,
         )?;
-        let work_step_divisor = parameter(
-            &run.parameters,
-            "vegeta.work_step_divisor",
-            64_u64,
-        )?;
-        let work_max_iterations = parameter(
-            &run.parameters,
-            "vegeta.work_max_iterations",
-            20_000_u64,
-        )?;
+        let work_step_divisor = parameter(&run.parameters, "vegeta.work_step_divisor", 64_u64)?;
+        let work_max_iterations =
+            parameter(&run.parameters, "vegeta.work_max_iterations", 20_000_u64)?;
         let backend = ExecutionBackend::parse(
             run.parameters
                 .get("execution_backend")
@@ -261,11 +252,7 @@ impl VegetaEthConfig {
                 .map(String::as_str)
                 .unwrap_or("reuse"),
         )?;
-        let vm_gas_limit = parameter(
-            &run.parameters,
-            "vm_gas_limit",
-            u64::MAX,
-        )?;
+        let vm_gas_limit = parameter(&run.parameters, "vm_gas_limit", u64::MAX)?;
         Ok(Self {
             corpus_path,
             measured_block,
@@ -348,7 +335,7 @@ impl VegetaCorpus {
     fn load(path: &Path) -> Result<Self, HarnessError> {
         let source = fs::read_to_string(path).map_err(|error| {
             HarnessError::Runtime(format!(
-                "failed to read Vegeta Ethereum corpus at {}: {error}; reconstruct S3 with scripts/vegeta/extract-vegeta-ethereum.py",
+                "failed to read Vegeta Ethereum corpus at {}: {error}; reconstruct S3 with tools/vegeta/extract-vegeta-ethereum.py",
                 path.display()
             ))
         })?;
@@ -410,7 +397,11 @@ struct MethodHistory {
 }
 
 fn method_key(tx: &CorpusTransaction) -> String {
-    format!("{}:{}", tx.to.to_ascii_lowercase(), tx.selector.to_ascii_lowercase())
+    format!(
+        "{}:{}",
+        tx.to.to_ascii_lowercase(),
+        tx.selector.to_ascii_lowercase()
+    )
 }
 
 fn build_predictions(
@@ -495,10 +486,9 @@ fn build_block(
         };
         let request = ExecutionRequest::Execute {
             transaction_id: TransactionId(
-                block
-                    .block_number
-                    .saturating_mul(100_000)
-                    .saturating_add(u64::try_from(tx.tx_index).map_err(|_| HarnessError::NumericOverflow)?),
+                block.block_number.saturating_mul(100_000).saturating_add(
+                    u64::try_from(tx.tx_index).map_err(|_| HarnessError::NumericOverflow)?,
+                ),
             ),
             sender: Address::new(format!("eth-{}", tx.from.trim_start_matches("0x"))),
             contract: contract.clone(),
@@ -702,8 +692,14 @@ impl NativeContract for VegetaTraceRuntime {
 
 fn setup_engine(
     config: &VegetaEthConfig,
-) -> Result<(CosmWasmEngine, acg_cosmwasm_engine::CodeId, BTreeMap<String, String>), HarnessError>
-{
+) -> Result<
+    (
+        CosmWasmEngine,
+        acg_cosmwasm_engine::CodeId,
+        BTreeMap<String, String>,
+    ),
+    HarnessError,
+> {
     let engine = CosmWasmEngine::new(EngineConfig {
         gas_limit: config.vm_gas_limit,
         wasm_instance_lifecycle: config.vm_instance_lifecycle,
@@ -737,7 +733,9 @@ fn setup_engine(
                 .map_err(|error| HarnessError::Runtime(error.to_string()))?;
             let checksum = engine
                 .code_metadata(code_id)
-                .ok_or_else(|| HarnessError::Runtime("Vegeta trace Wasm metadata missing".to_owned()))?
+                .ok_or_else(|| {
+                    HarnessError::Runtime("Vegeta trace Wasm metadata missing".to_owned())
+                })?
                 .checksum;
             environment.insert("vegeta_backend".to_owned(), "wasm".to_owned());
             environment.insert("vegeta_wasm_path".to_owned(), path.display().to_string());

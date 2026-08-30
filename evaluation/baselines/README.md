@@ -32,7 +32,7 @@ these same-VM baselines are for controlled mechanism comparison.
 Run the initial 63-record smoke matrix with:
 
 ```bash
-./scripts/run-baseline-comparison.sh
+./tools/legacy-scripts/run-baseline-comparison.sh
 ```
 
 Every record must match the paired canonical serial state digest. Baseline-specific counters are in
@@ -55,7 +55,7 @@ the report and should be treated as an ablation, not the production SymbGraphPoo
 For a result intended to be cited in a paper, run from a committed clean tree:
 
 ```bash
-./scripts/run-baseline-comparison.sh --publication
+./tools/legacy-scripts/run-baseline-comparison.sh --publication
 ```
 
 `--publication` refuses to start when `git status --porcelain` is non-empty and records the clean-tree

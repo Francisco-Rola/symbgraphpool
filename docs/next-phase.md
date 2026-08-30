@@ -1,6 +1,6 @@
 # Next work
 
-1. Run `./scripts/run-conflictlab-parallelism-evaluation.sh` and identify the gap between the
+1. Run `./tools/legacy-scripts/run-conflictlab-parallelism-evaluation.sh` and identify the gap between the
    six-worker hindsight oracle, raw executor, phase bottleneck and full adaptive wall time.
 2. Repeat the focused ceiling experiment on native Linux before treating WSL2 numbers as final.
 3. Fix the largest measured overhead rather than adding new policy knobs blindly.

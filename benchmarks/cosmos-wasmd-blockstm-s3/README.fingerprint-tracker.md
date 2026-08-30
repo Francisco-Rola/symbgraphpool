@@ -13,12 +13,12 @@ SymbGraph and Vegeta ports.
 * The 2-worker diagnostic script enables a separate SymbGraph CPU profile and
   records `runtime.MemStats` allocation deltas around the 101-block profile run.
 
-Use `scripts/run-vegeta-s3-wasmd-optimized-w2.sh` first. Inspect:
+Use `tools/legacy-scripts/run-vegeta-s3-wasmd-optimized-w2.sh` first. Inspect:
 
 ```
 .../symbgraph-pprof/cosmos-wasmd-symbgraph-static-w2.cpu.pprof
 .../symbgraph-pprof/cosmos-wasmd-symbgraph-static-w2.profile.json
 ```
 
-Then run `scripts/run-vegeta-s3-wasmd-optimized-sweep.sh` if state equivalence
+Then run `tools/legacy-scripts/run-vegeta-s3-wasmd-optimized-sweep.sh` if state equivalence
 holds and the tracked-serial control improves.

@@ -161,10 +161,33 @@ impl SchedulingRecord {
         };
 
         for edge in plan.candidate_graph.edges() {
-            if plan.candidate_graph.provenance_is_compact(edge.provenance) {
+            // Compact-equivalence edges and parallel-pair representatives are physical
+            // representation edges. Their logical classifications are accounted for below from
+            // the complete group metadata, exactly as the scheduler consumes those groups.
+            if plan.candidate_graph.provenance_is_compact(edge.provenance)
+                || plan
+                    .candidate_graph
+                    .pair_is_parallel(edge.source, edge.target)
+            {
                 continue;
             }
             accumulate_candidate_edge(&mut record, edge, config.scheduler.classify(edge), 1);
+        }
+        for group in plan.candidate_graph.parallel_groups() {
+            for evidence in group.evidences() {
+                if plan
+                    .candidate_graph
+                    .provenance_is_compact(evidence.provenance)
+                {
+                    continue;
+                }
+                accumulate_candidate_edge(
+                    &mut record,
+                    evidence,
+                    config.scheduler.classify(evidence),
+                    1,
+                );
+            }
         }
         for group in plan.candidate_graph.compact_groups() {
             let count = u64::try_from(group.logical_edges()).unwrap_or(u64::MAX);

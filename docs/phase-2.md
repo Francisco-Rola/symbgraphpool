@@ -73,6 +73,36 @@ For a same-profile edge, the builder considers each concrete pair once. For cros
 it evaluates the cartesian product only between the two relevant profile buckets. Later Phase 5
 indexing can reduce large bucket products further using instantiated resource fingerprints.
 
+### Atomic transactions with multiple entrypoints
+
+Some runtimes expose one canonical transaction as an ordered bundle of contract calls. The symbolic
+model still belongs to entrypoint profiles, but the scheduler/commit unit is the atomic transaction.
+`PreparedCandidateGraphBuilder::build_weighted_atomic` preserves that split:
+
+```text
+atomic transaction
+    -> 1..N resolved profile components
+    -> evaluate persistent profile relationships / precompiled predicates
+    -> deduplicate repeated component pairs by (parent tx pair, profile relationship)
+    -> CandidateGraph whose nodes are the atomic transactions
+    -> RiskBoundedScheduler
+```
+
+Distinct profile relationships between the same atomic transaction pair remain distinct **evidence**
+inside one physical parallel-evidence relationship. The scheduler classifies each underlying
+profile relationship independently, treats any Hard evidence as a Hard pair, and otherwise combines
+Soft risk with the same `1 - Π(1-p)` rule used by the explicit-edge representation. This preserves
+probability/confidence, cost-aware risk, hard-to-soft maturity, controlled exploration, and runtime
+feedback semantics per profile relationship while keeping only one adjacency entry per atomic pair.
+Duplicate concrete component products for the same profile relationship are collapsed even earlier.
+Compact equivalence groups are lifted directly onto atomic transaction members when the underlying
+compiled predicate proves clique semantics. Runtime-discovered fallback topology is aggregated the
+same way and remains part of the adaptive model.
+
+This avoids treating calls inside one atomic transaction as independently schedulable nodes and
+avoids a later component-to-parent projection pass without moving symbolic logic into a runtime
+adapter.
+
 ### `acg-cosmwasm-adapter`
 
 Lives in the `runtime/` workspace and converts existing runtime requests into candidate

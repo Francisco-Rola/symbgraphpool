@@ -298,3 +298,40 @@ func TestPolicyReuseCountersAreConsistent(t *testing.T) {
 		t.Fatalf("replayed=%d reexecutions=%d", stats.Replayed, stats.Reexecutions)
 	}
 }
+
+func TestAriaRule2ForwardFallbacksMatchesRustHarnessConditions(t *testing.T) {
+	store := storeIDFromName("wasm")
+	trackers := make([]*accessTracker, 4)
+	for i := range trackers {
+		trackers[i] = newAccessTracker(nil)
+	}
+
+	// tx0 writes k0. tx1 also writes k0 -> WAW, so tx1 must fallback.
+	trackers[0].write(store, []byte("k0"))
+	trackers[1].write(store, []byte("k0"))
+
+	// tx2 only reads k0 -> RAW from tx0, but no WAR/WAW, so Rule 2 alone
+	// does not proactively fallback tx2. Canonical read validation remains the
+	// conservative correctness boundary during commit.
+	trackers[2].read(store, []byte("k0"))
+
+	// tx3 reads k0 (RAW) and writes a key tx0 read (WAR), so it has both
+	// dependency directions and must fallback.
+	trackers[0].read(store, []byte("k1"))
+	trackers[3].read(store, []byte("k0"))
+	trackers[3].write(store, []byte("k1"))
+
+	fallbacks, discovered := ariaRule2ForwardFallbacks(trackers)
+	if discovered == 0 {
+		t.Fatal("expected discovered Aria conflict pairs")
+	}
+	if _, ok := fallbacks[1]; !ok {
+		t.Fatal("WAW transaction must be a Rule-2 fallback")
+	}
+	if _, ok := fallbacks[2]; ok {
+		t.Fatal("RAW-only transaction should not be a proactive Rule-2 fallback")
+	}
+	if _, ok := fallbacks[3]; !ok {
+		t.Fatal("combined WAR+RAW transaction must be a Rule-2 fallback")
+	}
+}

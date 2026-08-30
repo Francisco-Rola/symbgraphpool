@@ -16,6 +16,6 @@ and Vegeta ports.
 - Investigation mode adds `tracked-single-cache-serial`, a serial control for
   the optimized isolation/tracker substrate.
 
-Run `scripts/run-vegeta-s3-wasmd-optimized-w2.sh` first. If state equivalence
+Run `tools/legacy-scripts/run-vegeta-s3-wasmd-optimized-w2.sh` first. If state equivalence
 passes and the optimized control behaves as expected, use
-`scripts/run-vegeta-s3-wasmd-optimized-sweep.sh`.
+`tools/legacy-scripts/run-vegeta-s3-wasmd-optimized-sweep.sh`.

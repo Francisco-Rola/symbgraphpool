@@ -64,6 +64,27 @@ fn input_equality(left: &str, right: &str) -> KeyMatch {
 }
 
 #[test]
+fn recognizes_unconditional_same_instance_whole_resource_equivalence() {
+    let whole = CompiledPredicate::compile(&clause(
+        KeyMatch::WholeResource,
+        ("true", DependencyKind::None),
+    ));
+    assert!(whole.is_unconditional_same_instance_whole_resource());
+
+    let guarded = CompiledPredicate::compile(&clause(
+        KeyMatch::WholeResource,
+        ("msg.enabled", DependencyKind::Input),
+    ));
+    assert!(!guarded.is_unconditional_same_instance_whole_resource());
+
+    let keyed = CompiledPredicate::compile(&clause(
+        input_equality("account", "account"),
+        ("true", DependencyKind::None),
+    ));
+    assert!(!keyed.is_unconditional_same_instance_whole_resource());
+}
+
+#[test]
 fn compares_simple_and_tuple_input_keys() {
     let simple = CompiledPredicate::compile(&clause(
         input_equality("account", "account"),

@@ -80,24 +80,24 @@ It is substantially stronger than access replay because the real Wasm VM and kee
 Preflight the full VM baseline before any matrix:
 
 ```bash
-bash scripts/check-vegeta-cosmos-wasmd-blockstm.sh
+bash tools/legacy-scripts/check-vegeta-cosmos-wasmd-blockstm.sh
 ```
 
 This builds the Rust Wasm artifacts, downloads/builds the Go harness, runs Go unit tests, and performs a real upload + instantiate + priming setup smoke.
 
 ### 3. Publication matrix modes and repeated samples
 
-`scripts/run-vegeta-s3-publication-matrix.sh` now has explicit modes:
+`tools/legacy-scripts/run-vegeta-s3-publication-matrix.sh` now has explicit modes:
 
 ```bash
 # cheapest functional check: workers=2, n=1
-VEGETA_S3_PUBLICATION_MODE=smoke bash scripts/run-vegeta-s3-publication-matrix.sh
+VEGETA_S3_PUBLICATION_MODE=smoke bash tools/legacy-scripts/run-vegeta-s3-publication-matrix.sh
 
 # WSL development matrix: workers=2,4, n=1 (default)
-VEGETA_S3_PUBLICATION_MODE=debug bash scripts/run-vegeta-s3-publication-matrix.sh
+VEGETA_S3_PUBLICATION_MODE=debug bash tools/legacy-scripts/run-vegeta-s3-publication-matrix.sh
 
 # publication configuration: workers=1,2,4,8,16, n=5
-VEGETA_S3_PUBLICATION_MODE=paper bash scripts/run-vegeta-s3-publication-matrix.sh
+VEGETA_S3_PUBLICATION_MODE=paper bash tools/legacy-scripts/run-vegeta-s3-publication-matrix.sh
 ```
 
 Explicit `VEGETA_S3_PUBLICATION_WORKERS` and `VEGETA_S3_PUBLICATION_SAMPLES` still override the mode. Paper mode is intended for the later native-Linux host; use debug mode on WSL first.
@@ -129,7 +129,7 @@ The WSL perf 7.x parser fix remains validated (`perf-cpus=2.02` for the 2-worker
 Run the local suites first:
 
 ```bash
-python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+python3 -m unittest discover -s tools/tests -p 'test_*.py'
 
 cargo test --manifest-path runtime/Cargo.toml -p acg-cosmwasm-engine
 cargo test --manifest-path runtime/Cargo.toml -p acg-validator-sim
@@ -139,20 +139,20 @@ cargo test --manifest-path runtime/Cargo.toml -p acg-vegeta-native-s3-executor
 Validate both Cosmos baselines independently:
 
 ```bash
-bash scripts/check-vegeta-cosmos-blockstm.sh
-bash scripts/check-vegeta-cosmos-wasmd-blockstm.sh
+bash tools/legacy-scripts/check-vegeta-cosmos-blockstm.sh
+bash tools/legacy-scripts/check-vegeta-cosmos-wasmd-blockstm.sh
 ```
 
 Perf was already validated, but after WSL/kernel changes rerun:
 
 ```bash
-bash scripts/check-vegeta-perf.sh
+bash tools/legacy-scripts/check-vegeta-perf.sh
 ```
 
 Then run the **debug** matrix before paper mode:
 
 ```bash
-VEGETA_S3_PUBLICATION_MODE=debug bash scripts/run-vegeta-s3-publication-matrix.sh
+VEGETA_S3_PUBLICATION_MODE=debug bash tools/legacy-scripts/run-vegeta-s3-publication-matrix.sh
 ```
 
 Inspect `publication-matrix-steps4/summary.txt` for serial equivalence, complete samples, and plausible full-Wasmd Block-STM timing before expanding.
@@ -204,8 +204,8 @@ Inspect `publication-matrix-steps4/summary.txt` for serial equivalence, complete
 ## Immediate next steps
 
 1. Apply `vegeta-s3-wasmd-wasm-genesis-params-hotfix.patch` on top of `vegeta-s3-wasmd-genesis-validator-init-hotfix.patch`.
-2. Rerun `bash scripts/check-vegeta-cosmos-wasmd-blockstm.sh`; the prior chain-ID, unloaded-store, empty-validator, and missing-x/wasm-Params failures should be gone. Stop and fix any further Go/Wasmd/runtime setup error before the matrix.
-3. Run `VEGETA_S3_PUBLICATION_MODE=smoke bash scripts/run-vegeta-s3-publication-matrix.sh` on WSL (workers 2, n=1), then `VEGETA_S3_PUBLICATION_MODE=debug` (workers 2/4, n=1).
+2. Rerun `bash tools/legacy-scripts/check-vegeta-cosmos-wasmd-blockstm.sh`; the prior chain-ID, unloaded-store, empty-validator, and missing-x/wasm-Params failures should be gone. Stop and fix any further Go/Wasmd/runtime setup error before the matrix.
+3. Run `VEGETA_S3_PUBLICATION_MODE=smoke bash tools/legacy-scripts/run-vegeta-s3-publication-matrix.sh` on WSL (workers 2, n=1), then `VEGETA_S3_PUBLICATION_MODE=debug` (workers 2/4, n=1).
 4. Compare `cosmos-block-stm-access-replay` vs `cosmos-wasmd-block-stm` to quantify real Wasm/keeper overhead; confirm every row is serial-equivalent.
 5. If clean, run a one-sample WSL full worker sweep with `VEGETA_S3_PUBLICATION_WORKERS=1,2,4,8,16 VEGETA_S3_PUBLICATION_SAMPLES=1`.
 6. Move the exact `VEGETA_S3_PUBLICATION_MODE=paper` run to dedicated native Linux for 1/2/4/8/16 workers, n=5, then use the reported bootstrap CIs/p95/p99 in paper figures.
@@ -215,7 +215,7 @@ Inspect `publication-matrix-steps4/summary.txt` for serial equivalence, complete
 
 # Vegeta Ethereum trace-port evaluation
 
-`./scripts/run-vegeta-s3-smoke.sh` runs three representative S3 blocks through all seven common
+`./tools/legacy-scripts/run-vegeta-s3-smoke.sh` runs three representative S3 blocks through all seven common
 harness strategies:
 
 - serial
@@ -259,7 +259,7 @@ owners, and runtime-bytecode families.
 Offline characterization requires only the extracted corpus:
 
 ```bash
-bash scripts/run-vegeta-s3-characterization.sh
+bash tools/legacy-scripts/run-vegeta-s3-characterization.sh
 ```
 
 This writes:
@@ -276,7 +276,7 @@ Ethereum RPC and add `--fetch-code`:
 
 ```bash
 ETH_RPC_URL=https://ethereum-rpc.publicnode.com \
-bash scripts/run-vegeta-s3-characterization.sh --fetch-code
+bash tools/legacy-scripts/run-vegeta-s3-characterization.sh --fetch-code
 ```
 
 The code phase is resumable through `characterization/code-cache.json`; after every successful
@@ -298,7 +298,7 @@ characterization with Geth's built-in `callTracer` and fetch code for every rele
 
 ```bash
 ETH_RPC_URL=https://eth.drpc.org \
-bash scripts/run-vegeta-s3-characterization.sh \
+bash tools/legacy-scripts/run-vegeta-s3-characterization.sh \
   --fetch-calls \
   --fetch-code \
   --native-port-candidates
@@ -335,7 +335,7 @@ must receive the LLM symbolic analysis. Resolve the standard cases with:
 
 ```bash
 ETH_RPC_URL=https://eth.drpc.org \
-bash scripts/run-vegeta-s3-characterization.sh \
+bash tools/legacy-scripts/run-vegeta-s3-characterization.sh \
   --fetch-calls \
   --fetch-code \
   --native-family-mapping-candidates
@@ -379,7 +379,7 @@ The default target is 95%, which selects the minimum family count reported by
 `native-family-mapping-candidates.json` for that target:
 
 ```bash
-bash scripts/run-vegeta-s3-native-family-dossier.sh
+bash tools/legacy-scripts/run-vegeta-s3-native-family-dossier.sh
 ```
 
 The offline pass emits a deterministic skeleton from the existing characterization only:
@@ -396,7 +396,7 @@ continue to use the storage-owning address as their source-inspection starting p
 Fetch verified Ethereum source/ABI evidence for the selected representative addresses with:
 
 ```bash
-bash scripts/run-vegeta-s3-native-family-dossier.sh --fetch-source
+bash tools/legacy-scripts/run-vegeta-s3-native-family-dossier.sh --fetch-source
 ```
 
 Source lookup uses Sourcify API v2 first. If the representative address is not available there and
@@ -435,7 +435,7 @@ contracts execute.
 Build and validate the full 101-block pre-execution plan with:
 
 ```bash
-bash scripts/run-vegeta-s3-native-translation-evaluation.sh
+bash tools/legacy-scripts/run-vegeta-s3-native-translation-evaluation.sh
 ```
 
 The planner requires the already-generated S3 `code-cache.json`, `call-cache/`, and
@@ -469,7 +469,7 @@ source slots and their genuine LLM symbolic-analysis artifacts have not been imp
 all fourteen source/profile paths are populated, enforce the production gate with:
 
 ```bash
-python3 scripts/vegeta/validate-native-s3-plan.py \
+python3 tools/vegeta/validate-native-s3-plan.py \
   --require-execution-ready
 ```
 
@@ -502,13 +502,13 @@ performance is observed.
 Rank the remaining semantic background gap with:
 
 ```bash
-bash scripts/run-vegeta-s3-background-gap.sh
+bash tools/legacy-scripts/run-vegeta-s3-background-gap.sh
 ```
 
 or source-resolve the highest-impact remaining runtime-code families with:
 
 ```bash
-bash scripts/run-vegeta-s3-background-gap.sh --fetch-source
+bash tools/legacy-scripts/run-vegeta-s3-background-gap.sh --fetch-source
 ```
 
 The gap dossier groups only remaining `background-fallback` frames by runtime bytecode family and
@@ -539,7 +539,7 @@ native archetype. Unsupported selectors on the same Ethereum contract stay expli
 Run the offline selector-granular simulation with:
 
 ```bash
-bash scripts/run-vegeta-s3-finalize-native-map.sh
+bash tools/legacy-scripts/run-vegeta-s3-finalize-native-map.sh
 ```
 
 For high-impact background families identified as proxies, structurally probe their historical
@@ -547,7 +547,7 @@ EIP-1967 implementation/beacon slots and source-resolve newly discovered impleme
 
 ```bash
 ETH_RPC_URL=<archive-rpc> \
-  bash scripts/run-vegeta-s3-finalize-native-map.sh \
+  bash tools/legacy-scripts/run-vegeta-s3-finalize-native-map.sh \
   --fetch-proxies \
   --fetch-source
 ```
@@ -604,7 +604,7 @@ After the selector-granular pre-execution gates are frozen, validate the concret
 implementation with:
 
 ```bash
-bash scripts/run-vegeta-s3-native-implementation-validation.sh
+bash tools/legacy-scripts/run-vegeta-s3-native-implementation-validation.sh
 ```
 
 This phase checks ten real CosmWasm code families: the seven conflict-dominant families plus the
@@ -632,7 +632,7 @@ After `run-vegeta-s3-native-implementation-validation.sh` passes, execute the tr
 against the real native-family Wasm contracts with:
 
 ```bash
-bash scripts/run-vegeta-s3-native-execution.sh
+bash tools/legacy-scripts/run-vegeta-s3-native-execution.sh
 ```
 
 The execution stage compiles `native-plan.jsonl` plus the verified selector map into atomic
@@ -836,7 +836,7 @@ public-prestate corpus:
 
 ```bash
 ETH_RPC_URL=https://YOUR_ARCHIVE_RPC \
-bash scripts/run-vegeta-s3-exact-trace.sh
+bash tools/legacy-scripts/run-vegeta-s3-exact-trace.sh
 ```
 
 The default exact output is
@@ -852,7 +852,7 @@ corpus without changing the frozen native family mapping:
 ```bash
 VEGETA_S3_CORPUS=benchmarks/corpora/vegeta-ethereum/s3-exact-sload-sstore/corpus.jsonl \
 ETH_RPC_URL="$ETH_RPC_URL" \
-bash scripts/run-vegeta-s3-native-execution.sh
+bash tools/legacy-scripts/run-vegeta-s3-native-execution.sh
 ```
 
 Source concrete keys remain evaluation-only ground truth; they are not consumed by symbolic

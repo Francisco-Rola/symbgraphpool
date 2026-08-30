@@ -300,7 +300,9 @@ pub(crate) fn apply_write_sets_with_diagnostics(
             total.saturating_add(u64::try_from(write_set.balances.len()).unwrap_or(u64::MAX))
         }),
         created_contracts: write_sets.iter().fold(0_u64, |total, write_set| {
-            total.saturating_add(u64::try_from(write_set.created_contracts.len()).unwrap_or(u64::MAX))
+            total.saturating_add(
+                u64::try_from(write_set.created_contracts.len()).unwrap_or(u64::MAX),
+            )
         }),
         ..CanonicalCommitDiagnostics::default()
     };

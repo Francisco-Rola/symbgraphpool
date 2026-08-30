@@ -23,14 +23,14 @@ All modes use the same speculative executor and canonical validation/replay path
 ## Run
 
 ```bash
-./scripts/run-benchmark-manifest.sh manifest.json
+./tools/legacy-scripts/run-benchmark-manifest.sh manifest.json
 ```
 
 For current ConflictLab evaluation use:
 
 ```bash
-./scripts/run-conflictlab-v1-evaluation.sh
-./scripts/run-conflictlab-parallelism-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-parallelism-evaluation.sh
 ```
 
 Parameter definitions live in `docs/tuning-knobs.md`. Matrix generation/aggregation is documented in

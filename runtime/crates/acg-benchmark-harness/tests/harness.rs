@@ -990,12 +990,24 @@ fn vegeta_fixture_parameters() -> BTreeMap<String, String> {
         .canonicalize()
         .unwrap();
     BTreeMap::from([
-        ("vegeta.corpus_path".to_owned(), fixture.display().to_string()),
+        (
+            "vegeta.corpus_path".to_owned(),
+            fixture.display().to_string(),
+        ),
         ("vegeta.measured_block".to_owned(), "4".to_owned()),
         ("warmup_blocks".to_owned(), "2".to_owned()),
-        ("vegeta.prediction_history_blocks".to_owned(), "2".to_owned()),
-        ("vegeta.prediction_min_frequency_bps".to_owned(), "1".to_owned()),
-        ("vegeta.prediction_max_keys_per_method".to_owned(), "16".to_owned()),
+        (
+            "vegeta.prediction_history_blocks".to_owned(),
+            "2".to_owned(),
+        ),
+        (
+            "vegeta.prediction_min_frequency_bps".to_owned(),
+            "1".to_owned(),
+        ),
+        (
+            "vegeta.prediction_max_keys_per_method".to_owned(),
+            "16".to_owned(),
+        ),
         ("vegeta.work_step_divisor".to_owned(), "0".to_owned()),
         ("execution_backend".to_owned(), "native".to_owned()),
         ("consensus_cutoff_ms".to_owned(), "5000".to_owned()),

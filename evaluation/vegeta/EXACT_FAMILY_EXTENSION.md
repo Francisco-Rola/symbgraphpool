@@ -34,14 +34,14 @@ recheck.
 Run static/provenance/unit validation with:
 
 ```bash
-bash scripts/validate-vegeta-s3-exact-family-extensions.sh
+bash tools/legacy-scripts/validate-vegeta-s3-exact-family-extensions.sh
 ```
 
 After the exact SLOAD/SSTORE corpus already exists, run the full extension evaluation with:
 
 ```bash
 ETH_RPC_URL=<archive-capable-rpc> \
-  bash scripts/run-vegeta-s3-exact-family-extension-evaluation.sh
+  bash tools/legacy-scripts/run-vegeta-s3-exact-family-extension-evaluation.sh
 ```
 
 The evaluation wrapper does not re-extract exact traces. It rebuilds the native plan against the

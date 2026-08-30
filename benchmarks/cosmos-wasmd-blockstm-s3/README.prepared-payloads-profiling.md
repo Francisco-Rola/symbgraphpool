@@ -22,5 +22,5 @@ The 2-worker diagnostic script also enables isolated profiles for:
 CPU/allocation and mutex profiles execute in separate fresh processes so mutex
 sampling cannot distort CPU results. Allocation profiles are written before and
 after the replay; use `go tool pprof -diff_base=before after` to subtract app
-setup. `scripts/show-vegeta-s3-wasmd-compare-profiles.sh` prints the standard
+setup. `tools/legacy-scripts/show-vegeta-s3-wasmd-compare-profiles.sh` prints the standard
 comparison, including `outer-cache - direct` CPU differential output.

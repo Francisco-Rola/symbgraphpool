@@ -8,23 +8,23 @@ schema-v3 `ExperimentRecord`, and passes the Phase-5F acceptance policy before i
 ConflictLab 1.0 — broad correctness/mechanism evaluation:
 
 ```bash
-./scripts/run-conflictlab-v1-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh
 ```
 
 Controlled six-worker parallelism ceiling + overhead attribution:
 
 ```bash
-./scripts/run-conflictlab-parallelism-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-parallelism-evaluation.sh
 ```
 
 Run one explicit manifest:
 
 ```bash
-./scripts/run-benchmark-manifest.sh manifest.json [output-directory]
+./tools/legacy-scripts/run-benchmark-manifest.sh manifest.json [output-directory]
 ```
 
 `records.jsonl` is the source of truth. Aggregated CSVs and text reports are derived artifacts.
-Implementation helpers live under `scripts/internal/`; they are not intended as user-facing
+Implementation helpers live under `tools/internal/`; they are not intended as user-facing
 entrypoints.
 
 See `conflictlab/README.md` for the active workload axes and experiment definitions.

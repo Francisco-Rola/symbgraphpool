@@ -113,7 +113,7 @@ are attributed and reach the persistent feedback store.
 The Phase-5D regression tests are part of the canonical repository gate:
 
 ```bash
-./scripts/run-all-tests.sh
+./scripts/test-all.sh
 ```
 
 ## Consensus/correctness invariant

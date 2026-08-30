@@ -43,8 +43,9 @@ const (
 	wasmdVersion         = "v0.70.3"
 	baselineScope        = "actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-prepared-payloads-no-ante-abci"
 	directSerialScope    = "actual-wasmd-wasmvm-cosmos-sdk-direct-keeper-serial-prepared-payloads-no-ante-abci"
-	symbGraphStaticScope = "actual-wasmd-wasmvm-cosmos-sdk-symbgraph-static-symbolic-predict-prepared-payloads-single-cache-fingerprint-validate-replay-no-ante-abci"
+	symbGraphStaticScope = "actual-wasmd-wasmvm-cosmos-sdk-symbgraph-static-diagnostic-symbolic-predict-single-cache-fingerprint-validate-replay-no-ante-abci"
 	vegetaScope          = "actual-wasmd-wasmvm-cosmos-sdk-vegeta-prepared-payloads-single-cache-fingerprint-speculate-order-replay-no-ante-abci"
+	ariaFBScope          = "actual-wasmd-wasmvm-cosmos-sdk-ariafb-post-consensus-batch-rule2-canonical-validate-replay-no-ante-abci"
 	profileBaselineScope = "actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-w4-pprof-unmeasured"
 	chainID              = "vegeta-s3-wasmd-blockstm"
 )
@@ -125,6 +126,8 @@ type Record struct {
 	Workers                int     `json:"workers"`
 	MatchedSerialNanos     uint64  `json:"matched_serial_nanos"`
 	StrategyTotalNanos     uint64  `json:"strategy_total_nanos"`
+	PreConsensusNanos      uint64  `json:"pre_consensus_nanos,omitempty"`
+	PostConsensusNanos     uint64  `json:"post_consensus_nanos,omitempty"`
 	MatchedSerialSpeedup   float64 `json:"matched_serial_speedup"`
 	Transactions           int     `json:"transactions"`
 	ExecutionAttempts      uint64  `json:"execution_attempts"`
@@ -139,6 +142,82 @@ type Record struct {
 	BlockSTMPreEstimate    bool    `json:"block_stm_pre_estimate"`
 	SpeculatedTransactions uint64  `json:"speculated_transactions,omitempty"`
 	ReusedTransactions     uint64  `json:"reused_transactions,omitempty"`
+	ValidationNanos        uint64  `json:"validation_nanos,omitempty"`
+	ReplayExecutionNanos   uint64  `json:"replay_execution_nanos,omitempty"`
+	ConflictAnalysisNanos  uint64  `json:"conflict_analysis_nanos,omitempty"`
+	DiscoveredConflicts    uint64  `json:"discovered_conflicts,omitempty"`
+	ForwardFallbacks       uint64  `json:"forward_fallbacks,omitempty"`
+
+	SymbGraphVariant                      string                `json:"symbgraph_variant,omitempty"`
+	SymbPlanNanos                         uint64                `json:"symb_plan_nanos,omitempty"`
+	SymbPreexecutionNanos                 uint64                `json:"symb_preexecution_nanos,omitempty"`
+	SymbBranchCreateNanos                 uint64                `json:"symb_branch_create_nanos,omitempty"`
+	SymbVisibilityNanos                   uint64                `json:"symb_visibility_nanos,omitempty"`
+	SymbSpecExecutionNanos                uint64                `json:"symb_spec_execution_nanos,omitempty"`
+	SymbDeltaCaptureNanos                 uint64                `json:"symb_delta_capture_nanos,omitempty"`
+	SymbMVCCPublishNanos                  uint64                `json:"symb_mvcc_publish_nanos,omitempty"`
+	SymbFeedbackBuildNanos                uint64                `json:"symb_feedback_build_nanos,omitempty"`
+	SymbReconciliationNanos               uint64                `json:"symb_reconciliation_nanos,omitempty"`
+	SymbValidationNanos                   uint64                `json:"symb_validation_nanos,omitempty"`
+	SymbReplayExecutionNanos              uint64                `json:"symb_replay_execution_nanos,omitempty"`
+	SymbRustFeedbackNanos                 uint64                `json:"symb_rust_feedback_nanos,omitempty"`
+	SymbDependencyEdges                   int                   `json:"symb_dependency_edges,omitempty"`
+	SymbFeedbackPairs                     int                   `json:"symb_feedback_pairs,omitempty"`
+	SymbPhysicalCandidateEdges            int                   `json:"symb_physical_candidate_edges"`
+	SymbLogicalCandidateEdges             int                   `json:"symb_logical_candidate_edges"`
+	SymbCompactCandidateGroups            int                   `json:"symb_compact_candidate_groups"`
+	SymbParentDependenciesBeforeReduction int                   `json:"symb_parent_dependencies_before_reduction"`
+	SymbParentDependenciesElidedReduction int                   `json:"symb_parent_dependencies_elided_reduction"`
+	SymbInitialReady                      int                   `json:"symb_initial_ready,omitempty"`
+	SymbMaxReady                          int                   `json:"symb_max_ready,omitempty"`
+	SymbAverageReady                      float64               `json:"symb_average_ready,omitempty"`
+	SymbMaxActive                         int                   `json:"symb_max_active,omitempty"`
+	SymbCriticalPathTx                    int                   `json:"symb_critical_path_tx,omitempty"`
+	SymbCriticalPathCost                  uint64                `json:"symb_critical_path_cost,omitempty"`
+	SymbTotalEstimatedCost                uint64                `json:"symb_total_estimated_cost,omitempty"`
+	SymbDAGParallelism                    float64               `json:"symb_dag_parallelism,omitempty"`
+	SymbWorkerUtilization                 float64               `json:"symb_worker_utilization,omitempty"`
+	SymbWorkerIdleNanos                   uint64                `json:"symb_worker_idle_nanos,omitempty"`
+	SymbMVCCPointReads                    uint64                `json:"symb_mvcc_point_reads,omitempty"`
+	SymbMVCCVersionHits                   uint64                `json:"symb_mvcc_version_hits,omitempty"`
+	SymbMVCCBaseFallbacks                 uint64                `json:"symb_mvcc_base_fallbacks,omitempty"`
+	SymbMVCCRangeReads                    uint64                `json:"symb_mvcc_range_reads,omitempty"`
+	SymbMVCCRangeOverlayKeys              uint64                `json:"symb_mvcc_range_overlay_keys,omitempty"`
+	SymbMVCCPublishes                     uint64                `json:"symb_mvcc_publishes,omitempty"`
+	SymbMVCCPublishedKeys                 uint64                `json:"symb_mvcc_published_keys,omitempty"`
+	SymbPlanning                          *rustPlanningSnapshot `json:"symb_planning,omitempty"`
+	SymbDependencyReasons                 map[string]int        `json:"symb_dependency_reasons,omitempty"`
+	SymbDependencyPrimary                 map[string]int        `json:"symb_dependency_primary,omitempty"`
+	SymbCriticalPath                      []int                 `json:"symb_critical_path,omitempty"`
+	SymbCriticalPathReasons               map[string]int        `json:"symb_critical_path_reasons,omitempty"`
+	SymbCriticalPathCostByReason          map[string]uint64     `json:"symb_critical_path_cost_by_reason,omitempty"`
+	SymbDependencyProvenance              map[string]int        `json:"symb_dependency_provenance,omitempty"`
+	SymbDependencyDecisions               map[string]int        `json:"symb_dependency_decisions,omitempty"`
+	SymbCriticalPathProvenance            map[string]int        `json:"symb_critical_path_provenance,omitempty"`
+	SymbCriticalPathDecisions             map[string]int        `json:"symb_critical_path_decisions,omitempty"`
+	SymbCandidateHard                     int                   `json:"symb_candidate_hard,omitempty"`
+	SymbCandidateSoft                     int                   `json:"symb_candidate_soft,omitempty"`
+	SymbCandidateLow                      int                   `json:"symb_candidate_low,omitempty"`
+	SymbOrderedHard                       int                   `json:"symb_ordered_hard,omitempty"`
+	SymbOrderedSoft                       int                   `json:"symb_ordered_soft,omitempty"`
+	SymbOracleConflictEdges               int                   `json:"symb_oracle_conflict_edges,omitempty"`
+	SymbOracleCriticalPathTx              int                   `json:"symb_oracle_critical_path_tx,omitempty"`
+	SymbOracleCriticalPathCost            uint64                `json:"symb_oracle_critical_path_cost,omitempty"`
+	SymbOracleDAGParallelism              float64               `json:"symb_oracle_dag_parallelism,omitempty"`
+	SymbOracleCriticalPath                []int                 `json:"symb_oracle_critical_path,omitempty"`
+	SymbSerializationGap                  float64               `json:"symb_serialization_gap,omitempty"`
+	SymbPlanRequestBuildNanos             uint64                `json:"symb_plan_request_build_nanos,omitempty"`
+	SymbPlanRequestMarshalNanos           uint64                `json:"symb_plan_request_marshal_nanos,omitempty"`
+	SymbPlanCGORoundTripNanos             uint64                `json:"symb_plan_cgo_roundtrip_nanos,omitempty"`
+	SymbPlanResponseUnmarshalNanos        uint64                `json:"symb_plan_response_unmarshal_nanos,omitempty"`
+	SymbPlanRustDecodeNanos               uint64                `json:"symb_plan_rust_decode_nanos,omitempty"`
+	SymbPlanResolveComponentsNanos        uint64                `json:"symb_plan_resolve_components_nanos,omitempty"`
+	SymbPlanCandidateGraphNanos           uint64                `json:"symb_plan_candidate_graph_nanos,omitempty"`
+	SymbPlanSchedulerNanos                uint64                `json:"symb_plan_scheduler_nanos,omitempty"`
+	SymbPlanProjectionNanos               uint64                `json:"symb_plan_projection_nanos,omitempty"`
+	SymbPlanFeedbackPairsNanos            uint64                `json:"symb_plan_feedback_pairs_nanos,omitempty"`
+	SymbPlanFinalizeNanos                 uint64                `json:"symb_plan_finalize_nanos,omitempty"`
+	SymbPlanBridgeOtherNanos              uint64                `json:"symb_plan_bridge_other_nanos,omitempty"`
 }
 
 type preparedCallKey struct {
@@ -938,6 +1017,33 @@ func main() {
 		symbolicDirDefault,
 		"source-derived S3 symbolic profile directory (same input used by the native Rust scheduler)",
 	)
+	rustVisibility := flag.String(
+		"symbgraph-rust-visibility",
+		rustEnvOr("VEGETA_S3_RUST_ACG_VISIBILITY", rustVisibilityMVCC),
+		"Rust ACG Wasmd launch visibility: mvcc|materialized",
+	)
+	rustValidation := flag.String(
+		"symbgraph-rust-validation",
+		rustEnvOr("VEGETA_S3_RUST_ACG_VALIDATION", rustValidationIndexed),
+		"Rust ACG canonical validation: indexed|scan",
+	)
+	rustFeedback := flag.String(
+		"symbgraph-rust-feedback",
+		rustEnvOr("VEGETA_S3_RUST_ACG_FEEDBACK", rustFeedbackProfile),
+		"Rust ACG concrete feedback pair selection: profile|all-pairs",
+	)
+	rustEdgeMaterialization := flag.String("symbgraph-rust-edge-materialization-threshold", os.Getenv("VEGETA_S3_RUST_ACG_EDGE_MATERIALIZATION_THRESHOLD"), "override Rust ACG edge materialization threshold; blank keeps Rust default")
+	rustSoftThreshold := flag.String("symbgraph-rust-soft-threshold", os.Getenv("VEGETA_S3_RUST_ACG_SOFT_THRESHOLD"), "override Rust ACG soft scheduling threshold; blank keeps Rust default")
+	rustHardThreshold := flag.String("symbgraph-rust-hard-threshold", os.Getenv("VEGETA_S3_RUST_ACG_HARD_THRESHOLD"), "override Rust ACG hard scheduling threshold; blank keeps Rust default")
+	rustRiskBudget := flag.String("symbgraph-rust-risk-budget", os.Getenv("VEGETA_S3_RUST_ACG_RISK_BUDGET"), "override Rust ACG aggregate soft-risk budget; blank keeps Rust default")
+	rustExplorationRate := flag.String("symbgraph-rust-exploration-rate", os.Getenv("VEGETA_S3_RUST_ACG_EXPLORATION_RATE"), "override Rust ACG deterministic exploration fraction; blank keeps Rust default")
+	rustExplorationRiskBudget := flag.String("symbgraph-rust-exploration-risk-budget", os.Getenv("VEGETA_S3_RUST_ACG_EXPLORATION_RISK_BUDGET"), "override Rust ACG exploration risk budget; blank keeps Rust default")
+	rustExplorationMinUncertainty := flag.String("symbgraph-rust-exploration-min-uncertainty", os.Getenv("VEGETA_S3_RUST_ACG_EXPLORATION_MIN_UNCERTAINTY"), "override minimum uncertainty for exploration; blank keeps Rust default")
+	rustExplorationMaxTransactions := flag.String("symbgraph-rust-exploration-max-transactions", os.Getenv("VEGETA_S3_RUST_ACG_EXPLORATION_MAX_TRANSACTIONS"), "override maximum exploration transactions per block; blank keeps Rust default")
+	rustIndependenceBeforeSoftening := flag.String("symbgraph-rust-independence-before-softening", os.Getenv("VEGETA_S3_RUST_ACG_INDEPENDENCE_BEFORE_SOFTENING"), "override independent observations required before hard-to-soft demotion; blank keeps Rust default")
+	rustSofteningMinConfidence := flag.String("symbgraph-rust-softening-min-confidence", os.Getenv("VEGETA_S3_RUST_ACG_SOFTENING_MIN_CONFIDENCE"), "override minimum confidence for hard-to-soft demotion; blank keeps Rust default")
+	rustACGOnly := flag.Bool("rust-acg-only", boolEnv("VEGETA_S3_RUST_ACG_ONLY"), "run only matched direct-serial + Rust ACG rows (skip BlockSTM and Vegeta) for policy diagnostics")
+	rustDependencyDiagnostics := flag.Bool("symbgraph-rust-dependency-diagnostics", boolEnv("VEGETA_S3_RUST_ACG_DEPENDENCY_DIAGNOSTICS"), "emit dependency/critical-path reason metadata from Rust; disabled by default to avoid perturbing publication timing")
 	investigateOverhead := flag.Bool(
 		"investigate-overhead",
 		boolEnv("VEGETA_S3_WASMD_INVESTIGATE"),
@@ -949,6 +1055,29 @@ func main() {
 		"write Wasmd overhead diagnostics JSON (default: <output>.overhead.json)",
 	)
 	flag.Parse()
+	rustRunnerOptions, rustOptionsErr := (RustSymbGraphRunnerOptions{
+		Visibility: *rustVisibility,
+		Validation: *rustValidation,
+		Feedback:   *rustFeedback,
+	}).Normalize()
+	if rustOptionsErr != nil {
+		panic(rustOptionsErr)
+	}
+	rustPlanningOverrides, rustPlanningErr := rustPlanningOverridesFromStrings(
+		*rustEdgeMaterialization,
+		*rustSoftThreshold,
+		*rustHardThreshold,
+		*rustRiskBudget,
+		*rustExplorationRate,
+		*rustExplorationRiskBudget,
+		*rustExplorationMinUncertainty,
+		*rustExplorationMaxTransactions,
+		*rustIndependenceBeforeSoftening,
+		*rustSofteningMinConfidence,
+	)
+	if rustPlanningErr != nil {
+		panic(rustPlanningErr)
+	}
 	setupSDKConfig()
 	if *calOnly {
 		fmt.Printf("%.9f\n", calibrateIterationsPerNano())
@@ -1000,11 +1129,18 @@ func main() {
 	if e != nil {
 		panic(e)
 	}
-	symbolicPredictor, e := loadSymbolicPredictor(*repoRoot, *symbolicDir)
-	if e != nil {
-		panic(e)
+	// The publication SymbGraph row is planned entirely by crates/acg-* through
+	// the Rust FFI. The legacy Go symbolic predictor is loaded only for the
+	// explicitly requested symbgraph-static diagnostic profiler.
+	var symbolicAccesses symbolicAccessIndex
+	staticProfileRequested := *profileOnlyRunner == "symbgraph-static" || (*workers == 2 && *symbProfileDir != "")
+	if staticProfileRequested {
+		symbolicPredictor, err := loadSymbolicPredictor(*repoRoot, *symbolicDir)
+		if err != nil {
+			panic(err)
+		}
+		symbolicAccesses = buildSymbolicAccessIndex(symbolicPredictor, blocks)
 	}
-	symbolicAccesses := buildSymbolicAccessIndex(symbolicPredictor, blocks)
 	if *profileOnlyRunner != "" {
 		if e := profileWasmdRunner(*repoRoot, manifest, blocks, cal, symbolicAccesses, *profileOnlyRunner, *profileOnlyKind, *workers, *profileOutputDir); e != nil {
 			panic(e)
@@ -1018,39 +1154,58 @@ func main() {
 	defer f.Close()
 	w := bufio.NewWriter(f)
 	defer w.Flush()
-	fmt.Fprintf(os.Stderr, "wasmd scheduler matrix sdk=%s wasmd=%s workers=%d samples=%d go-iter/ns=%.6f symbolic=%s\n", cosmosSDKVersion, wasmdVersion, *workers, *samples, *iterPerNs, symbolicAccessSource(symbolicPredictor))
+	fmt.Fprintf(os.Stderr, "wasmd scheduler matrix sdk=%s wasmd=%s workers=%d samples=%d go-iter/ns=%.6f symbolic=rust-acg:%s variant=%s rust-only=%v\n", cosmosSDKVersion, wasmdVersion, *workers, *samples, *iterPerNs, resolveRepoPath(*repoRoot, *symbolicDir), rustRunnerOptions.Variant(), *rustACGOnly)
 	var diagnosticDirectNanos uint64
 	var diagnosticSerialDigests [][32]byte
 	if *investigateOverhead {
 		diagnosticSerialDigests = make([][32]byte, len(blocks))
 	}
 	for sample := 0; sample < *samples; sample++ {
+		rustBridge, e := NewRustSymbGraphBridgeWithPlanningAndDiagnostics(*repoRoot, *symbolicDir, rustPlanningOverrides, *rustDependencyDiagnostics)
+		if e != nil {
+			panic(e)
+		}
 		serial, e := newBenchApp(*repoRoot, manifest, blocks)
 		if e != nil {
+			rustBridge.Close()
 			panic(e)
 		}
 		stm, e := newBenchApp(*repoRoot, manifest, blocks)
 		if e != nil {
 			serial.close()
+			rustBridge.Close()
+			panic(e)
+		}
+		aria, e := newBenchApp(*repoRoot, manifest, blocks)
+		if e != nil {
+			serial.close()
+			stm.close()
+			rustBridge.Close()
 			panic(e)
 		}
 		symb, e := newBenchApp(*repoRoot, manifest, blocks)
 		if e != nil {
 			serial.close()
 			stm.close()
+			aria.close()
+			rustBridge.Close()
 			panic(e)
 		}
 		vegeta, e := newBenchApp(*repoRoot, manifest, blocks)
 		if e != nil {
 			serial.close()
 			stm.close()
+			aria.close()
 			symb.close()
+			rustBridge.Close()
 			panic(e)
 		}
 
 		func() {
+			defer rustBridge.Close()
 			defer serial.close()
 			defer stm.close()
+			defer aria.close()
 			defer symb.close()
 			defer vegeta.close()
 
@@ -1062,6 +1217,7 @@ func main() {
 				preEstimate,
 				func(storetypes.MultiStore) string { return sdk.DefaultBondDenom },
 			)
+			ariaRunner := NewAriaFBRunner(*workers)
 			vegetaRunner := NewVegetaRunner(*workers)
 
 			for blockOffset, block := range blocks {
@@ -1096,6 +1252,7 @@ func main() {
 					Workers:              *workers,
 					MatchedSerialNanos:   serialNanos,
 					StrategyTotalNanos:   serialNanos,
+					PostConsensusNanos:   serialNanos,
 					MatchedSerialSpeedup: 1,
 					Transactions:         len(block.Transactions),
 					ExecutionAttempts:    uint64(len(block.Transactions)),
@@ -1113,43 +1270,96 @@ func main() {
 					panic(e)
 				}
 
-				// Cosmos SDK Block-STM: native SDK MVCC/scheduler baseline.
-				stmBlockCtx := stm.app.NewNextBlockContext(header)
-				var stmAttempts atomic.Uint64
-				stmStart := time.Now()
-				_, e := blockSTMRunner.Run(context.Background(), stmBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
-					stmAttempts.Add(1)
-					ctx := stmBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
-					tx := block.Transactions[idx]
-					if e := stm.executeTx(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
-						return &abci.ExecTxResult{Code: 1, Log: e.Error()}
+				if !*rustACGOnly {
+					// Cosmos SDK Block-STM: native SDK MVCC/scheduler baseline.
+					stmBlockCtx := stm.app.NewNextBlockContext(header)
+					var stmAttempts atomic.Uint64
+					stmStart := time.Now()
+					_, e := blockSTMRunner.Run(context.Background(), stmBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+						stmAttempts.Add(1)
+						ctx := stmBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
+						tx := block.Transactions[idx]
+						if e := stm.executeTx(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
+							return &abci.ExecTxResult{Code: 1, Log: e.Error()}
+						}
+						return &abci.ExecTxResult{}
+					})
+					stmWall := time.Since(stmStart)
+					if e != nil {
+						panic(e)
 					}
-					return &abci.ExecTxResult{}
-				})
-				stmWall := time.Since(stmStart)
-				if e != nil {
-					panic(e)
-				}
-				if e := commitFinalizeState(stm.app); e != nil {
-					panic(e)
-				}
-				stmEq := serialDigest == digestApp(stm.app)
-				if !stmEq {
-					panic(fmt.Sprintf("block-stm state mismatch sample=%d block=%d", sample, block.BlockNumber))
-				}
-				stmA := stmAttempts.Load()
-				stmRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-block-stm", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(stmWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: stmA, Reexecutions: stmA - uint64(len(block.Transactions)), SerialEquivalent: stmEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: baselineScope, BlockSTMPreEstimate: preEstimate}
-				if stmRec.StrategyTotalNanos > 0 {
-					stmRec.MatchedSerialSpeedup = float64(stmRec.MatchedSerialNanos) / float64(stmRec.StrategyTotalNanos)
-				}
-				if e := json.NewEncoder(w).Encode(&stmRec); e != nil {
-					panic(e)
+					if e := commitFinalizeState(stm.app); e != nil {
+						panic(e)
+					}
+					stmEq := serialDigest == digestApp(stm.app)
+					if !stmEq {
+						panic(fmt.Sprintf("block-stm state mismatch sample=%d block=%d", sample, block.BlockNumber))
+					}
+					stmA := stmAttempts.Load()
+					stmRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-block-stm", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(stmWall.Nanoseconds()), PostConsensusNanos: uint64(stmWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: stmA, Reexecutions: stmA - uint64(len(block.Transactions)), SerialEquivalent: stmEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: baselineScope, BlockSTMPreEstimate: preEstimate}
+					if stmRec.StrategyTotalNanos > 0 {
+						stmRec.MatchedSerialSpeedup = float64(stmRec.MatchedSerialNanos) / float64(stmRec.StrategyTotalNanos)
+					}
+					if e := json.NewEncoder(w).Encode(&stmRec); e != nil {
+						panic(e)
+					}
+
 				}
 
-				// SymbGraph static: pre-execution logical dependency waves, real
-				// Wasmd/WasmVM execution, and actual SDK access validation/replay.
+				if !*rustACGOnly {
+					// AriaFB mechanism adaptation on the same Wasmd/WasmVM state machine.
+					// The whole batch executes after consensus against one block-start
+					// snapshot; Rule-2-like forward dependencies are proactively replayed,
+					// with canonical concrete validation as the final correctness boundary.
+					ariaBlockCtx := aria.app.NewNextBlockContext(header)
+					ariaStart := time.Now()
+					_, e = ariaRunner.Run(context.Background(), ariaBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+						ctx := ariaBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
+						tx := block.Transactions[idx]
+						if e := aria.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
+							return &abci.ExecTxResult{Code: 1, Log: e.Error()}
+						}
+						return &abci.ExecTxResult{}
+					})
+					ariaWall := time.Since(ariaStart)
+					if e != nil {
+						panic(e)
+					}
+					if e := commitFinalizeState(aria.app); e != nil {
+						panic(e)
+					}
+					ariaEq := serialDigest == digestApp(aria.app)
+					if !ariaEq {
+						panic(fmt.Sprintf("aria-fb state mismatch sample=%d block=%d", sample, block.BlockNumber))
+					}
+					ariaStats := ariaRunner.LastStats()
+					ariaRec := Record{
+						SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-aria-fb", Workers: *workers,
+						MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(ariaWall.Nanoseconds()), PostConsensusNanos: ariaStats.PostConsensusNanos, Transactions: len(block.Transactions),
+						ExecutionAttempts: ariaStats.Attempts, Reexecutions: ariaStats.Reexecutions, SerialEquivalent: ariaEq, ComputeMetric: "steps", ComputeScale: *scale,
+						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: ariaFBScope, BlockSTMPreEstimate: false,
+						SpeculatedTransactions: ariaStats.Speculated, ReusedTransactions: ariaStats.Reused, ValidationNanos: ariaStats.ValidationNanos, ReplayExecutionNanos: ariaStats.ReplayExecutionNanos,
+						ConflictAnalysisNanos: ariaStats.ConflictAnalysisNanos, DiscoveredConflicts: ariaStats.DiscoveredConflicts, ForwardFallbacks: ariaStats.ForwardFallbacks,
+					}
+					if ariaRec.StrategyTotalNanos > 0 {
+						ariaRec.MatchedSerialSpeedup = float64(ariaRec.MatchedSerialNanos) / float64(ariaRec.StrategyTotalNanos)
+					}
+					if e := json.NewEncoder(w).Encode(&ariaRec); e != nil {
+						panic(e)
+					}
+				}
+
+				// SymbGraph Rust: crates/acg-* owns symbolic parsing, candidate graph
+				// construction, conflict predicates, adaptive feedback, and risk-bounded
+				// ordering. Go executes only the emitted ordering_dependencies DAG against
+				// real Wasmd/WasmVM state and performs concrete validation/replay.
 				symbBlockCtx := symb.app.NewNextBlockContext(header)
-				symbRunner := NewSymbGraphStaticRunner(*workers, block, symbolicAccesses)
+				estimatedCosts := make([]uint32, len(block.Transactions))
+				for i, tx := range block.Transactions {
+					estimatedCosts[i] = boundedCost(cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash))
+				}
+				symbRunner := NewRustSymbGraphRunnerWithOptions(*workers, block, rustBridge, estimatedCosts, rustRunnerOptions)
+				symbRunner.SetSerialServiceNanos(serialNanos)
 				symbStart := time.Now()
 				_, e = symbRunner.Run(context.Background(), symbBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
 					ctx := symbBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
@@ -1168,10 +1378,52 @@ func main() {
 				}
 				symbEq := serialDigest == digestApp(symb.app)
 				if !symbEq {
-					panic(fmt.Sprintf("symbgraph-static state mismatch sample=%d block=%d", sample, block.BlockNumber))
+					panic(fmt.Sprintf("symbgraph-rust state mismatch sample=%d block=%d", sample, block.BlockNumber))
 				}
 				symbStats := symbRunner.LastStats()
-				symbRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-symbgraph-static", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(symbWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: symbStats.Attempts, Reexecutions: symbStats.Reexecutions, SerialEquivalent: symbEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: symbGraphStaticScope, BlockSTMPreEstimate: false, SpeculatedTransactions: symbStats.Speculated, ReusedTransactions: symbStats.Reused}
+				symbDiag := symbRunner.LastDiagnostics()
+				symbPlan := symbRunner.LastPlan()
+				symbRec := Record{
+					SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber,
+					Strategy: "cosmos-wasmd-symbgraph-rust", Workers: *workers, MatchedSerialNanos: serialNanos,
+					StrategyTotalNanos: uint64(symbWall.Nanoseconds()), PreConsensusNanos: symbStats.PreConsensusNanos, PostConsensusNanos: symbStats.PostConsensusNanos, Transactions: len(block.Transactions), ExecutionAttempts: symbStats.Attempts,
+					Reexecutions: symbStats.Reexecutions, SerialEquivalent: symbEq, ComputeMetric: "steps", ComputeScale: *scale,
+					GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion,
+					BaselineScope: rustRunnerOptions.Scope(), BlockSTMPreEstimate: false, SpeculatedTransactions: symbStats.Speculated,
+					ReusedTransactions: symbStats.Reused, ValidationNanos: symbDiag.ValidationNanos, ReplayExecutionNanos: symbDiag.ReplayExecutionNanos,
+					SymbGraphVariant: symbDiag.Variant, SymbPlanNanos: symbDiag.PlanNanos, SymbPreexecutionNanos: symbDiag.PreexecutionNanos,
+					SymbBranchCreateNanos: symbDiag.BranchCreateNanos, SymbVisibilityNanos: symbDiag.VisibilityNanos,
+					SymbSpecExecutionNanos: symbDiag.SpecExecutionNanos, SymbDeltaCaptureNanos: symbDiag.DeltaCaptureNanos,
+					SymbMVCCPublishNanos: symbDiag.MVCCPublishNanos, SymbFeedbackBuildNanos: symbDiag.FeedbackBuildNanos,
+					SymbReconciliationNanos: symbDiag.ReconciliationNanos, SymbValidationNanos: symbDiag.ValidationNanos,
+					SymbReplayExecutionNanos: symbDiag.ReplayExecutionNanos, SymbRustFeedbackNanos: symbDiag.RustFeedbackNanos,
+					SymbDependencyEdges: symbDiag.DependencyEdges, SymbFeedbackPairs: symbDiag.FeedbackPairs,
+					SymbPhysicalCandidateEdges: symbDiag.PhysicalCandidateEdges, SymbLogicalCandidateEdges: symbDiag.LogicalCandidateEdges, SymbCompactCandidateGroups: symbDiag.CompactCandidateGroups,
+					SymbParentDependenciesBeforeReduction: symbDiag.ParentDependenciesBeforeReduction, SymbParentDependenciesElidedReduction: symbDiag.ParentDependenciesElidedReduction,
+					SymbInitialReady: symbDiag.InitialReady, SymbMaxReady: symbDiag.MaxReady, SymbAverageReady: symbDiag.AverageReady(),
+					SymbMaxActive: symbDiag.MaxActive, SymbCriticalPathTx: symbDiag.CriticalPathTx, SymbCriticalPathCost: symbDiag.CriticalPathCost,
+					SymbTotalEstimatedCost: symbDiag.TotalEstimatedCost, SymbDAGParallelism: symbDiag.DAGParallelism,
+					SymbWorkerUtilization: symbDiag.WorkerUtilization, SymbWorkerIdleNanos: symbDiag.WorkerIdleNanos,
+					SymbMVCCPointReads: symbDiag.MVCCPointReads, SymbMVCCVersionHits: symbDiag.MVCCVersionHits,
+					SymbMVCCBaseFallbacks: symbDiag.MVCCBaseFallbacks, SymbMVCCRangeReads: symbDiag.MVCCRangeReads,
+					SymbMVCCRangeOverlayKeys: symbDiag.MVCCRangeOverlayKeys, SymbMVCCPublishes: symbDiag.MVCCPublishes,
+					SymbMVCCPublishedKeys: symbDiag.MVCCPublishedKeys,
+					SymbPlanning:          symbPlan.Planning, SymbDependencyReasons: symbDiag.DependencyReasons, SymbDependencyPrimary: symbDiag.DependencyPrimary,
+					SymbCriticalPath: symbDiag.CriticalPath, SymbCriticalPathReasons: symbDiag.CriticalPathReasons, SymbCriticalPathCostByReason: symbDiag.CriticalPathCostByReason,
+					SymbDependencyProvenance: symbDiag.DependencyProvenance, SymbDependencyDecisions: symbDiag.DependencyDecisions,
+					SymbCriticalPathProvenance: symbDiag.CriticalPathProvenance, SymbCriticalPathDecisions: symbDiag.CriticalPathDecisions,
+					SymbCandidateHard: symbDiag.CandidateHard, SymbCandidateSoft: symbDiag.CandidateSoft, SymbCandidateLow: symbDiag.CandidateLow,
+					SymbOrderedHard: symbDiag.OrderedHard, SymbOrderedSoft: symbDiag.OrderedSoft,
+					SymbOracleConflictEdges: symbDiag.OracleConflictEdges, SymbOracleCriticalPathTx: symbDiag.OracleCriticalPathTx,
+					SymbOracleCriticalPathCost: symbDiag.OracleCriticalPathCost, SymbOracleDAGParallelism: symbDiag.OracleDAGParallelism,
+					SymbOracleCriticalPath: symbDiag.OracleCriticalPath, SymbSerializationGap: symbDiag.SerializationGap,
+					SymbPlanRequestBuildNanos: symbDiag.PlanRequestBuildNanos, SymbPlanRequestMarshalNanos: symbDiag.PlanRequestMarshalNanos,
+					SymbPlanCGORoundTripNanos: symbDiag.PlanCGORoundTripNanos, SymbPlanResponseUnmarshalNanos: symbDiag.PlanResponseUnmarshalNanos,
+					SymbPlanRustDecodeNanos: symbDiag.PlanRustDecodeNanos, SymbPlanResolveComponentsNanos: symbDiag.PlanResolveComponentsNanos,
+					SymbPlanCandidateGraphNanos: symbDiag.PlanCandidateGraphNanos, SymbPlanSchedulerNanos: symbDiag.PlanSchedulerNanos,
+					SymbPlanProjectionNanos: symbDiag.PlanProjectionNanos, SymbPlanFeedbackPairsNanos: symbDiag.PlanFeedbackPairsNanos,
+					SymbPlanFinalizeNanos: symbDiag.PlanFinalizeNanos, SymbPlanBridgeOtherNanos: symbDiag.PlanBridgeOtherNanos,
+				}
 				if symbRec.StrategyTotalNanos > 0 {
 					symbRec.MatchedSerialSpeedup = float64(symbRec.MatchedSerialNanos) / float64(symbRec.StrategyTotalNanos)
 				}
@@ -1179,38 +1431,41 @@ func main() {
 					panic(e)
 				}
 
-				// Vegeta port: speculate all transactions on the same block-start
-				// snapshot, derive dependencies from actual Wasmd accesses, then
-				// deterministic order/replay against the shared SDK store.
-				vegetaBlockCtx := vegeta.app.NewNextBlockContext(header)
-				vegetaStart := time.Now()
-				_, e = vegetaRunner.Run(context.Background(), vegetaBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
-					ctx := vegetaBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
-					tx := block.Transactions[idx]
-					if e := vegeta.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
-						return &abci.ExecTxResult{Code: 1, Log: e.Error()}
+				if !*rustACGOnly {
+					// Vegeta port: speculate all transactions on the same block-start
+					// snapshot, derive dependencies from actual Wasmd accesses, then
+					// deterministic order/replay against the shared SDK store.
+					vegetaBlockCtx := vegeta.app.NewNextBlockContext(header)
+					vegetaStart := time.Now()
+					_, e = vegetaRunner.Run(context.Background(), vegetaBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+						ctx := vegetaBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
+						tx := block.Transactions[idx]
+						if e := vegeta.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
+							return &abci.ExecTxResult{Code: 1, Log: e.Error()}
+						}
+						return &abci.ExecTxResult{}
+					})
+					vegetaWall := time.Since(vegetaStart)
+					if e != nil {
+						panic(e)
 					}
-					return &abci.ExecTxResult{}
-				})
-				vegetaWall := time.Since(vegetaStart)
-				if e != nil {
-					panic(e)
+					if e := commitFinalizeState(vegeta.app); e != nil {
+						panic(e)
+					}
+					vegetaEq := serialDigest == digestApp(vegeta.app)
+					if !vegetaEq {
+						panic(fmt.Sprintf("vegeta state mismatch sample=%d block=%d", sample, block.BlockNumber))
+					}
+					vegetaStats := vegetaRunner.LastStats()
+					vegetaRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-vegeta", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(vegetaWall.Nanoseconds()), PreConsensusNanos: vegetaStats.PreConsensusNanos, PostConsensusNanos: vegetaStats.PostConsensusNanos, Transactions: len(block.Transactions), ExecutionAttempts: vegetaStats.Attempts, Reexecutions: vegetaStats.Reexecutions, SerialEquivalent: vegetaEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: vegetaScope, BlockSTMPreEstimate: false, SpeculatedTransactions: vegetaStats.Speculated, ReusedTransactions: vegetaStats.Reused, ValidationNanos: vegetaStats.ValidationNanos, ReplayExecutionNanos: vegetaStats.ReplayExecutionNanos}
+					if vegetaRec.StrategyTotalNanos > 0 {
+						vegetaRec.MatchedSerialSpeedup = float64(vegetaRec.MatchedSerialNanos) / float64(vegetaRec.StrategyTotalNanos)
+					}
+					if e := json.NewEncoder(w).Encode(&vegetaRec); e != nil {
+						panic(e)
+					}
 				}
-				if e := commitFinalizeState(vegeta.app); e != nil {
-					panic(e)
-				}
-				vegetaEq := serialDigest == digestApp(vegeta.app)
-				if !vegetaEq {
-					panic(fmt.Sprintf("vegeta state mismatch sample=%d block=%d", sample, block.BlockNumber))
-				}
-				vegetaStats := vegetaRunner.LastStats()
-				vegetaRec := Record{SchemaVersion: 1, Dataset: "vegeta-s3-wasmd-blockstm", Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-vegeta", Workers: *workers, MatchedSerialNanos: serialNanos, StrategyTotalNanos: uint64(vegetaWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: vegetaStats.Attempts, Reexecutions: vegetaStats.Reexecutions, SerialEquivalent: vegetaEq, ComputeMetric: "steps", ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: vegetaScope, BlockSTMPreEstimate: false, SpeculatedTransactions: vegetaStats.Speculated, ReusedTransactions: vegetaStats.Reused}
-				if vegetaRec.StrategyTotalNanos > 0 {
-					vegetaRec.MatchedSerialSpeedup = float64(vegetaRec.MatchedSerialNanos) / float64(vegetaRec.StrategyTotalNanos)
-				}
-				if e := json.NewEncoder(w).Encode(&vegetaRec); e != nil {
-					panic(e)
-				}
+
 			}
 		}()
 	}

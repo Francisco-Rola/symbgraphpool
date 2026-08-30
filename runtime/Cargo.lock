@@ -213,6 +213,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "acg-wasmd-scheduler-ffi"
+version = "0.1.0"
+dependencies = [
+ "acg-candidate-graph",
+ "acg-core",
+ "acg-feedback",
+ "acg-predicate",
+ "acg-profile-graph",
+ "acg-runtime-feedback",
+ "acg-symbolic-json",
+ "blake3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

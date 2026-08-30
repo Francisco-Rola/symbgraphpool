@@ -19,15 +19,17 @@ mod types;
 mod validation;
 
 pub use crate::cache::{WasmCacheConfig, WasmCacheMetrics};
-pub use crate::engine::{deterministic_compute, CosmWasmEngine, EngineConfig, WasmInstanceLifecycle};
+pub use crate::engine::{
+    deterministic_compute, CosmWasmEngine, EngineConfig, WasmInstanceLifecycle,
+};
 pub use crate::error::{EngineError, EngineResult};
 pub use crate::native::{NativeCallContext, NativeContract};
 pub use crate::parallel::{
     CanonicalCommitDiagnostics, ContractExecutionDiagnostics, DependencyPreexecutionDiagnostics,
-    ParallelExecutionConfig,
-    ParallelSpeculativeExecutionMetrics, PostConsensusTimings, PredictionMatchMetrics,
-    PreparedSpeculativeBlock, ReconciliationDependencyEvidence, SpeculativeDependency,
-    SpeculativeDependencyClass, SpeculativeWave, SplitPhaseSpeculativeBlockOutcome,
+    ParallelExecutionConfig, ParallelSpeculativeExecutionMetrics, PostConsensusTimings,
+    PredictionMatchMetrics, PreparedSpeculativeBlock, ReconciliationDependencyEvidence,
+    SpeculativeDependency, SpeculativeDependencyClass, SpeculativeWave,
+    SplitPhaseSpeculativeBlockOutcome,
 };
 pub use crate::speculative::{
     BalanceWrite, CanonicalTransaction, CanonicalTxDisposition, CanonicalTxResult, ReadDependency,
@@ -38,9 +40,8 @@ pub use crate::speculative::{
 pub use crate::types::{
     AccessKind, AccessRecord, Address, BlockContext, BundleCall, BundleCallAccessSpan,
     BundleCallFailure, BundleExecutionOutcome, BundleQueryResult, BundleRevertedScopeOutcome,
-    ScopedBundleCall,
-    CodeChecksum, CodeId, CodeKind, CodeMetadata, ContractMetadata,
-    ExecutionOutcome, ExecutionRequest, NativeResponse, QueryOutcome, TransactionId,
+    CodeChecksum, CodeId, CodeKind, CodeMetadata, ContractMetadata, ExecutionOutcome,
+    ExecutionRequest, NativeResponse, QueryOutcome, ScopedBundleCall, TransactionId,
 };
 
 pub use crate::validation::{ValidationConflict, ValidationOutcome};

@@ -100,9 +100,14 @@ impl TransactionState {
 
     fn base_storage_get(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>> {
         self.mvcc_view.as_ref().map_or_else(
-            || self.with_canonical_read(|world| {
-                world.storage.get(contract).and_then(|entries| entries.get(key).cloned())
-            }),
+            || {
+                self.with_canonical_read(|world| {
+                    world
+                        .storage
+                        .get(contract)
+                        .and_then(|entries| entries.get(key).cloned())
+                })
+            },
             |view| view.storage_get(contract, key),
         )
     }
@@ -114,49 +119,55 @@ impl TransactionState {
         end: Option<&[u8]>,
     ) -> BTreeMap<Vec<u8>, Vec<u8>> {
         self.mvcc_view.as_ref().map_or_else(
-            || self.with_canonical_read(|world| {
-                world
-                    .storage
-                    .get(contract)
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .filter(|(key, _)| {
-                                start.map_or(true, |start| key.as_slice() >= start)
-                                    && end.map_or(true, |end| key.as_slice() < end)
-                            })
-                            .map(|(key, value)| (key.clone(), value.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }),
+            || {
+                self.with_canonical_read(|world| {
+                    world
+                        .storage
+                        .get(contract)
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter(|(key, _)| {
+                                    start.map_or(true, |start| key.as_slice() >= start)
+                                        && end.map_or(true, |end| key.as_slice() < end)
+                                })
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+            },
             |view| view.storage_range(contract, start, end),
         )
     }
 
     fn base_balance(&self, address: &Address, denom: &str) -> Uint128 {
         self.mvcc_view.as_ref().map_or_else(
-            || self.with_canonical_read(|world| {
-                world
-                    .balances
-                    .get(&(address.clone(), denom.to_owned()))
-                    .copied()
-                    .unwrap_or_default()
-            }),
+            || {
+                self.with_canonical_read(|world| {
+                    world
+                        .balances
+                        .get(&(address.clone(), denom.to_owned()))
+                        .copied()
+                        .unwrap_or_default()
+                })
+            },
             |view| view.balance(address, denom),
         )
     }
 
     fn base_balances(&self, address: &Address) -> BTreeMap<String, Uint128> {
         self.mvcc_view.as_ref().map_or_else(
-            || self.with_canonical_read(|world| {
-                world
-                    .balances
-                    .iter()
-                    .filter(|((owner, _), _)| owner == address)
-                    .map(|((_, denom), amount)| (denom.clone(), *amount))
-                    .collect()
-            }),
+            || {
+                self.with_canonical_read(|world| {
+                    world
+                        .balances
+                        .iter()
+                        .filter(|((owner, _), _)| owner == address)
+                        .map(|((_, denom), amount)| (denom.clone(), *amount))
+                        .collect()
+                })
+            },
             |view| view.balances(address),
         )
     }

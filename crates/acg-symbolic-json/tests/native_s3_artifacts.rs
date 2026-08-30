@@ -27,9 +27,13 @@ fn native_s3_artifacts_parse_and_normalize() {
         let raw = parse_slice(&bytes).unwrap_or_else(|error| panic!("{family}: {error}"));
         let mut hash = [0_u8; 32];
         hash[0] = u8::try_from(index + 1).unwrap();
-        let context = IngestionContext::new(RuntimeId::new("cosmwasm").unwrap(), ContractCodeHash(hash), 1);
-        let normalized = normalize_document(raw, &context)
-            .unwrap_or_else(|error| panic!("{family}: {error}"));
+        let context = IngestionContext::new(
+            RuntimeId::new("cosmwasm").unwrap(),
+            ContractCodeHash(hash),
+            1,
+        );
+        let normalized =
+            normalize_document(raw, &context).unwrap_or_else(|error| panic!("{family}: {error}"));
         assert!(!normalized.is_empty(), "{family} produced no profiles");
     }
 }

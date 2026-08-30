@@ -9,7 +9,7 @@ semantics, and runtime overhead before moving to external workloads.
 Run the full 4,630-record suite with:
 
 ```bash
-./scripts/run-conflictlab-v1-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh
 ```
 
 The V1 grids cover:
@@ -32,7 +32,7 @@ experiments.
 Before rerunning the full suite after adaptive/runtime changes, run the 146-record focused gate:
 
 ```bash
-./scripts/run-conflictlab-fix-validation.sh
+./tools/legacy-scripts/run-conflictlab-fix-validation.sh
 ```
 
 It isolates four behaviors: reordered-receipt read-set reuse, fail-safe regime changes with direct
@@ -46,7 +46,7 @@ require serial equivalence.
 Run:
 
 ```bash
-./scripts/run-conflictlab-parallelism-evaluation.sh
+./tools/legacy-scripts/run-conflictlab-parallelism-evaluation.sh
 ```
 
 `parallelism-ceiling.grid.json` creates deterministic conflict lanes with `parallelism_lanes`:

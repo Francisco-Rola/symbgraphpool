@@ -1,8 +1,7 @@
 use std::{
     collections::BTreeMap,
     error::Error,
-    fmt,
-    fs,
+    fmt, fs,
     io::{BufRead, BufReader},
     path::Path,
     time::{Duration, Instant},
@@ -118,7 +117,9 @@ impl ComputeCalibration {
         iterations_per_nano_override: Option<f64>,
     ) -> Result<Self, CalibrationError> {
         if !scale.is_finite() || scale < 0.0 {
-            return Err(CalibrationError("compute scale must be finite and non-negative".to_owned()));
+            return Err(CalibrationError(
+                "compute scale must be finite and non-negative".to_owned(),
+            ));
         }
         if metric == ComputeMetric::None || scale == 0.0 {
             return Ok(Self {
@@ -130,11 +131,15 @@ impl ComputeCalibration {
         }
         if base_total_nanos == 0 {
             return Err(CalibrationError(
-                "compute base total must be greater than zero when calibration is enabled".to_owned(),
+                "compute base total must be greater than zero when calibration is enabled"
+                    .to_owned(),
             ));
         }
         let file = fs::File::open(path).map_err(|error| {
-            CalibrationError(format!("failed to open compute weights {}: {error}", path.display()))
+            CalibrationError(format!(
+                "failed to open compute weights {}: {error}",
+                path.display()
+            ))
         })?;
         let mut weights = BTreeMap::new();
         let mut total_units = 0_u128;
@@ -146,7 +151,10 @@ impl ComputeCalibration {
                 continue;
             }
             let row: ComputeWeightRow = serde_json::from_str(&line).map_err(|error| {
-                CalibrationError(format!("invalid compute weight line {}: {error}", line_number + 1))
+                CalibrationError(format!(
+                    "invalid compute weight line {}: {error}",
+                    line_number + 1
+                ))
             })?;
             let units = match metric {
                 ComputeMetric::None => 0,
@@ -231,10 +239,8 @@ impl ComputeCalibration {
             return Ok(0);
         }
         let share = weight.units as f64 / self.total_units as f64;
-        let iterations = self.base_total_nanos as f64
-            * self.scale
-            * share
-            * self.iterations_per_nano;
+        let iterations =
+            self.base_total_nanos as f64 * self.scale * share * self.iterations_per_nano;
         if !iterations.is_finite() || iterations <= 0.0 {
             return Ok(0);
         }
@@ -287,14 +293,8 @@ mod tests {
         let mut file = fs::File::create(&path).unwrap();
         writeln!(file, r#"{{"block_number":1,"tx_index":0,"tx_hash":"0xaaa","source_trace_present":true,"source_opcode_steps":10,"source_gas_used":100}}"#).unwrap();
         writeln!(file, r#"{{"block_number":1,"tx_index":1,"tx_hash":"0xbbb","source_trace_present":true,"source_opcode_steps":30,"source_gas_used":200}}"#).unwrap();
-        let calibration = ComputeCalibration::load(
-            &path,
-            ComputeMetric::Steps,
-            1.0,
-            4_000,
-            Some(1.0),
-        )
-        .unwrap();
+        let calibration =
+            ComputeCalibration::load(&path, ComputeMetric::Steps, 1.0, 4_000, Some(1.0)).unwrap();
         let a = calibration.iterations_for(1, 0, "0xaaa").unwrap();
         let b = calibration.iterations_for(1, 1, "0xbbb").unwrap();
         assert_eq!(a, 1_000);
