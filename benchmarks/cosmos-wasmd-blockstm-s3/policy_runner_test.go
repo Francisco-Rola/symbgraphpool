@@ -513,3 +513,21 @@ func TestVegetaBatchDefersUnknownReadOfConcurrentUnknownWrite(t *testing.T) {
 		t.Fatalf("accepted=%v want [1]", accepted)
 	}
 }
+
+func TestAccessTrackersEqualIncludesReadsRangesAndWrites(t *testing.T) {
+	store := storeIDFromName("wasm")
+	left := newAccessTracker(nil)
+	right := newAccessTracker(nil)
+	for _, tracker := range []*accessTracker{left, right} {
+		tracker.read(store, []byte("r"))
+		tracker.readRange(store, []byte("a"), []byte("z"))
+		tracker.write(store, []byte("w"))
+	}
+	if !accessTrackersEqual(left, right) {
+		t.Fatal("identical concrete access footprints must compare equal")
+	}
+	right.read(store, []byte("extra"))
+	if accessTrackersEqual(left, right) {
+		t.Fatal("new concrete read must invalidate exact oracle footprint equality")
+	}
+}

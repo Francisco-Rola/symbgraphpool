@@ -806,6 +806,62 @@ func trackerTouchesID(tracker *accessTracker, id accessID) bool {
 	return writeSetHasID(&tracker.writes, id)
 }
 
+func writeSetsEqual(left, right *writeSet) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	leftCount := 0
+	rightCount := 0
+	equal := true
+	forEachWrite(left, func(id accessID, loc writeLocation) {
+		leftCount++
+		if !writeSetContainsLocation(right, id, loc) {
+			equal = false
+		}
+	})
+	forEachWrite(right, func(_ accessID, _ writeLocation) {
+		rightCount++
+	})
+	return equal && leftCount == rightCount
+}
+
+func storeRangesEqual(left, right []storeRange) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	used := make([]bool, len(right))
+	for _, want := range left {
+		matched := false
+		for i, got := range right {
+			if used[i] || want.store != got.store || !bytes.Equal(want.start, got.start) || !bytes.Equal(want.end, got.end) {
+				continue
+			}
+			used[i] = true
+			matched = true
+			break
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func accessTrackersEqual(left, right *accessTracker) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if len(left.reads) != len(right.reads) {
+		return false
+	}
+	for id := range left.reads {
+		if _, ok := right.reads[id]; !ok {
+			return false
+		}
+	}
+	return storeRangesEqual(left.ranges, right.ranges) && writeSetsEqual(&left.writes, &right.writes)
+}
+
 // hottestAccessChain mirrors Vegeta's findMostFrequentKey/findLongestChain idea:
 // count each exact key at most once per transaction and return the transactions
 // touching the most frequently accessed key in the supplied deterministic order.

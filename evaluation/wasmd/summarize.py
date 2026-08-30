@@ -2,15 +2,19 @@
 """Summarize the controlled Wasmd scheduler evaluation.
 
 The publication-facing throughput metric uses one campaign-wide consensus window C:
-C = max measured pre_consensus_nanos across Rust-ACG and Vegeta records.
+C = max measured pre_consensus_nanos across the deployable pre-consensus systems: Rust-ACG and Vegeta.
 
 Effective service time per block for every strategy:
   C + post_consensus_nanos
 
-Rust-ACG and Vegeta use C for their pre-consensus work; Serial, Block-STM, and
-AriaFB are idle with respect to execution during the same consensus interval and then
-perform their post-consensus work. Raw wall time and post-only speedup are reported
-separately so implementation cost and consensus-visible execution remain explicit.
+Rust-ACG and Vegeta determine C. ACG-Oracle is evaluated inside that same fixed
+window but never changes it, because a hindsight-only upper bound must not alter the
+primary denominator used for the deployable systems. Serial, Block-STM, and AriaFB
+are idle with respect to execution during the same consensus interval and then
+perform their post-consensus work. ACG-Oracle is an explicitly
+non-deployable upper bound that replaces Rust-ACG's inferred symbolic accesses with
+exact source SLOAD/SSTORE information while retaining the same Wasmd MVCC launch and
+canonical validation path. Raw wall time and post-only speedup are reported separately.
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ from typing import Any
 
 STRATEGY_ORDER = [
     "cosmos-wasmd-direct-serial",
+    "cosmos-wasmd-symbgraph-rust-exact-trace-oracle",
     "cosmos-wasmd-block-stm",
     "cosmos-wasmd-aria-fb",
     "cosmos-wasmd-vegeta",
@@ -32,12 +37,14 @@ STRATEGY_ORDER = [
 ]
 LABELS = {
     "cosmos-wasmd-direct-serial": "Serial",
+    "cosmos-wasmd-symbgraph-rust-exact-trace-oracle": "ACG-Oracle",
     "cosmos-wasmd-block-stm": "BlockSTM",
     "cosmos-wasmd-aria-fb": "AriaFB",
     "cosmos-wasmd-vegeta": "Vegeta",
     "cosmos-wasmd-symbgraph-rust": "Rust-ACG",
 }
-PRECONSENSUS = {"cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust"}
+PRECONSENSUS = {"cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust", "cosmos-wasmd-symbgraph-rust-exact-trace-oracle"}
+CONSENSUS_WINDOW_STRATEGIES = {"cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust"}
 
 # Two-sided 95% Student-t critical values by degrees of freedom. For larger n,
 # the normal approximation is sufficient for the reporting precision here.
@@ -151,6 +158,7 @@ def aggregate_samples(per_sample: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "post_ms", "post_p50_ms", "post_p95_ms", "post_p99_ms", "wall_ms", "pre_p95_ms", "pre_max_ms", "consensus_headroom_p95_ms",
         "consensus_window_utilization_p95_pct", "replay_pct",
         "validation_ms", "replay_execution_ms", "conflict_analysis_ms",
+        "structural_parallelism", "source_trace_missing", "translation_compensation_edges",
     ]
     out: list[dict[str, Any]] = []
     for (strategy, workers), samples in grouped.items():
@@ -174,6 +182,7 @@ def aggregate_samples(per_sample: list[dict[str, Any]]) -> list[dict[str, Any]]:
         row["reexecutions"] = statistics.fmean(float(s["reexecutions"]) for s in samples)
         row["forward_fallbacks"] = statistics.fmean(float(s["forward_fallbacks"]) for s in samples)
         row["safety_replays"] = statistics.fmean(float(s["safety_replays"]) for s in samples)
+        row["structural_edges"] = statistics.fmean(float(s["structural_edges"]) for s in samples)
         out.append(row)
     order = {s: i for i, s in enumerate(STRATEGY_ORDER)}
     out.sort(key=lambda r: (r["workers"], order.get(r["strategy"], 999), r["strategy"]))
@@ -205,6 +214,16 @@ def build_per_sample(rows: list[dict[str, Any]], window_ns: int) -> list[dict[st
         reexec = sum(int(r.get("reexecutions", 0)) for r in rs)
         forward = sum(int(r.get("forward_fallbacks", 0)) for r in rs)
         safety = sum(int(r.get("safety_replays", 0)) for r in rs)
+        source_trace_missing = sum(int(r.get("oracle_source_trace_missing", 0)) for r in rs)
+        translation_compensation_edges = sum(int(r.get("oracle_translation_compensation_edges", 0)) for r in rs)
+        symb_edges = sum(int(r.get("symb_dependency_edges", 0)) for r in rs)
+        symb_total_cost = sum(int(r.get("symb_total_estimated_cost", 0)) for r in rs)
+        symb_cp_cost = sum(int(r.get("symb_critical_path_cost", 0)) for r in rs)
+        structural_parallelism = 0.0
+        structural_edges = 0
+        if strategy in {"cosmos-wasmd-symbgraph-rust", "cosmos-wasmd-symbgraph-rust-exact-trace-oracle"} and symb_cp_cost:
+            structural_parallelism = symb_total_cost / symb_cp_cost
+            structural_edges = symb_edges
         serial_equivalent = all(bool(r.get("serial_equivalent", False)) for r in rs)
         if not serial_equivalent:
             raise SystemExit(f"state-equivalence failure strategy={strategy} workers={workers} sample={sample}")
@@ -241,6 +260,10 @@ def build_per_sample(rows: list[dict[str, Any]], window_ns: int) -> list[dict[st
             "validation_ms": validation_ns / 1e6,
             "replay_execution_ms": replay_exec_ns / 1e6,
             "conflict_analysis_ms": conflict_ns / 1e6,
+            "structural_parallelism": structural_parallelism,
+            "source_trace_missing": float(source_trace_missing),
+            "translation_compensation_edges": float(translation_compensation_edges),
+            "structural_edges": structural_edges,
             "reexecutions": reexec,
             "replay_pct": (100.0 * reexec / txs) if txs else 0.0,
             "forward_fallbacks": forward,
@@ -281,7 +304,8 @@ def render(rows: list[dict[str, Any]], window_ns: int) -> str:
         "",
         f"Campaign consensus window: {window_ns / 1e6:.3f} ms",
         "  C = maximum measured pre-consensus interval across Rust-ACG and Vegeta in this campaign.",
-        "  Throughput denominator: every strategy uses C + post; ACG/Vegeta perform pre-execution inside C.",
+        "  Throughput denominator: every strategy uses C + post; ACG-Oracle is evaluated under the same C but does not set it.",
+        "  ACG-Oracle is hindsight-only: exact source SLOAD/SSTORE accesses replace prediction; frozen native-translation RAW aliases compensate EVM->Wasmd semantic compression; the normal ACG MVCC+validation path is retained.",
         "  post-x = matched serial execution / consensus-visible post phase. wall-x is bookkeeping only.",
         "",
         f"{'system':<12} {'w':>3} {'n':>3} {'tps':>10} {'tput-x':>7} {'post-ms':>10} {'post-x':>7} {'wall-x':>7} {'replay':>8} {'val-ms':>9} {'replay-ms':>10}",
@@ -293,6 +317,27 @@ def render(rows: list[dict[str, Any]], window_ns: int) -> str:
             f"{r['post_ms']:>10.1f} {r['post_x']:>7.2f} {r['wall_x']:>7.2f} "
             f"{r['replay_pct']:>7.2f}% {r['validation_ms']:>9.1f} {r['replay_execution_ms']:>10.1f}"
         )
+    by_worker = defaultdict(dict)
+    for r in rows:
+        by_worker[r["workers"]][r["strategy"]] = r
+    lines += [
+        "",
+        "Rust-ACG perfect-access headroom",
+        f"{'w':>3} {'oracle-tps':>11} {'acg-tps':>10} {'oracle/acg':>10} {'oracle-dag':>11} {'acg-dag':>9} {'native+':>8} {'missing':>8}",
+    ]
+    for workers in sorted(by_worker):
+        oracle = by_worker[workers].get("cosmos-wasmd-symbgraph-rust-exact-trace-oracle")
+        acg = by_worker[workers].get("cosmos-wasmd-symbgraph-rust")
+        if not oracle or not acg:
+            continue
+        acg_tps = float(acg.get("throughput_tps", 0.0))
+        oracle_tps = float(oracle.get("throughput_tps", 0.0))
+        gap = oracle_tps / acg_tps if acg_tps else 0.0
+        lines.append(
+            f"{workers:>3} {oracle_tps:>11.1f} {acg_tps:>10.1f} {gap:>10.3f} "
+            f"{oracle.get('structural_parallelism', 0.0):>11.2f} {acg.get('structural_parallelism', 0.0):>9.2f} "
+            f"{oracle.get('translation_compensation_edges', 0.0):>8.0f} {oracle.get('source_trace_missing', 0.0):>8.0f}"
+        )
     lines += [
         "",
         "Reporting notes:",
@@ -301,6 +346,11 @@ def render(rows: list[dict[str, Any]], window_ns: int) -> str:
         "  * Report wall-x and pre-consensus percentiles to show the real resource cost and whether speculation fits C.",
         "  * AriaFB ports the attached repository's exact Rule-2 abort condition and hot-chain DAG fallback to Wasmd.",
         "  * Vegeta ports SpeculateMod/ParallelMod hot-key proposal reordering, Rule-2 replay batches, and access-change handling to Wasmd.",
+        "  * ACG-Oracle replaces symbolic prediction with the frozen exact Ethereum SLOAD/SSTORE trace and materializes its minimal RAW visibility dependencies. Because the native Wasmd translation can alias multiple source states or introduce read-modify-write behavior, the frozen native-translation access audit contributes only the additional RAW edges absent from the Ethereum relation; adapter bank/funds hard resources remain unchanged.",
+        "  * The native-translation compensation is frozen before the scheduler campaign and is not a per-run Wasmd access-discovery pass. It exists solely to make the perfect-source oracle faithful to the workload actually executed after EVM->CosmWasm translation.",
+        "  * ACG-Oracle is required to finish with zero replay and historical-order state equivalence; any replay aborts the campaign instead of weakening the claimed upper bound.",
+        "  * Missing exact source traces are conservative serial barriers and are reported in the headroom table; they make the oracle slightly pessimistic rather than optimistic.",
+        "  * oracle/acg in the headroom table is the throughput gain still available if current symbolic access extraction became perfect under the same validation design.",
         "  * serial_equivalent and matched_serial_nanos use each strategy's serial_reference_scope; historical_serial_nanos retains the common historical-order control.",
         "  * safety_replays are conservative Wasmd-only fallbacks for dynamic key/range changes absent from the Ethereum access model.",
     ]
@@ -325,7 +375,7 @@ def main() -> None:
 
     pre = [
         int(r.get("pre_consensus_nanos", 0))
-        for r in rows if r.get("strategy") in PRECONSENSUS
+        for r in rows if r.get("strategy") in CONSENSUS_WINDOW_STRATEGIES
     ]
     window_ns = max(pre, default=0)
     if window_ns <= 0:
@@ -339,10 +389,10 @@ def main() -> None:
     obj = {
         "schema_version": 1,
         "consensus_window_nanos": window_ns,
-        "consensus_window_definition": "max pre_consensus_nanos across Rust-ACG and Vegeta for the entire campaign",
+        "consensus_window_definition": "max pre_consensus_nanos across Rust-ACG and Vegeta for the entire campaign; ACG-Oracle never sets C",
         "throughput_definition": {
             "all_strategies": "transactions / (blocks * consensus_window + sum(post_consensus))",
-            "interpretation": "Rust-ACG/Vegeta use the consensus interval for pre-execution; Serial/BlockSTM/AriaFB wait for the same fixed consensus interval before post-consensus execution.",
+            "interpretation": "Rust-ACG and Vegeta determine the fixed consensus interval. ACG-Oracle is evaluated under that same C without changing it; Serial/BlockSTM/AriaFB wait for the same fixed interval before post-consensus execution. ACG-Oracle uses exact source accesses plus frozen translation-only RAW compensation, but the same ACG execution/validation design.",
         },
         "rows": aggregated,
         "per_sample": per_sample,

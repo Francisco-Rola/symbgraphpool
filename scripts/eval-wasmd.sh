@@ -61,12 +61,13 @@ COMPUTE_SCALE="${EVAL_WASMD_COMPUTE_SCALE:-4}"
 ALLOWED_MISSING_SOURCE="${EVAL_WASMD_ALLOWED_MISSING_SOURCE:-2}"
 EXEC_DIR="${EVAL_WASMD_EXEC_DIR:-benchmarks/corpora/vegeta-ethereum/s3/native-execution}"
 TRACE_DIR="${EVAL_WASMD_TRACE_DIR:-benchmarks/corpora/vegeta-ethereum/s3-exact-sload-sstore/tx-traces}"
+NATIVE_ACCESSES="${EVAL_WASMD_EXACT_NATIVE_ACCESSES:-$EXEC_DIR/native-accesses.jsonl}"
 SYMBOLIC_DIR="${EVAL_WASMD_SYMBOLIC_DIR:-benchmarks/symbolic/native-s3}"
 OUT_DIR="${EVAL_WASMD_OUTPUT_DIR:-benchmark-results/wasmd-${MODE}}"
 
 MANIFEST="$EXEC_DIR/execution-manifest.json"
 PLAN="$EXEC_DIR/execution-plan.jsonl"
-for p in "$MANIFEST" "$PLAN"; do
+for p in "$MANIFEST" "$PLAN" "$NATIVE_ACCESSES"; do
   [[ -s "$p" ]] || { echo "missing evaluation input: $p" >&2; echo "prepare the frozen Vegeta S3 Wasmd translation before running this stage" >&2; exit 2; }
 done
 [[ -d "$TRACE_DIR" ]] || { echo "missing source-trace directory: $TRACE_DIR" >&2; exit 2; }
@@ -101,6 +102,7 @@ ENV_FILE="$OUT_DIR/environment.txt"
   echo "plan=$PLAN"
   echo "symbolic_dir=$SYMBOLIC_DIR"
   echo "trace_dir=$TRACE_DIR"
+  echo "exact_native_accesses=$NATIVE_ACCESSES"
   echo "uname=$(uname -a)"
   command -v lscpu >/dev/null 2>&1 && lscpu || true
   command -v rustc >/dev/null 2>&1 && rustc --version || true
@@ -143,6 +145,8 @@ for workers in "${WORKERS[@]}"; do
     --plan "$PLAN" \
     --compute-weights "$WEIGHTS" \
     --symbolic-dir "$SYMBOLIC_DIR" \
+    --exact-trace-dir "$TRACE_DIR" \
+    --exact-native-accesses "$NATIVE_ACCESSES" \
     --output "$raw" \
     --workers "$workers" \
     --samples "$SAMPLES" \

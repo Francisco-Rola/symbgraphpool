@@ -11,9 +11,10 @@ SUMMARIZER = ROOT / "evaluation" / "wasmd" / "summarize.py"
 
 
 class WasmdPublicationEvalTests(unittest.TestCase):
-    def test_fixed_campaign_consensus_window_and_five_strategy_throughput(self):
+    def test_fixed_campaign_consensus_window_and_six_strategy_throughput(self):
         strategies = [
             "cosmos-wasmd-direct-serial",
+            "cosmos-wasmd-symbgraph-rust-exact-trace-oracle",
             "cosmos-wasmd-block-stm",
             "cosmos-wasmd-aria-fb",
             "cosmos-wasmd-vegeta",
@@ -30,6 +31,12 @@ class WasmdPublicationEvalTests(unittest.TestCase):
                     total = 100
                     if strategy == "cosmos-wasmd-block-stm":
                         post = total = 50
+                    elif strategy == "cosmos-wasmd-symbgraph-rust-exact-trace-oracle":
+                        # Hindsight oracle pre-work must never inflate the campaign
+                        # consensus window used to compare deployable systems.
+                        pre = 100
+                        post = 2
+                        total = 102
                     elif strategy == "cosmos-wasmd-aria-fb":
                         post = total = 40
                     elif strategy == "cosmos-wasmd-vegeta":
@@ -40,7 +47,7 @@ class WasmdPublicationEvalTests(unittest.TestCase):
                         pre = 20
                         post = 5
                         total = 25
-                    rows.append({
+                    row = {
                         "strategy": strategy,
                         "workers": 4,
                         "sample": 0,
@@ -52,7 +59,21 @@ class WasmdPublicationEvalTests(unittest.TestCase):
                         "post_consensus_nanos": post,
                         "serial_equivalent": True,
                         "reexecutions": 0,
-                    })
+                    }
+                    if strategy == "cosmos-wasmd-symbgraph-rust-exact-trace-oracle":
+                        row.update({
+                            "oracle_source_trace_missing": 1 if block == 0 else 0,
+                            "symb_dependency_edges": 3,
+                            "symb_total_estimated_cost": 100,
+                            "symb_critical_path_cost": 20,
+                        })
+                    elif strategy == "cosmos-wasmd-symbgraph-rust":
+                        row.update({
+                            "symb_dependency_edges": 5,
+                            "symb_total_estimated_cost": 100,
+                            "symb_critical_path_cost": 40,
+                        })
+                    rows.append(row)
             records.write_text("".join(json.dumps(r) + "\n" for r in rows))
             out = td / "summary"
             subprocess.run([sys.executable, str(SUMMARIZER), "--records", str(records), "--output-dir", str(out)], check=True)
@@ -60,6 +81,7 @@ class WasmdPublicationEvalTests(unittest.TestCase):
             self.assertEqual(obj["consensus_window_nanos"], 40)
             by = {(r["strategy"], r["workers"]): r for r in obj["rows"]}
             serial = by[("cosmos-wasmd-direct-serial", 4)]
+            oracle = by[("cosmos-wasmd-symbgraph-rust-exact-trace-oracle", 4)]
             vegeta = by[("cosmos-wasmd-vegeta", 4)]
             acg = by[("cosmos-wasmd-symbgraph-rust", 4)]
             # Every strategy is charged the same two 40 ns consensus windows.
@@ -69,6 +91,10 @@ class WasmdPublicationEvalTests(unittest.TestCase):
             self.assertAlmostEqual(acg["throughput_speedup"], 280 / 90)
             self.assertAlmostEqual(acg["post_x"], 20.0)
             self.assertAlmostEqual(serial["post_x"], 1.0)
+            self.assertAlmostEqual(oracle["structural_parallelism"], 5.0)
+            self.assertAlmostEqual(acg["structural_parallelism"], 2.5)
+            self.assertEqual(oracle["source_trace_missing"], 1.0)
+            self.assertIn("Rust-ACG perfect-access headroom", (out / "summary.txt").read_text())
             self.assertEqual(
                 obj["throughput_definition"]["all_strategies"],
                 "transactions / (blocks * consensus_window + sum(post_consensus))",
@@ -77,6 +103,7 @@ class WasmdPublicationEvalTests(unittest.TestCase):
     def test_summarizer_rejects_partial_strategy_campaign(self):
         strategies = [
             "cosmos-wasmd-direct-serial",
+            "cosmos-wasmd-symbgraph-rust-exact-trace-oracle",
             "cosmos-wasmd-block-stm",
             "cosmos-wasmd-aria-fb",
             "cosmos-wasmd-vegeta",
@@ -99,10 +126,12 @@ class WasmdPublicationEvalTests(unittest.TestCase):
                         "matched_serial_nanos": 100,
                         "strategy_total_nanos": 100,
                         "pre_consensus_nanos": 20 if strategy in {
-                            "cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust"
+                            "cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust",
+                            "cosmos-wasmd-symbgraph-rust-exact-trace-oracle",
                         } else 0,
                         "post_consensus_nanos": 80 if strategy in {
-                            "cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust"
+                            "cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust",
+                            "cosmos-wasmd-symbgraph-rust-exact-trace-oracle",
                         } else 100,
                         "serial_equivalent": True,
                     })
@@ -118,6 +147,14 @@ class WasmdPublicationEvalTests(unittest.TestCase):
         main = (ROOT / "benchmarks" / "cosmos-wasmd-blockstm-s3" / "main.go").read_text()
         runner = (ROOT / "benchmarks" / "cosmos-wasmd-blockstm-s3" / "policy_runner.go").read_text()
         self.assertIn('Strategy: "cosmos-wasmd-aria-fb"', main)
+        oracle = (ROOT / "benchmarks" / "cosmos-wasmd-blockstm-s3" / "exact_trace_acg_oracle.go").read_text()
+        rust_runner = (ROOT / "benchmarks" / "cosmos-wasmd-blockstm-s3" / "rust_symbgraph_runner.go").read_text()
+        self.assertIn('Strategy: "cosmos-wasmd-symbgraph-rust-exact-trace-oracle"', main)
+        self.assertNotIn("executeTrackedHistoricalOracle", main)
+        self.assertNotIn("NewExactAccessOracleRunner", main)
+        self.assertIn("buildExactTraceACGPlan", oracle)
+        self.assertIn("NewRustSymbGraphExactTraceOracleRunner", rust_runner)
+        self.assertIn("requireZeroReplay", rust_runner)
         self.assertIn("NewAriaFBRunner", main)
         self.assertIn("ariaRule2ForwardFallbacks", runner)
         self.assertIn("ariaDirectPredecessors", runner)

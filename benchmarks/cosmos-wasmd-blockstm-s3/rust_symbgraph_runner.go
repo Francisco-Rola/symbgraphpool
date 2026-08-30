@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,11 @@ type RustSymbGraphRunner struct {
 	estimatedCosts     []uint32
 	serialServiceNanos uint64
 	options            RustSymbGraphRunnerOptions
+	fixedPlan          *rustPlanResponse
+	fixedPlanNanos     uint64
+	feedbackEnabled    bool
+	requireZeroReplay  bool
+	variantOverride    string
 	last               policyRunStats
 	lastPlan           rustPlanResponse
 	lastFeedback       rustFeedbackResponse
@@ -85,12 +91,31 @@ func NewRustSymbGraphRunnerWithOptions(workers int, block ExecutionBlock, bridge
 		panic(err)
 	}
 	return &RustSymbGraphRunner{
-		workers:        workers,
-		block:          block,
-		bridge:         bridge,
-		estimatedCosts: append([]uint32(nil), estimatedCosts...),
-		options:        normalized,
+		workers:         workers,
+		block:           block,
+		bridge:          bridge,
+		estimatedCosts:  append([]uint32(nil), estimatedCosts...),
+		options:         normalized,
+		feedbackEnabled: true,
 	}
+}
+
+// NewRustSymbGraphExactTraceOracleRunner reuses the production Rust-ACG
+// execution, MVCC visibility, canonical validation, delta reuse, and replay
+// machinery with a hindsight exact-access plan. Only the symbolic prediction
+// source is replaced. Runtime feedback is disabled because perfect analysis
+// does not need learning, and any replay is a harness failure.
+func NewRustSymbGraphExactTraceOracleRunner(workers int, block ExecutionBlock, estimatedCosts []uint32, plan rustPlanResponse, planNanos uint64, options RustSymbGraphRunnerOptions) *RustSymbGraphRunner {
+	r := NewRustSymbGraphRunnerWithOptions(workers, block, nil, estimatedCosts, options)
+	planCopy := plan
+	planCopy.Dependencies = append([]rustPlanDependency(nil), plan.Dependencies...)
+	planCopy.FeedbackPairs = append([]rustPlanPair(nil), plan.FeedbackPairs...)
+	r.fixedPlan = &planCopy
+	r.fixedPlanNanos = planNanos
+	r.feedbackEnabled = false
+	r.requireZeroReplay = true
+	r.variantOverride = "exact-ethereum-trace+" + r.options.Variant()
+	return r
 }
 
 func (r *RustSymbGraphRunner) SetSerialServiceNanos(nanos uint64) { r.serialServiceNanos = nanos }
@@ -589,27 +614,42 @@ func (r *RustSymbGraphRunner) Run(ctx context.Context, ms storetypes.MultiStore,
 	if len(txs) != len(r.block.Transactions) {
 		return nil, fmt.Errorf("Rust SymbGraph block/tx mismatch: plan=%d runner=%d", len(r.block.Transactions), len(txs))
 	}
-	diag := RustSymbGraphDiagnostics{Variant: r.options.Variant()}
-	planningStarted := time.Now()
-	plan, err := r.bridge.Plan(r.block, r.estimatedCosts)
-	if err != nil {
-		return nil, err
+	variant := r.options.Variant()
+	if r.variantOverride != "" {
+		variant = r.variantOverride
 	}
-	planningElapsed := time.Since(planningStarted)
+	diag := RustSymbGraphDiagnostics{Variant: variant}
+	var plan rustPlanResponse
+	var planningElapsed time.Duration
+	if r.fixedPlan != nil {
+		plan = *r.fixedPlan
+		planningElapsed = time.Duration(r.fixedPlanNanos)
+	} else {
+		if r.bridge == nil {
+			return nil, fmt.Errorf("Rust SymbGraph runner has neither bridge nor fixed plan")
+		}
+		planningStarted := time.Now()
+		var err error
+		plan, err = r.bridge.Plan(r.block, r.estimatedCosts)
+		if err != nil {
+			return nil, err
+		}
+		planningElapsed = time.Since(planningStarted)
+		diag.PlanRequestBuildNanos = plan.BridgeTimings.RequestBuildNanos
+		diag.PlanRequestMarshalNanos = plan.BridgeTimings.RequestMarshalNanos
+		diag.PlanCGORoundTripNanos = plan.BridgeTimings.CGORoundTripNanos
+		diag.PlanResponseUnmarshalNanos = plan.BridgeTimings.ResponseUnmarshalNanos
+		if plan.PlanningTimings != nil {
+			diag.PlanRustDecodeNanos = plan.PlanningTimings.RustDecodeNanos
+			diag.PlanResolveComponentsNanos = plan.PlanningTimings.ResolveComponentsNanos
+			diag.PlanCandidateGraphNanos = plan.PlanningTimings.CandidateGraphNanos
+			diag.PlanSchedulerNanos = plan.PlanningTimings.SchedulerNanos
+			diag.PlanProjectionNanos = plan.PlanningTimings.ProjectionNanos
+			diag.PlanFeedbackPairsNanos = plan.PlanningTimings.FeedbackPairsNanos
+			diag.PlanFinalizeNanos = plan.PlanningTimings.FinalizeNanos
+		}
+	}
 	diag.PlanNanos = uint64(planningElapsed.Nanoseconds())
-	diag.PlanRequestBuildNanos = plan.BridgeTimings.RequestBuildNanos
-	diag.PlanRequestMarshalNanos = plan.BridgeTimings.RequestMarshalNanos
-	diag.PlanCGORoundTripNanos = plan.BridgeTimings.CGORoundTripNanos
-	diag.PlanResponseUnmarshalNanos = plan.BridgeTimings.ResponseUnmarshalNanos
-	if plan.PlanningTimings != nil {
-		diag.PlanRustDecodeNanos = plan.PlanningTimings.RustDecodeNanos
-		diag.PlanResolveComponentsNanos = plan.PlanningTimings.ResolveComponentsNanos
-		diag.PlanCandidateGraphNanos = plan.PlanningTimings.CandidateGraphNanos
-		diag.PlanSchedulerNanos = plan.PlanningTimings.SchedulerNanos
-		diag.PlanProjectionNanos = plan.PlanningTimings.ProjectionNanos
-		diag.PlanFeedbackPairsNanos = plan.PlanningTimings.FeedbackPairsNanos
-		diag.PlanFinalizeNanos = plan.PlanningTimings.FinalizeNanos
-	}
 	knownPlan := diag.PlanRequestBuildNanos + diag.PlanRequestMarshalNanos + diag.PlanResponseUnmarshalNanos +
 		diag.PlanRustDecodeNanos + diag.PlanResolveComponentsNanos + diag.PlanCandidateGraphNanos +
 		diag.PlanSchedulerNanos + diag.PlanProjectionNanos + diag.PlanFeedbackPairsNanos + diag.PlanFinalizeNanos
@@ -655,19 +695,22 @@ func (r *RustSymbGraphRunner) Run(ctx context.Context, ms storetypes.MultiStore,
 	}
 	diag.PreexecutionNanos = uint64(preexecutionElapsed.Nanoseconds())
 
-	feedbackBuildStarted := time.Now()
-	preTrackers := make([]*accessTracker, len(receipts))
-	for i := range receipts {
-		preTrackers[i] = receipts[i].store.tracker
-	}
 	var preObservations []rustPairObservation
-	if r.options.Feedback == rustFeedbackProfile {
-		preObservations = rustPairObservationsForPlanPairs(preTrackers, plan.FeedbackPairs, "pre_execution", func(_, _ int) bool { return true })
-	} else {
-		preObservations = rustPairObservations(preTrackers, "pre_execution", func(_, _ int) bool { return true })
+	var serialization []rustSerializationObservation
+	if r.feedbackEnabled {
+		feedbackBuildStarted := time.Now()
+		preTrackers := make([]*accessTracker, len(receipts))
+		for i := range receipts {
+			preTrackers[i] = receipts[i].store.tracker
+		}
+		if r.options.Feedback == rustFeedbackProfile {
+			preObservations = rustPairObservationsForPlanPairs(preTrackers, plan.FeedbackPairs, "pre_execution", func(_, _ int) bool { return true })
+		} else {
+			preObservations = rustPairObservations(preTrackers, "pre_execution", func(_, _ int) bool { return true })
+		}
+		serialization = rustSerializationFeedback(plan, completedAt)
+		diag.FeedbackBuildNanos += uint64(time.Since(feedbackBuildStarted).Nanoseconds())
 	}
-	serialization := rustSerializationFeedback(plan, completedAt)
-	diag.FeedbackBuildNanos += uint64(time.Since(feedbackBuildStarted).Nanoseconds())
 
 	results, finalTrackers, replayed, causes, replayNanos, reconciliationElapsed, err := r.reconcile(ms, txs, receipts, deliverTx, &diag)
 	if err != nil {
@@ -679,42 +722,61 @@ func (r *RustSymbGraphRunner) Run(ctx context.Context, ms storetypes.MultiStore,
 		diag.SerializationGap = diag.OracleDAGParallelism / diag.DAGParallelism
 	}
 
-	feedbackBuildStarted = time.Now()
-	var replayObservations []rustPairObservation
-	if r.options.Feedback == rustFeedbackProfile {
-		replayObservations = rustPairObservationsForPlanPairs(finalTrackers, plan.FeedbackPairs, "replay", func(i, j int) bool { return replayed[i] || replayed[j] })
-	} else {
-		replayObservations = rustPairObservations(finalTrackers, "replay", func(i, j int) bool { return replayed[i] || replayed[j] })
-	}
-	observations := append(preObservations, replayObservations...)
-	replayAttributions := buildReplayAttributions(finalTrackers, causes, replayNanos)
-	diag.FeedbackBuildNanos += uint64(time.Since(feedbackBuildStarted).Nanoseconds())
-
-	rustFeedbackStarted := time.Now()
-	feedback, err := r.bridge.Feedback(rustFeedbackRequest{
-		Epoch:              r.block.BlockNumber,
-		Observations:       observations,
-		ReplayAttributions: replayAttributions,
-		Serialization:      serialization,
-		Economics: rustEconomicsObservation{
-			SerialServiceNanos: r.serialServiceNanos,
-			PreConsensusNanos:  uint64((planningElapsed + preexecutionElapsed).Nanoseconds()),
-			PostConsensusNanos: uint64(reconciliationElapsed.Nanoseconds()),
-			TransactionCount:   len(txs),
-		},
-	})
-	diag.RustFeedbackNanos = uint64(time.Since(rustFeedbackStarted).Nanoseconds())
-	if err != nil {
-		return nil, err
-	}
-	r.lastFeedback = feedback
-
 	replayCount := uint64(0)
 	for _, value := range replayed {
 		if value {
 			replayCount++
 		}
 	}
+	if r.requireZeroReplay && replayCount != 0 {
+		details := make([]string, 0, replayCount)
+		for tx, predecessors := range causes {
+			if len(predecessors) == 0 {
+				continue
+			}
+			hash := ""
+			if tx < len(r.block.Transactions) {
+				hash = r.block.Transactions[tx].TxHash
+			}
+			details = append(details, fmt.Sprintf("tx=%d hash=%s invalidated_by=%v", tx, hash, predecessors))
+		}
+		return nil, fmt.Errorf("exact-trace Rust-ACG oracle replayed %d/%d transactions in block %d after translation compensation; perfect-access contract violated: %s", replayCount, len(txs), r.block.BlockNumber, strings.Join(details, "; "))
+	}
+
+	if r.feedbackEnabled {
+		feedbackBuildStarted := time.Now()
+		var replayObservations []rustPairObservation
+		if r.options.Feedback == rustFeedbackProfile {
+			replayObservations = rustPairObservationsForPlanPairs(finalTrackers, plan.FeedbackPairs, "replay", func(i, j int) bool { return replayed[i] || replayed[j] })
+		} else {
+			replayObservations = rustPairObservations(finalTrackers, "replay", func(i, j int) bool { return replayed[i] || replayed[j] })
+		}
+		observations := append(preObservations, replayObservations...)
+		replayAttributions := buildReplayAttributions(finalTrackers, causes, replayNanos)
+		diag.FeedbackBuildNanos += uint64(time.Since(feedbackBuildStarted).Nanoseconds())
+
+		rustFeedbackStarted := time.Now()
+		feedback, err := r.bridge.Feedback(rustFeedbackRequest{
+			Epoch:              r.block.BlockNumber,
+			Observations:       observations,
+			ReplayAttributions: replayAttributions,
+			Serialization:      serialization,
+			Economics: rustEconomicsObservation{
+				SerialServiceNanos: r.serialServiceNanos,
+				PreConsensusNanos:  uint64((planningElapsed + preexecutionElapsed).Nanoseconds()),
+				PostConsensusNanos: uint64(reconciliationElapsed.Nanoseconds()),
+				TransactionCount:   len(txs),
+			},
+		})
+		diag.RustFeedbackNanos = uint64(time.Since(rustFeedbackStarted).Nanoseconds())
+		if err != nil {
+			return nil, err
+		}
+		r.lastFeedback = feedback
+	} else {
+		r.lastFeedback = rustFeedbackResponse{}
+	}
+
 	r.last = policyRunStats{
 		Attempts:           uint64(len(txs)) + replayCount,
 		Reexecutions:       replayCount,
