@@ -1,1 +1,0 @@
-{"result": {"error": "", "gasUsed": 21033, "reads": [], "steps": 7, "writes": []}, "schema_version": 1, "trace_mode": "custom-js-tx", "tracer_sha256": "b10d31b75175a98f1934e0ae2dabdf45f69233b2b5e9b8198957eb883b3a02a6", "tx_hash": "0x1765543758e7beb117cb9f9d5aa1d59ace6d2f563904f8c7b6508cf965b7c6f5"}

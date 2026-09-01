@@ -26,3 +26,12 @@ benchmarks/corpora/vegeta-ethereum/s1/native-characterization/code-cache.json
 benchmarks/corpora/vegeta-ethereum/**/native-plan/
 # Generated execution bundles/concrete native traces and topology reports.
 benchmarks/corpora/vegeta-ethereum/**/native-execution/
+
+
+
+# RPC-derived characterization caches.
+benchmarks/corpora/vegeta-ethereum/**/native-characterization/call-cache/
+benchmarks/corpora/vegeta-ethereum/**/native-characterization/code-cache.json
+benchmarks/corpora/vegeta-ethereum/**/native-characterization/thin-corpus.jsonl
+
+

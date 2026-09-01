@@ -1,1 +1,0 @@
-{"result": {"error": "execution reverted", "gasUsed": 27885, "reads": [], "steps": 165, "writes": []}, "schema_version": 1, "trace_mode": "custom-js-tx", "tracer_sha256": "b10d31b75175a98f1934e0ae2dabdf45f69233b2b5e9b8198957eb883b3a02a6", "tx_hash": "0x1f0c108b95525d81657cfca69d67a6f76b2210f2fb0546947ac6f7104268949d"}
