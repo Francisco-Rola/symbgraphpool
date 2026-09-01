@@ -609,7 +609,29 @@
           ]
         },
         {
-          "kind": "read_write",
+          "kind": "read",
+          "resource": "PERMIT_NONCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "permit accepted",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+            "start_line": 20,
+            "end_line": 20,
+            "code": "PERMIT_NONCES.update(deps.storage,o.as_str()"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
           "resource": "PERMIT_NONCES",
           "key": {
             "semantic_name": "address",
@@ -640,7 +662,7 @@
       ],
       "accesses": [
         {
-          "kind": "read_write",
+          "kind": "read",
           "resource": "BALANCES",
           "key": {
             "semantic_name": "address",
@@ -662,13 +684,52 @@
           "notes": []
         },
         {
-          "kind": "read_write",
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "sufficient balance and active",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "ExecuteMsg::Burn{amount}=>{ensure_active(deps.as_ref(),info.sender.as_str())?;debit(deps.storage,info.sender.as_str(),amount)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
           "resource": "TOTAL_SUPPLY",
           "key": {
             "semantic_name": "singleton",
-            "depends_on": {
-              "dependency_kind": "constant"
-            }
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "burn succeeds",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+            "start_line": 14,
+            "end_line": 14,
+            "code": "TOTAL_SUPPLY.update(deps.storage,|x|x.checked_sub(amount)"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "TOTAL_SUPPLY",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
           },
           "guard": {
             "expression": "burn succeeds",

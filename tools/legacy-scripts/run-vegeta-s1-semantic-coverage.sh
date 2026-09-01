@@ -65,9 +65,25 @@ if (conf < min_conf or med < min_med) and not allow:
     raise SystemExit('S1 reviewed state-touch conflict coverage is below the publication gate. Review remaining opaque selectors/families; do not lower the gate for publication runs.')
 PY
 
+READINESS_ARGS=(
+  --translation-coverage "$PLAN_DIR/translation-coverage.json"
+  --semantic-conflict-coverage "$PLAN_DIR/semantic-conflict-coverage.json"
+  --transaction-deficit "$PLAN_DIR/transaction-deficit.json"
+  --profile scheduler-fidelity
+  --min-conflict "$MIN_CONFLICT"
+  --min-median-block "$MIN_MEDIAN_BLOCK"
+  --min-semantic-tx "$MIN_SEM_TX"
+  --min-contention-tx "${VEGETA_S1_MIN_CONTENTION_TX_COVERAGE:-0.80}"
+  --output "$PLAN_DIR/readiness.json"
+  --text-output "$PLAN_DIR/readiness.txt"
+  --allow-low
+)
+python3 tools/vegeta/evaluate-vegeta-s1-readiness.py "${READINESS_ARGS[@]}"
+
 echo
 echo "PASS: Vegeta S1 reviewed state-semantics coverage gate passed"
 echo "owner-level coverage: $WORK_DIR/source-family-coverage.txt"
 echo "semantic coverage: $PLAN_DIR/semantic-conflict-coverage.txt"
 echo "translation coverage: $PLAN_DIR/translation-coverage.txt"
 echo "transaction deficit: $PLAN_DIR/transaction-deficit.txt"
+echo "readiness profiles: $PLAN_DIR/readiness.txt"

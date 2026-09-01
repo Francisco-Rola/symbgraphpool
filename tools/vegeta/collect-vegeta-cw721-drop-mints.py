@@ -15,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from characterize_vegeta_corpus import RpcClient
+from characterize_vegeta_corpus_compat import RpcClient
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 ZERO_ADDRESS_TOPIC = "0x" + ("00" * 32)
@@ -119,7 +119,12 @@ def main() -> int:
             continue
         try:
             token_id = int_hex(topics[3])
+            recipient_topic = str(topics[2] or "").lower()
+            recipient = norm_addr("0x" + recipient_topic.replace("0x", "")[-40:])
         except (ValueError, TypeError):
+            ignored += 1
+            continue
+        if recipient is None:
             ignored += 1
             continue
         tx_hash = str(row.get("transactionHash") or "").lower()
@@ -130,6 +135,7 @@ def main() -> int:
                 "log_index": int_hex(row.get("logIndex")),
                 "tx_hash": tx_hash,
                 "token_id": token_id,
+                "recipient": recipient,
             }
         )
 
@@ -153,10 +159,12 @@ def main() -> int:
                     "transaction_index": event["transaction_index"],
                     "mint_count": 0,
                     "token_ids": [],
+                    "recipients": [],
                 },
             )
             row["mint_count"] += 1
             row["token_ids"].append(event["token_id"])
+            row["recipients"].append(event["recipient"])
         owner_reports[owner] = {
             "mint_events": len(events),
             "mint_transactions": len(txs),
@@ -169,9 +177,9 @@ def main() -> int:
         }
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset": "vegeta-s1",
-        "definition": "ERC721 Transfer(address,address,uint256) logs with indexed from == address(0) for reviewed cw721-drop storage owners",
+        "definition": "ERC721 Transfer(address,address,uint256) logs with indexed from == address(0) for reviewed cw721-drop storage owners; includes indexed recipient for execution-effect reconciliation",
         "block_range": [ns.start_block, ns.end_block],
         "reviewed_owners": owners,
         "owners": owner_reports,

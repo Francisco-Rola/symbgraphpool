@@ -183,6 +183,24 @@ def abi_dynamic_uint_array(data: str, i: int, *, max_items: int = 10_000) -> lis
     if end>len(raw): return []
     return [int.from_bytes(raw[body+32*j:body+32*(j+1)],'big') for j in range(length)]
 
+def abi_dynamic_address_array(data: str, i: int, *, max_items: int = 10_000) -> list[str]:
+    """Decode one top-level ABI address[] argument and reject non-canonical address words."""
+    raw=bytes.fromhex(data[2:] if data.startswith('0x') else data)
+    offset=abi_uint(data,i); start=4+offset
+    if start+32>len(raw): return []
+    length=int.from_bytes(raw[start:start+32],'big')
+    if length<0 or length>max_items: return []
+    body=start+32; end=body+32*length
+    if end>len(raw): return []
+    out=[]
+    for j in range(length):
+        w=raw[body+32*j:body+32*(j+1)]
+        if w[:12] != b'\0'*12: return []
+        addr=norm_addr('0x'+w[12:].hex())
+        if addr is None: return []
+        out.append(addr)
+    return out
+
 def stargate_receive_payload(data: str) -> tuple[str | None, int]:
     """Decode STG lzReceive payload abi.encode(bytes to,uint256 qty)."""
     payload=abi_dynamic_bytes(data,3)
@@ -339,7 +357,41 @@ class Cw721DropMintSequence:
         self.owners = {str(k).lower(): v for k, v in (self.data.get("owners") or {}).items()}
 
     def owner_for_instance(self, instance_id: str) -> str | None:
-        return norm_addr(instance_id.split(":", 1)[1] if ":" in instance_id else None)
+        owner = norm_addr(instance_id.split(":", 1)[1] if ":" in instance_id else None)
+        # The frozen mint-sequence file intentionally covers only reviewed sequential drop owners.
+        # Do not compare other cw721-drop instances against this narrower validation domain.
+        return owner if owner in self.owners else None
+
+    def mint_effect(self, action: dict, tx: dict, *, require_recipient: bool = False) -> dict[str, Any] | None:
+        owner = norm_addr(action.get("storage_context_address"))
+        tx_hash = str(tx.get("tx_hash") or "").lower()
+        row = ((self.owners.get(owner or "") or {}).get("transactions") or {}).get(tx_hash)
+        if row is None:
+            return None
+        quantity = int(row.get("mint_count", 0))
+        token_ids = [int(v) for v in (row.get("token_ids") or [])]
+        raw_recipients = row.get("recipients")
+        if raw_recipients is None:
+            if require_recipient:
+                raise ValueError(
+                    "cw721-drop mint sequence lacks recipient data required by event-backed execution; "
+                    "refresh it with tools/legacy-scripts/run-vegeta-s1-cw721-mint-audit.sh"
+                )
+            recipients=[]
+        else:
+            recipients=[norm_addr(v) for v in raw_recipients]
+            if any(v is None for v in recipients):
+                raise ValueError(f"invalid cw721-drop mint recipient in {tx_hash}")
+            recipients=[str(v) for v in recipients]
+        if quantity != len(token_ids) or (recipients and quantity != len(recipients)):
+            raise ValueError(f"inconsistent cw721-drop mint-event row for {owner} {tx_hash}")
+        unique_recipients=sorted(set(recipients))
+        return {
+            "owner": owner, "tx_hash": tx_hash, "quantity": quantity, "token_ids": token_ids,
+            "recipients": recipients,
+            "recipient": unique_recipients[0] if len(unique_recipients)==1 else None,
+            "distinct_recipients": len(unique_recipients),
+        }
 
     def first_token_id(self, instance_id: str) -> int | None:
         owner = self.owner_for_instance(instance_id)
@@ -363,6 +415,122 @@ class Cw721DropMintSequence:
             "reviewed_owners": len(self.owners),
             **(self.data.get("summary") or {}),
         }
+
+
+class Erc721SelectorMintAudits:
+    """Frozen owner-scoped ERC721 mint effects derived only from public Transfer logs.
+
+    Unlike cw721-drop, these selectors need not allocate token IDs sequentially.  A verified audit
+    therefore supplies the committed event token ID for each source transaction.  The ID is fed
+    through the existing collision-free TokenIdRemapper so later ownerOf/transfer calls referring to
+    the same source token share the same native key. Reverted selector scopes receive a synthetic
+    key only inside the discarded native revert overlay.
+    """
+
+    def __init__(self, paths: list[Path] | None = None):
+        self.audits: dict[tuple[str, str], dict[str, Any]] = {}
+        self.paths: list[str] = []
+        for path in paths or []:
+            self._load(path)
+
+    def _load(self, path: Path) -> None:
+        data = read_json(path)
+        if data.get("dataset") != "vegeta-s1":
+            raise ValueError(f"unexpected ERC721 selector-mint audit dataset in {path}: {data.get('dataset')!r}")
+        owner = norm_addr(data.get("owner"))
+        selector = str(data.get("selector") or "").lower()
+        if not owner or not (selector.startswith("0x") and len(selector) == 10):
+            raise ValueError(f"invalid owner/selector in ERC721 selector-mint audit: {path}")
+        summary = data.get("summary") or {}
+        required_true = (
+            "all_committed_selector_txs_have_mint_events",
+            "exactly_one_mint_event_per_committed_selector_tx",
+            "reverted_selector_txs_have_no_committed_mint_events",
+            "all_checked_mint_recipients_equal_msg_sender",
+            "target_token_ids_fit_u64",
+        )
+        missing = [name for name in required_true if not bool(summary.get(name, False))]
+        if missing:
+            raise ValueError(f"ERC721 selector-mint audit is not execution-safe ({', '.join(missing)}): {path}")
+        if int(summary.get("extra_owner_mint_transactions_not_using_target_selector", -1)) != 0:
+            raise ValueError(f"ERC721 selector-mint audit does not cover every owner mint transaction: {path}")
+        if int(summary.get("selector_transactions", 0)) != int(summary.get("selector_actions", -1)):
+            raise ValueError(f"ERC721 selector-mint audit has multiple selector actions per transaction: {path}")
+
+        txs = data.get("transactions") or {}
+        committed_ids: list[int] = []
+        normalized: dict[str, dict[str, Any]] = {}
+        for raw_hash, row in txs.items():
+            tx_hash = str(raw_hash).lower()
+            committed = int(row.get("committed_selector_actions", 0))
+            reverted = int(row.get("reverted_selector_actions", 0))
+            events = row.get("mint_events") or []
+            senders = [norm_addr(x) for x in (row.get("committed_msg_senders") or [])]
+            senders = [x for x in senders if x]
+            if committed:
+                if committed != 1 or reverted != 0 or len(events) != 1 or len(senders) != 1:
+                    raise ValueError(f"ambiguous committed ERC721 selector-mint effect for {tx_hash}: {path}")
+                event = events[0]
+                recipient = norm_addr(event.get("recipient"))
+                token_id = int(event.get("token_id"))
+                if recipient != senders[0] or not (0 <= token_id <= U64_MAX):
+                    raise ValueError(f"invalid committed ERC721 selector-mint event for {tx_hash}: {path}")
+                committed_ids.append(token_id)
+                normalized[tx_hash] = {"committed": True, "recipient": recipient, "token_id": token_id}
+            else:
+                if reverted < 1 or events:
+                    raise ValueError(f"invalid reverted ERC721 selector-mint effect for {tx_hash}: {path}")
+                normalized[tx_hash] = {"committed": False}
+
+        if len(set(committed_ids)) != len(committed_ids):
+            raise ValueError(
+                f"ERC721 selector-mint audit contains duplicate committed token IDs; burn/remint semantics "
+                f"would require a dedicated native adapter: {path}"
+            )
+        if len(normalized) != int(summary.get("selector_transactions", -1)):
+            raise ValueError(f"ERC721 selector-mint audit transaction table is incomplete: {path}")
+        key = (owner, selector)
+        if key in self.audits:
+            raise ValueError(f"duplicate ERC721 selector-mint audit for {owner} {selector}")
+        self.audits[key] = {"path": str(path), "summary": summary, "transactions": normalized}
+        self.paths.append(str(path))
+
+    def effect(self, action: dict, tx: dict, caller: str) -> dict[str, Any]:
+        owner = norm_addr(action.get("storage_context_address"))
+        selector = str(action.get("selector") or "0x").lower()
+        audit = self.audits.get((owner or "", selector))
+        if audit is None:
+            raise ValueError(f"missing ERC721 selector-mint audit for {owner} {selector}")
+        tx_hash = str(tx.get("tx_hash") or "").lower()
+        effect = audit["transactions"].get(tx_hash)
+        if effect is None:
+            raise ValueError(f"ERC721 selector-mint audit has no transaction {tx_hash} for {owner} {selector}")
+        if effect.get("committed") and norm_addr(caller) != effect.get("recipient"):
+            raise ValueError(f"ERC721 selector-mint recipient/msg.sender mismatch for {tx_hash}")
+        return effect
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "mode": "public-transfer-log-owner-scoped",
+            "audits": [
+                {
+                    "owner": owner,
+                    "selector": selector,
+                    "path": row["path"],
+                    "selector_transactions": int(row["summary"].get("selector_transactions", 0)),
+                    "committed_selector_transactions": int(row["summary"].get("committed_selector_transactions", 0)),
+                    "target_mint_events": int(row["summary"].get("target_mint_events", 0)),
+                }
+                for (owner, selector), row in sorted(self.audits.items())
+            ],
+            "concrete_storage_keys_used": False,
+        }
+
+
+def synthetic_reverted_mint_token_id(tx: dict, action: dict) -> int:
+    """Stable source-public identity for a write that is executed only in a discarded revert scope."""
+    material = f"{tx.get('tx_hash','')}:{action.get('action_id','')}:{action.get('selector','')}".encode()
+    return int.from_bytes(hashlib.sha256(material).digest(), "big")
 
 
 def validate_drop_mint_translation(
@@ -507,7 +675,25 @@ def contract_call(kind: str, family: str, iid: str, sender: str | None, msg: dic
     if funds: out['funds']=funds
     return out
 
-def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: str, token_ids: TokenIdRemapper):
+
+def register_translated_instance(call: dict, family: str, instances: dict[str, str], stats: dict) -> str | None:
+    """Register real contract calls while leaving reviewed stateless noops instance-free."""
+    if call.get('kind') == 'noop':
+        stats['reviewed_noop_calls'] = int(stats.get('reviewed_noop_calls', 0)) + 1
+        return None
+    iid = call.get('instance_id')
+    if not iid:
+        raise ValueError(
+            f"translated {family} {call.get('kind')!r} call is missing required instance_id "
+            f"(origin_action_id={call.get('origin_action_id')})"
+        )
+    iid = str(iid)
+    instances[iid] = str(family)
+    stats['contract_calls'] = int(stats.get('contract_calls', 0)) + 1
+    return iid
+
+
+def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: str, token_ids: TokenIdRemapper, selector_mints: Erc721SelectorMintAudits | None = None, drop_mint_sequence: Cw721DropMintSequence | None = None):
     args=a.get('arguments') or {}; data=str(a.get('ethereum_input') or '0x'); e=canon_ep(ep); ec=e.replace('_',''); iid=instance_id(family,a)
     if str(ep).startswith('reviewed::'):
         return {'kind':'noop','origin_action_id':a.get('action_id'),'reviewed_stateless_entrypoint':ep}
@@ -576,6 +762,40 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         if 'asset1' in ec or 'token1' in ec: return contract_call('query',family,iid,None,{'token1':{}},a)
         return None
     if family=='cw721-mintable':
+        if 'mintverifiedevent' in ec:
+            if selector_mints is None:
+                raise ValueError(
+                    f"{family} {a.get('selector')} requires a frozen public ERC721 selector-mint audit"
+                )
+            effect=selector_mints.effect(a,tx,caller)
+            # The follow-up public effect audit establishes that ABI word 2 is the source token ID:
+            # it equals the Transfer(from=0) token ID for every committed S1 call. Keep the frozen
+            # event audit as the independent committed-state check, then use the public calldata ID
+            # for both committed and reverted scopes so reverted execution touches the correct key.
+            raw=bytes.fromhex(data[2:] if data.startswith('0x') else data)
+            if len(raw) < 4 + 3*32:
+                raise ValueError(f"{family} {a.get('selector')} calldata is too short for audited token-id word")
+            calldata_tid=abi_uint(data,2)
+            if calldata_tid<0 or calldata_tid>U64_MAX:
+                raise ValueError(f"{family} {a.get('selector')} audited calldata token ID is outside u64")
+            if effect.get('committed'):
+                event_tid=int(effect['token_id'])
+                if calldata_tid != event_tid:
+                    raise ValueError(
+                        f"ERC721 selector-mint calldata/event token-id mismatch for {tx.get('tx_hash')}: "
+                        f"calldata={calldata_tid} event={event_tid}"
+                    )
+                raw_tid=event_tid; recipient=str(effect['recipient']); reverted_calldata=False
+            else:
+                raw_tid=calldata_tid; recipient=caller; reverted_calldata=True
+            tid=token_ids.map(iid,raw_tid)
+            call=contract_call('execute',family,iid,'native-s3-admin',{'mint':{'owner':recipient,'token_id':tid,'token_uri':None}},a)
+            call['source_evm_msg_sender']=caller
+            call['source_mint_recipient']=recipient
+            call['source_token_id']=raw_tid
+            call['selector_mint_effect_audit']=True
+            if reverted_calldata: call['reverted_token_id_from_public_calldata']=True
+            return call
         if 'transfernft' in ec or 'sendorsafetransfernft' in ec:
             source_owner,recipient,raw_tid=erc721_transfer_parts(data,args); tid=token_ids.map(iid,raw_tid)
             call=contract_call('execute',family,iid,caller,{'transfer_nft':{'recipient':recipient,'token_id':tid}},a)
@@ -619,18 +839,65 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
             return contract_call('query',family,iid,None,{'balance':{'owner':args.get('owner') or abi_addr(data,0)}},a)
         if 'totalsupply' in ec:
             return contract_call('query',family,iid,None,{'total_supply':{}},a)
-        if 'mint' in ec or 'purchase' in ec:
-            if 'mintbatchdrop' in ec:
+        if 'mint' in ec or 'purchase' in ec or 'airdrop' in ec or 'reservedrop' in ec:
+            event_effect = drop_mint_sequence.mint_effect(a, tx) if drop_mint_sequence is not None else None
+            recipient=norm_addr(args.get('recipient')) or caller
+            requested_q=None
+            if 'airdroppublicdrop' in ec:
+                quantities=abi_dynamic_uint_array(data,0); recipients=abi_dynamic_address_array(data,1)
+                if len(quantities)!=1 or len(recipients)!=1:
+                    raise ValueError(f"S1 airdropPublic requires one observed recipient/quantity pair, got {len(recipients)}/{len(quantities)}")
+                q=int(quantities[0]); recipient=recipients[0]
+            elif 'airdropphasedrop' in ec:
+                quantities=abi_dynamic_uint_array(data,1); recipients=abi_dynamic_address_array(data,2)
+                if len(quantities)!=1 or len(recipients)!=1:
+                    raise ValueError(f"S1 airdropForPhase requires one observed recipient/quantity pair, got {len(recipients)}/{len(quantities)}")
+                q=int(quantities[0]); recipient=recipients[0]
+            elif 'airdroparraydrop' in ec:
+                recipients=abi_dynamic_address_array(data,0); per_recipient=abi_uint(data,1)
+                if len(recipients)!=1:
+                    raise ValueError(f"S1 airdrop(address[],uint256) requires one observed recipient, got {len(recipients)}")
+                q=int(per_recipient); recipient=recipients[0]
+            elif 'reservedrop' in ec or ec.endswith('::airdropdrop'):
+                recipient=norm_addr(args.get('recipient')) or abi_addr(data,0); q=intv(args.get('quantity',abi_uint(data,1)))
+            elif 'minteventbackeddrop' in ec or 'constructorminteventbackeddrop' in ec:
+                if drop_mint_sequence is None:
+                    raise ValueError(f"{ep} requires the frozen cw721-drop public mint-event sequence")
+                event_effect=drop_mint_sequence.mint_effect(a,tx,require_recipient=True)
+                if event_effect is None:
+                    raise ValueError(f"{ep} has no committed public mint event for {tx.get('tx_hash')}")
+                if int(event_effect.get('distinct_recipients',0)) != 1:
+                    raise ValueError(f"{ep} cannot represent multiple mint recipients in one native call")
+                q=int(event_effect['quantity']); recipient=str(event_effect['recipient'])
+            elif 'mintbatchdrop' in ec:
                 # Bueno721Drop mintBatch(uint64[] quantities,bytes32[][] proofs,uint256[] phaseIndices,uint64 publicQuantity).
                 # Only public calldata is used: total minted quantity is the phase quantities plus public quantity.
                 phase_quantities=abi_dynamic_uint_array(data,0)
                 q=sum(phase_quantities)+abi_uint(data,3)
             else:
                 q=intv(args.get('quantity',abi_uint(data,0)))
-            if 'mintdropone' in ec: q=1
+            if 'mintdropone' in ec or 'allowlistmintdropone' in ec: q=1
+            if 'signedmintdrop' in ec:
+                requested_q=int(q)
+                # This signed ABI exposes the requested numberOfTokens, but 18 committed S1 calls
+                # mint fewer tokens than requested. Use the independently frozen committed Transfer
+                # cardinality for native state, while retaining the requested quantity as provenance.
+                if event_effect is not None:
+                    q=int(event_effect['quantity'])
             if q <= 0 or q > 10_000:
                 return None
-            recipient=norm_addr(args.get('recipient')) or caller
+            if event_effect is not None:
+                event_recipient=event_effect.get('recipient')
+                if event_recipient is not None and norm_addr(recipient) != norm_addr(event_recipient):
+                    raise ValueError(
+                        f"cw721-drop calldata/event recipient mismatch for {tx.get('tx_hash')}: "
+                        f"calldata={recipient} event={event_recipient}"
+                    )
+                if ('airdrop' in ec or 'reservedrop' in ec) and int(event_effect['quantity']) != int(q):
+                    raise ValueError(
+                        f"cw721-drop calldata/event quantity mismatch for {tx.get('tx_hash')}: "
+                        f"calldata={q} event={event_effect['quantity']}"
+                    )
             fingerprint=calldata_fingerprint(data)
             # Preserve reviewed state-key semantics where the source ABI exposes them. Seizon's
             # multiStageMint stage is ABI word 2; signed mint nonce is decoded as argument `nonce`.
@@ -650,7 +917,17 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
                 nonce_key=f"nonce:{intv(args.get('nonce',abi_uint(data,1)))}"
             elif 'whitelist' in ec:
                 nonce_key=fingerprint[40:64]
-            return contract_call('execute',family,iid,caller,{'mint_drop':{'recipient':recipient,'quantity':q,'stage_key':stage_key,'nonce_key':nonce_key}},a)
+            call=contract_call('execute',family,iid,caller,{'mint_drop':{'recipient':recipient,'quantity':q,'stage_key':stage_key,'nonce_key':nonce_key}},a)
+            if requested_q is not None:
+                call['source_requested_mint_quantity']=requested_q
+                call['source_committed_mint_quantity']=int(q)
+            if 'allowlistmintdropone' in ec:
+                call['source_allowlist_traits']={
+                    'trunk_id': intv(args.get('trunk_id',abi_uint(data,0))),
+                    'critter_id': intv(args.get('critter_id',abi_uint(data,1))),
+                }
+                call['source_allowlist_proof_words']=abi_uint(data,3) if abi_uint(data,2)==96 else None
+            return call
     if family=='xen-like':
         if 'claimrank' in ec:
             term=intv(args.get('term',abi_uint(data,0))); return contract_call('execute',family,iid,caller,{'claim_rank':{'term_days':max(0,min(term,1))}},a)
@@ -709,11 +986,24 @@ def instantiate_msg(fam: str, participants: set[str], iid: str | None = None, dr
     return {}
 
 def build(argv=None):
-    ap=argparse.ArgumentParser(); ap.add_argument('--plan',type=Path,default=DEFAULT_PLAN); ap.add_argument('--selector-map',type=Path,default=DEFAULT_SELECTOR); ap.add_argument('--code-cache',type=Path,default=DEFAULT_CODE_CACHE); ap.add_argument('--implementation-manifest',type=Path,default=DEFAULT_IMPL); ap.add_argument('--output-dir',type=Path,default=DEFAULT_OUT); ap.add_argument('--initial-state-mode',choices=('rpc','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_INITIAL_STATE_MODE','rpc')); ap.add_argument('--caller-mode',choices=('exact','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_CALLER_MODE','exact')); ap.add_argument('--rpc-url',default=os.environ.get('ETH_RPC_URL')); ap.add_argument('--initial-state-cache',type=Path,default=None); ap.add_argument('--cw721-drop-mint-sequence',type=Path,default=None); ap.add_argument('--dataset-label',default='vegeta-s3-native'); ns=ap.parse_args(argv)
+    ap=argparse.ArgumentParser(); ap.add_argument('--plan',type=Path,default=DEFAULT_PLAN); ap.add_argument('--selector-map',type=Path,default=DEFAULT_SELECTOR); ap.add_argument('--code-cache',type=Path,default=DEFAULT_CODE_CACHE); ap.add_argument('--implementation-manifest',type=Path,default=DEFAULT_IMPL); ap.add_argument('--output-dir',type=Path,default=DEFAULT_OUT); ap.add_argument('--initial-state-mode',choices=('rpc','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_INITIAL_STATE_MODE','rpc')); ap.add_argument('--caller-mode',choices=('exact','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_CALLER_MODE','exact')); ap.add_argument('--rpc-url',default=os.environ.get('ETH_RPC_URL')); ap.add_argument('--initial-state-cache',type=Path,default=None); ap.add_argument('--cw721-drop-mint-sequence',type=Path,default=None); ap.add_argument('--erc721-selector-mint-audit',type=Path,action='append',default=[]); ap.add_argument('--readiness-report',type=Path,default=None); ap.add_argument('--dataset-label',default='vegeta-s3-native'); ns=ap.parse_args(argv)
     selector=read_json(ns.selector_map); cache={str(k).lower():v for k,v in read_json(ns.code_cache).items() if isinstance(v,dict)}; idx,fam_by_addr=rule_index(selector,cache); impl=read_json(ns.implementation_manifest)
+    readiness_meta=None
+    if ns.readiness_report is not None:
+        readiness=read_json(ns.readiness_report)
+        if readiness.get('dataset')!='vegeta-s1': raise ValueError(f"unexpected readiness dataset in {ns.readiness_report}: {readiness.get('dataset')!r}")
+        if not readiness.get('selected_profile_ready'):
+            raise ValueError(f"selected S1 readiness profile is not ready: {readiness.get('selected_profile')!r}")
+        readiness_meta={
+            'report':str(ns.readiness_report),
+            'selected_profile':readiness.get('selected_profile'),
+            'selected_profile_ready':bool(readiness.get('selected_profile_ready')),
+            'profiles':{name:{'ready':bool((row or {}).get('ready'))} for name,row in (readiness.get('profiles') or {}).items()},
+        }
     wasm={r['native_code_family']:r['wasm_artifact'] for r in impl['families']}
     token_ids=TokenIdRemapper()
     drop_mint_sequence=Cw721DropMintSequence(ns.cw721_drop_mint_sequence)
+    selector_mints=Erc721SelectorMintAudits(ns.erc721_selector_mint_audit)
     drop_translated_mints: dict[tuple[str,str], int] = defaultdict(int)
     workload_logical_addresses=set()
     instances={}; participant=defaultdict(set); allowances=set(); nft_tokens=defaultdict(dict); nft_owner_priority={}; nft_ops=set(); nft_operator_pairs=set(); nft_approve_senders=set(); nft_source_tokens=defaultdict(dict); multi_seed=set(); multi_approvals=set(); xen_first={}; bank_senders=set(); stats=defaultdict(int)
@@ -747,9 +1037,12 @@ def build(argv=None):
                         n=max(amount(a.get('ethereum_value')),1); to=norm_addr(a.get('ethereum_code_address')); calls.append(attach_revert_scope({'kind':'bank_send','from':caller,'to':to,'coins':[{'denom':'unative','amount':str(n)}],'origin_action_id':a.get('action_id')},a,by_id)); bank_senders.add(caller)
                     else: calls.append(attach_revert_scope({'kind':'noop','origin_action_id':a.get('action_id')},a,by_id))
                     stats['system']+=1; continue
-                c=translate(str(fam),str(ep),sig,tx,a,caller,token_ids)
+                c=translate(str(fam),str(ep),sig,tx,a,caller,token_ids,selector_mints,drop_mint_sequence)
                 if c is None: skipped+=1; continue
-                attach_revert_scope(c,a,by_id); calls.append(c); iid=c['instance_id']; instances[iid]=str(fam); stats['contract_calls']+=1
+                attach_revert_scope(c,a,by_id); calls.append(c)
+                iid=register_translated_instance(c,str(fam),instances,stats)
+                if iid is None:
+                    continue
                 if (
                     str(fam)=='cw721-drop' and c['kind']=='execute' and 'mint_drop' in c.get('msg',{})
                     and counts_for_drop_mint_event_validation(tx,c)
@@ -765,6 +1058,8 @@ def build(argv=None):
                     if 'approve' in m: participant[iid].add(c.get('sender',caller))
                     if fam=='wrapped-native-token' and ('deposit' in m or 'withdraw' in m): participant[iid].add(c.get('sender',caller)); bank_senders.add(c.get('sender',caller))
                     if fam in {'cw721-mintable','cw721-drop'}:
+                        if 'mint' in m:
+                            participant[iid].add(m['mint']['owner'])
                         if 'transfer_nft' in m:
                             z=m['transfer_nft']; tid=int(z['token_id']); raw_tid=intv(c.get('source_token_id')); nft_source_tokens[iid][tid]=raw_tid; source_owner=norm_addr(c.get('source_owner')) or c.get('sender',caller)
                             note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,source_owner,3)
@@ -859,7 +1154,7 @@ def build(argv=None):
             if _first: first_timestamp=int(_first.get('timestamp',0) or 0)
     except (OSError, StopIteration, json.JSONDecodeError):
         first_timestamp=0
-    man={'schema_version':2,'dataset':ns.dataset_label,'source_plan':str(ns.plan),'selector_map':str(ns.selector_map),'wasm_artifacts':wasm,'instances':manifest_instances,'bank_seeds':[{'address':a,'denom':'unative','amount':str(SEED*4)} for a in sorted(bank_senders) if a],'priming_calls':prime,'logical_addresses':sorted(workload_logical_addresses),'blocks':block_count,'transactions':int(stats['transactions']),'first_timestamp':first_timestamp,'normalization':{'amount_policy':'positive EVM transfer amounts mapped to 1+(amount mod 1,000,000); zero remains zero','approval_policy':'zero approval remains zero; every positive ERC20-style approval maps to SEED so normalization cannot invert allowance>=spend for canonically successful transferFrom calls','nft_authorization_policy':'RPC mode reconstructs predecessor-block ERC721 ownerOf/getApproved/isApprovedForAll via high-level eth_call and primes only that logical state; heuristic mode remains an explicit non-publication fallback','caller_provenance':{'mode':ns.caller_mode,'source':'derived-geth-callTracer-effective-msg.sender' if ns.caller_mode=='exact' else 'legacy-frame-from-or-parent-context-fallback','delegatecall_rule':'inherit parent execution-scope msg.sender (EIP-7)' if ns.caller_mode=='exact' else None,'explicit_actions':stats.get('explicit_msg_senders',0),'missing_actions':stats.get('missing_msg_senders',0)},'initial_state':initial_state_meta,'cw721_drop_mint_sequence':drop_mint_sequence.summary(),'cw721_drop_mint_translation_validation':drop_mint_validation,'token_ids':token_ids.summary(),'seed_balance':str(SEED),'pair_reserve':str(PAIR_RESERVE),'marketplace_order_key_policy':'sha256 of public calldata only; never source trace storage keys','purpose':'preserve storage/control-path key topology while avoiding uint256/u128, allowance-ordering, historical-state availability, caught-internal-revert artifacts, and trace-key leakage'},'statistics':dict(stats)}
+    man={'schema_version':2,'dataset':ns.dataset_label,'source_plan':str(ns.plan),'selector_map':str(ns.selector_map),'readiness':readiness_meta,'wasm_artifacts':wasm,'instances':manifest_instances,'bank_seeds':[{'address':a,'denom':'unative','amount':str(SEED*4)} for a in sorted(bank_senders) if a],'priming_calls':prime,'logical_addresses':sorted(workload_logical_addresses),'blocks':block_count,'transactions':int(stats['transactions']),'first_timestamp':first_timestamp,'normalization':{'amount_policy':'positive EVM transfer amounts mapped to 1+(amount mod 1,000,000); zero remains zero','approval_policy':'zero approval remains zero; every positive ERC20-style approval maps to SEED so normalization cannot invert allowance>=spend for canonically successful transferFrom calls','nft_authorization_policy':'RPC mode reconstructs predecessor-block ERC721 ownerOf/getApproved/isApprovedForAll via high-level eth_call and primes only that logical state; heuristic mode remains an explicit non-publication fallback','caller_provenance':{'mode':ns.caller_mode,'source':'derived-geth-callTracer-effective-msg.sender' if ns.caller_mode=='exact' else 'legacy-frame-from-or-parent-context-fallback','delegatecall_rule':'inherit parent execution-scope msg.sender (EIP-7)' if ns.caller_mode=='exact' else None,'explicit_actions':stats.get('explicit_msg_senders',0),'missing_actions':stats.get('missing_msg_senders',0)},'initial_state':initial_state_meta,'cw721_drop_mint_sequence':drop_mint_sequence.summary(),'cw721_drop_mint_translation_validation':drop_mint_validation,'erc721_selector_mint_audits':selector_mints.summary(),'token_ids':token_ids.summary(),'seed_balance':str(SEED),'pair_reserve':str(PAIR_RESERVE),'marketplace_order_key_policy':'sha256 of public calldata only; never source trace storage keys','purpose':'preserve storage/control-path key topology while avoiding uint256/u128, allowance-ordering, historical-state availability, caught-internal-revert artifacts, and trace-key leakage'},'statistics':dict(stats)}
     (out/'execution-manifest.json').write_text(json.dumps(man,indent=2,sort_keys=True)+'\n')
     print(f"wrote {out/'execution-plan.jsonl'}")
     print(f"dataset={ns.dataset_label} blocks={block_count} instances={len(manifest_instances)} priming_calls={len(prime)} tx={stats['transactions']} contract_calls={stats['contract_calls']} skipped_actions={stats['skipped_actions']}")

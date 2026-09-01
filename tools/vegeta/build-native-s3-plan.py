@@ -223,16 +223,83 @@ S1_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
 
 
 # S1 owner-scoped reviewed selectors. These intentionally do not live in the family-wide table:
-# a 4-byte selector can collide across unrelated contracts. Blitkin is an EIP-1967 proxy whose
-# historical implementation is stable across S1; 0x29a0eee8 is independently decoded as
-# mint(uint8,uint8). The executable adapter treats it as a one-token mint, and the separate ERC-721
-# Transfer-log audit fail-closes if successful translated mint counts diverge from Ethereum.
+# a 4-byte selector can collide across unrelated contracts.
+#
+# Blitkin is an EIP-1967 proxy whose historical implementation is stable across S1. 0x29a0eee8 is
+# independently decoded as mint(uint8,uint8). The second reviewed path, 0xc96602d9, resolves to
+# allowlistMint(uint8,uint8,bytes32[]): the S1 effect audit observes a 96-byte ABI head, an 11/12-item
+# bytes32 proof, a fixed 0.05 ETH payment, and exactly one committed ERC-721 mint to msg.sender per
+# successful source transaction. Both adapters mint one token; the independent all-owner ERC-721
+# Transfer-log sequence audit still fail-closes if translated committed mint counts diverge.
+#
+# MIA 0xfd883998 remains ABI-name agnostic on purpose. The owner-scoped public-log audit establishes
+# the state effect needed by this benchmark: 1323/1325 calls commit, every committed call emits
+# exactly one ERC-721 Transfer(from=0), every mint recipient is the EVM-visible msg.sender, the two
+# reverted calls emit no committed mint, and there are no other owner mint transactions in S1. The
+# execution adapter consumes the frozen audit JSON for the exact public event token ID instead of
+# guessing a calldata layout.
 S1_OWNER_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
     "0xbd18e233e12f2a066f5b5a351285ab5a39b1f2ac": {
         "0x29a0eee8": (
             "execute::mint_drop_one",
             [("trunk_id", "uint8"), ("critter_id", "uint8")],
         ),
+        # allowlistMint(uint8,uint8,bytes32[]). Only the two static trait words are decoded here;
+        # the dynamic Merkle proof is validation input, not a native storage key.
+        "0xc96602d9": (
+            "execute::allowlist_mint_drop_one",
+            [("trunk_id", "uint8"), ("critter_id", "uint8")],
+        ),
+    },
+    "0x885523263378d6f27a5b8c533ad3b05ab9e105b5": {
+        "0xfd883998": ("execute::mint_verified_event", []),
+    },
+    # Owner-scoped ERC-721 mint/airdrop paths recovered by the strict public Transfer-log
+    # reconciliation. Keep these out of the family-wide selector table: the same 4-byte selector
+    # may have unrelated semantics on another drop implementation. Dynamic-array paths are decoded
+    # again by the executable adapter and fail closed if the observed S1 shape is not representable.
+    "0x798116c6858dc4be729820d36554c4c427629744": {
+        # Bueno721Drop: airdropPublic(uint64[] quantities,address[] recipients).
+        "0xba09f3d7": ("execute::airdrop_public_drop", []),
+    },
+    "0x925fe29ff5db1614e1344c803543ccbf60fd1641": {
+        "0xcc47a40b": ("execute::reserve_drop", [("recipient", "address"), ("quantity", "uint256")]),
+    },
+    "0xf66ef61f504a6d326d7bf1771f4b613af57c7126": {
+        "0xcc47a40b": ("execute::reserve_drop", [("recipient", "address"), ("quantity", "uint256")]),
+    },
+    "0x0e6d176b5c50e2600da92c8ea7f4eed178e9bd07": {
+        "0x8ba4cc3c": ("execute::airdrop_drop", [("recipient", "address"), ("quantity", "uint256")]),
+    },
+    "0x1b1d2dccc2d3f25d7791e9dc4751856ec5eeafaa": {
+        # airdrop(address[] recipients,uint256 numberOfTokens). S1 has one recipient in this path.
+        "0xc204642c": ("execute::airdrop_array_drop", []),
+    },
+    "0x7974e0b19d8ee4daf3fdfecb2420507c198d3dbe": {
+        # Bueno721Drop: airdropForPhase(uint256,uint64[],address[]).
+        "0x93a69f89": ("execute::airdrop_phase_drop", []),
+    },
+    # One Bitcoin Bandits mint path remains ABI-name agnostic. Its only S1 invocation is promoted
+    # from the frozen public mint-event effect, not from a guessed function signature.
+    "0xeae506c1bcd0f77f0802ca630f65bca442ba0bd9": {
+        "0x2f6f98e1": ("execute::mint_event_backed_drop", []),
+    },
+    # These two in-window CREATE frames each commit an ERC-721 constructor mint. Native instances
+    # are pre-instantiated for replay, so model the constructor's mint as one event-backed execute.
+    "0x50f210587307f0d0f5a963b77f6d25885567e336": {
+        "0x": ("execute::constructor_mint_event_backed_drop", []),
+    },
+    "0xe3d28e90f110db9ccc056240aab5330a609b7c2e": {
+        "0x": ("execute::constructor_mint_event_backed_drop", []),
+    },
+    # Blur Exchange V1 proxy. The verified Blur V1 ABI binds 0xf4acd740 to
+    # cancelOrder((address,uint8,address,address,uint256,uint256,address,uint256,uint256,uint256,
+    # (uint16,address)[],uint256,bytes)). Keep this owner-scoped because the tuple is Blur-specific
+    # and a 4-byte selector must not promote an unrelated marketplace contract. The executable
+    # marketplace adapter fingerprints the full order calldata, giving each cancelled order a
+    # deterministic native order-state key without importing EVM storage slots.
+    "0x000000000000ad05ccc4f10045630fb830b95127": {
+        "0xf4acd740": ("execute::cancel_order", []),
     },
 }
 

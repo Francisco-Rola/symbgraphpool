@@ -314,11 +314,77 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
             self.assertEqual((state_row["successful_reviewed_state_transactions"], state_row["transactions"]), (1, 2))
             self.assertEqual((conflict_row["successful_reviewed_state_transactions"], conflict_row["transactions"]), (1, 2))
             self.assertEqual(report["additional_successful_reviewed_state_transactions_needed_for_current_gate"], 2)
+            contention = report["contention_scheduler_diagnostic"]
+            self.assertEqual(contention["target_successful_reviewed_state_transactions"], 2)
+            self.assertEqual(contention["additional_successful_reviewed_state_transactions_needed"], 1)
+            self.assertFalse(contention["target_met"])
+            self.assertFalse(contention["publication_gate_changed"])
+            self.assertIn("contention-oriented 80% target", txt.read_text())
+            self.assertIn("FAIL", txt.read_text())
             candidate = report["mapped_owner_opaque_candidates"][0]
             self.assertEqual(candidate["selector"], "0x29a0eee8")
             self.assertEqual(candidate["deficit_transactions"], 1)
             self.assertEqual(candidate["conflict_participant_deficit_transactions"], 1)
             self.assertEqual(candidate["source_state_access_deficit_transactions"], 1)
+
+    def test_s1_readiness_profiles_keep_scheduler_and_replay_claims_separate(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            translation = td / "translation.json"
+            semantic = td / "semantic.json"
+            deficit = td / "deficit.json"
+            out = td / "ready.json"
+            txt = td / "ready.txt"
+            translation.write_text(json.dumps({
+                "calls": {"reviewed_state_touch_frame_coverage": 0.41},
+                "implementation_readiness": {"native_execution_ready": True},
+            }))
+            semantic.write_text(json.dumps({
+                "coverage": 0.954,
+                "block_balanced": {"median_coverage": 0.854},
+            }))
+            deficit.write_text(json.dumps({
+                "denominators": {
+                    "all_source_transactions": {
+                        "transactions": 1000,
+                        "successful_reviewed_state_transactions": 721,
+                        "successful_reviewed_state_coverage": 0.721,
+                    },
+                    "source_conflict_participating_transactions": {
+                        "transactions": 200,
+                        "successful_reviewed_state_transactions": 161,
+                        "successful_reviewed_state_coverage": 0.805,
+                    },
+                }
+            }))
+            self.run_py(
+                "tools/vegeta/evaluate-vegeta-s1-readiness.py",
+                "--translation-coverage", translation,
+                "--semantic-conflict-coverage", semantic,
+                "--transaction-deficit", deficit,
+                "--profile", "scheduler-fidelity",
+                "--output", out,
+                "--text-output", txt,
+            )
+            report = json.loads(out.read_text())
+            self.assertTrue(report["profiles"]["scheduler-fidelity"]["ready"])
+            self.assertFalse(report["profiles"]["semantic-replay"]["ready"])
+            self.assertTrue(report["selected_profile_ready"])
+            self.assertTrue(report["common_gates"]["reviewed_state_touch_frame_coverage"]["diagnostic"])
+            readiness_text = txt.read_text()
+            self.assertIn("scheduler-fidelity", readiness_text)
+            self.assertIn("semantic-replay", readiness_text)
+            self.assertIn("DIAGNOSTIC (not gated)", readiness_text)
+
+            proc = subprocess.run([
+                sys.executable, str(ROOT / "tools/vegeta/evaluate-vegeta-s1-readiness.py"),
+                "--translation-coverage", str(translation),
+                "--semantic-conflict-coverage", str(semantic),
+                "--transaction-deficit", str(deficit),
+                "--profile", "semantic-replay",
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("below threshold", proc.stderr)
 
     def test_blitkin_mint_selector_is_owner_scoped_not_family_wide(self):
         planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
@@ -352,6 +418,68 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         self.assertNotIn("0x29a0eee8", planner.S1_ENTRYPOINT_EXTENSIONS["cw721-drop"])
         self.assertIn("0x29a0eee8", planner.S1_OWNER_ENTRYPOINT_EXTENSIONS[blitkin])
 
+        # c96602d9 == allowlistMint(uint8,uint8,bytes32[]) for the reviewed Blitkin owner.
+        proof = word(2) + ("ab" * 32) + ("cd" * 32)
+        allowlist = "0xc96602d9" + word(72) + word(13) + word(96) + proof
+        allowlist_frame = {**frame, "input": allowlist, "value": hex(50_000_000_000_000_000)}
+        allowlist_mapped = planner.translate_call_tree(allowlist_frame, resolver)[0]
+        self.assertEqual(allowlist_mapped["dispatch"], "mapped-entrypoint")
+        self.assertEqual(allowlist_mapped["native_entrypoint"], "execute::allowlist_mint_drop_one")
+        self.assertEqual(allowlist_mapped["arguments"], {"trunk_id": 72, "critter_id": 13})
+        allowlist_opaque = planner.translate_call_tree({**allowlist_frame, "to": other}, resolver)[0]
+        self.assertEqual(allowlist_opaque["dispatch"], "mapped-opaque-selector")
+        self.assertNotIn("0xc96602d9", planner.S1_ENTRYPOINT_EXTENSIONS["cw721-drop"])
+        self.assertIn("0xc96602d9", planner.S1_OWNER_ENTRYPOINT_EXTENSIONS[blitkin])
+
+        mia = "0x885523263378d6f27a5b8c533ad3b05ab9e105b5"
+        mia_profile = "profile-mia"
+        mia_frozen = {
+            "dataset": "vegeta-s1",
+            "profile_mappings": [{
+                "ethereum_profile_family": mia_profile,
+                "native_code_family": "cw721-mintable",
+                "storage_owner_scope": [mia, other],
+            }],
+        }
+        mia_resolver = planner.FamilyResolver(mia_frozen, {mia: {"code": "0x6000"}, other: {"code": "0x6000"}}, {"resolution_records": []})
+        mia_frame = {"type": "CALL", "from": "0x" + "12" * 20, "to": mia, "input": "0xfd883998", "value": "0x0"}
+        mia_mapped = planner.translate_call_tree(mia_frame, mia_resolver)[0]
+        self.assertEqual(mia_mapped["dispatch"], "mapped-entrypoint")
+        self.assertEqual(mia_mapped["native_entrypoint"], "execute::mint_verified_event")
+        self.assertEqual(mia_mapped["semantic_effect"], "READ_WRITE")
+        mia_opaque = planner.translate_call_tree({**mia_frame, "to": other}, mia_resolver)[0]
+        self.assertEqual(mia_opaque["dispatch"], "mapped-opaque-selector")
+        self.assertNotIn("0xfd883998", planner.ENTRYPOINTS["cw721-mintable"])
+        self.assertIn("0xfd883998", planner.S1_OWNER_ENTRYPOINT_EXTENSIONS[mia])
+
+        # Blur Exchange V1 cancelOrder(Order) is source/ABI verified as selector 0xf4acd740.
+        blur = "0x000000000000ad05ccc4f10045630fb830b95127"
+        blur_other = "0x" + "ef" * 20
+        blur_frozen = {
+            "dataset": "vegeta-s1",
+            "profile_mappings": [{
+                "ethereum_profile_family": "profile-marketplace",
+                "native_code_family": "marketplace-router",
+                "storage_owner_scope": [blur, blur_other],
+            }],
+        }
+        blur_resolver = planner.FamilyResolver(
+            blur_frozen, {blur: {"code": "0x6000"}, blur_other: {"code": "0x6000"}},
+            {"resolution_records": []},
+        )
+        blur_frame = {
+            "type": "CALL", "from": "0x" + "13" * 20, "to": blur,
+            "input": "0xf4acd740" + word(1) + word(2), "value": "0x0",
+        }
+        blur_mapped = planner.translate_call_tree(blur_frame, blur_resolver)[0]
+        self.assertEqual(blur_mapped["dispatch"], "mapped-entrypoint")
+        self.assertEqual(blur_mapped["native_entrypoint"], "execute::cancel_order")
+        self.assertEqual(blur_mapped["semantic_effect"], "READ_WRITE")
+        blur_opaque = planner.translate_call_tree({**blur_frame, "to": blur_other}, blur_resolver)[0]
+        self.assertEqual(blur_opaque["dispatch"], "mapped-opaque-selector")
+        self.assertNotIn("0xf4acd740", planner.S1_ENTRYPOINT_EXTENSIONS["marketplace-router"])
+        self.assertIn("0xf4acd740", planner.S1_OWNER_ENTRYPOINT_EXTENSIONS[blur])
+
     def test_reviewed_s1_selector_extensions_and_execution_adapters(self):
         planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
         sys.path.insert(0, str(ROOT / "tools/vegeta"))
@@ -371,6 +499,12 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("vegeta_prepare_native_extensions", path)
         mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
         def w(n): return int(n).to_bytes(32,"big")
+        blur_input="0xf4acd740"+(w(1)+w(2)+w(3)).hex()
+        blur_action={"ethereum_input":blur_input,"arguments":{},"native_instance_id":"marketplace-router:0x"+"77"*20,"action_id":24}
+        blur_call=mod.translate("marketplace-router","execute::cancel_order",None,{},blur_action,"0x"+"88"*20,mod.TokenIdRemapper())
+        self.assertEqual(blur_call["kind"],"execute")
+        self.assertIn("cancel_order",blur_call["msg"])
+        self.assertTrue(blur_call["msg"]["cancel_order"]["order_id"])
         owner="0x"+"11"*20; spender="0x"+"22"*20
         data="0xd505accf" + (bytes.fromhex("00"*12+"11"*20)+bytes.fromhex("00"*12+"22"*20)+w(77)+w(999)+w(27)+w(1)+w(2)).hex()
         a={"ethereum_input":data,"arguments":{"owner":owner,"spender":spender,"amount":77},"native_instance_id":"fiat-token-cw20:0x"+"33"*20,"action_id":1}
@@ -382,6 +516,13 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         one="0x29a0eee8"+(w(2)+w(7)).hex(); a={"ethereum_input":one,"arguments":{"trunk_id":2,"critter_id":7},"native_instance_id":"cw721-drop:0x"+"55"*20,"action_id":22}
         call=mod.translate("cw721-drop","execute::mint_drop_one",None,{},a,"0x"+"66"*20,mod.TokenIdRemapper())
         self.assertEqual(call["msg"]["mint_drop"]["quantity"],1)
+        # allowlistMint(uint8,uint8,bytes32[]): head is two traits + proof offset; proof has 2 words.
+        allowlist="0xc96602d9"+(w(72)+w(13)+w(96)+w(2)+w(111)+w(222)).hex()
+        a={"ethereum_input":allowlist,"arguments":{"trunk_id":72,"critter_id":13},"native_instance_id":"cw721-drop:0x"+"55"*20,"action_id":23}
+        call=mod.translate("cw721-drop","execute::allowlist_mint_drop_one",None,{},a,"0x"+"66"*20,mod.TokenIdRemapper())
+        self.assertEqual(call["msg"]["mint_drop"]["quantity"],1)
+        self.assertEqual(call["source_allowlist_traits"],{"trunk_id":72,"critter_id":13})
+        self.assertEqual(call["source_allowlist_proof_words"],2)
         # mintBatch(uint64[] quantities,bytes32[][] proofs,uint256[] phaseIndices,uint64 publicQuantity)
         # Head offsets: quantities at 128 bytes; dummy empty proofs/phase arrays follow.
         head=w(128)+w(224)+w(256)+w(4)
@@ -391,6 +532,117 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         a={"ethereum_input":batch,"arguments":{},"native_instance_id":"cw721-drop:0x"+"55"*20,"action_id":3}
         call=mod.translate("cw721-drop","execute::mint_batch_drop",None,{},a,"0x"+"66"*20,mod.TokenIdRemapper())
         self.assertEqual(call["msg"]["mint_drop"]["quantity"],12)
+
+    def test_s1_owner_scoped_airdrop_and_event_backed_drop_adapters(self):
+        planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
+        sys.path.insert(0, str(ROOT / "tools/vegeta"))
+        spec = importlib.util.spec_from_file_location("vegeta_build_native_airdrops", planner_path)
+        planner = importlib.util.module_from_spec(spec); spec.loader.exec_module(planner)
+        expected = {
+            "0x798116c6858dc4be729820d36554c4c427629744": ("0xba09f3d7", "execute::airdrop_public_drop"),
+            "0x925fe29ff5db1614e1344c803543ccbf60fd1641": ("0xcc47a40b", "execute::reserve_drop"),
+            "0xf66ef61f504a6d326d7bf1771f4b613af57c7126": ("0xcc47a40b", "execute::reserve_drop"),
+            "0x0e6d176b5c50e2600da92c8ea7f4eed178e9bd07": ("0x8ba4cc3c", "execute::airdrop_drop"),
+            "0x1b1d2dccc2d3f25d7791e9dc4751856ec5eeafaa": ("0xc204642c", "execute::airdrop_array_drop"),
+            "0x7974e0b19d8ee4daf3fdfecb2420507c198d3dbe": ("0x93a69f89", "execute::airdrop_phase_drop"),
+            "0xeae506c1bcd0f77f0802ca630f65bca442ba0bd9": ("0x2f6f98e1", "execute::mint_event_backed_drop"),
+        }
+        for owner, (selector, entrypoint) in expected.items():
+            self.assertEqual(planner.S1_OWNER_ENTRYPOINT_EXTENSIONS[owner][selector][0], entrypoint)
+            self.assertNotIn(selector, planner.S1_ENTRYPOINT_EXTENSIONS["cw721-drop"])
+
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_native_airdrops", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        def w(n): return int(n).to_bytes(32, "big")
+        def aw(addr): return bytes.fromhex("00" * 12 + addr[2:])
+        recipient = "0x" + "34" * 20
+        iid = "cw721-drop:0x" + "12" * 20
+        caller = "0x" + "56" * 20
+        # airdropPublic(uint64[],address[]): one observed S1 pair.
+        data = "0xba09f3d7" + (w(64) + w(128) + w(1) + w(44) + w(1) + aw(recipient)).hex()
+        call = mod.translate("cw721-drop", "execute::airdrop_public_drop", None, {}, {"ethereum_input": data, "arguments": {}, "native_instance_id": iid}, caller, mod.TokenIdRemapper())
+        self.assertEqual(call["msg"]["mint_drop"]["quantity"], 44); self.assertEqual(call["msg"]["mint_drop"]["recipient"], recipient)
+        # reserve/airdrop(address,uint256).
+        data = "0xcc47a40b" + (aw(recipient) + w(10)).hex()
+        call = mod.translate("cw721-drop", "execute::reserve_drop", None, {}, {"ethereum_input": data, "arguments": {"recipient": recipient, "quantity": 10}, "native_instance_id": iid}, caller, mod.TokenIdRemapper())
+        self.assertEqual(call["msg"]["mint_drop"]["quantity"], 10)
+        # airdrop(address[],uint256), one recipient in observed S1.
+        data = "0xc204642c" + (w(64) + w(10) + w(1) + aw(recipient)).hex()
+        call = mod.translate("cw721-drop", "execute::airdrop_array_drop", None, {}, {"ethereum_input": data, "arguments": {}, "native_instance_id": iid}, caller, mod.TokenIdRemapper())
+        self.assertEqual(call["msg"]["mint_drop"]["quantity"], 10); self.assertEqual(call["msg"]["mint_drop"]["recipient"], recipient)
+        # airdropForPhase(uint256,uint64[],address[]), one recipient/quantity in observed S1.
+        data = "0x93a69f89" + (w(3) + w(96) + w(160) + w(1) + w(1) + w(1) + aw(recipient)).hex()
+        call = mod.translate("cw721-drop", "execute::airdrop_phase_drop", None, {}, {"ethereum_input": data, "arguments": {}, "native_instance_id": iid}, caller, mod.TokenIdRemapper())
+        self.assertEqual(call["msg"]["mint_drop"]["quantity"], 1); self.assertEqual(call["msg"]["mint_drop"]["recipient"], recipient)
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); report = td / "mints.json"
+            owner = "0x1b1d2dccc2d3f25d7791e9dc4751856ec5eeafaa"; tx_hash = "0x" + "aa" * 32
+            report.write_text(json.dumps({
+                "schema_version": 2, "dataset": "vegeta-s1",
+                "summary": {"all_observed_sequences_plus_one": True, "all_token_ids_fit_u64": True},
+                "owners": {owner: {"first_token_id": 1, "transactions": {tx_hash: {
+                    "mint_count": 2, "token_ids": [1, 2], "recipients": [recipient, recipient],
+                }}}},
+            }) + "\n")
+            sequence = mod.Cw721DropMintSequence(report)
+            action = {"storage_context_address": owner, "ethereum_input": "0x2955a21d", "arguments": {"quantity": 5, "nonce": 7, "recipient": recipient}, "native_instance_id": "cw721-drop:" + owner, "action_id": 1}
+            call = mod.translate("cw721-drop", "execute::signed_mint_drop", None, {"tx_hash": tx_hash}, action, caller, mod.TokenIdRemapper(), None, sequence)
+            self.assertEqual(call["msg"]["mint_drop"]["quantity"], 2)
+            self.assertEqual(call["source_requested_mint_quantity"], 5)
+            self.assertEqual(call["source_committed_mint_quantity"], 2)
+
+            event_owner = "0xeae506c1bcd0f77f0802ca630f65bca442ba0bd9"; event_hash = "0x" + "bb" * 32
+            report.write_text(json.dumps({
+                "schema_version": 2, "dataset": "vegeta-s1",
+                "summary": {"all_observed_sequences_plus_one": True, "all_token_ids_fit_u64": True},
+                "owners": {event_owner: {"first_token_id": 41, "transactions": {event_hash: {
+                    "mint_count": 20, "token_ids": list(range(41, 61)), "recipients": [recipient] * 20,
+                }}}},
+            }) + "\n")
+            sequence = mod.Cw721DropMintSequence(report)
+            action = {"storage_context_address": event_owner, "ethereum_input": "0x2f6f98e1" + (w(1)+w(2)).hex(), "arguments": {}, "native_instance_id": "cw721-drop:" + event_owner, "action_id": 2}
+            call = mod.translate("cw721-drop", "execute::mint_event_backed_drop", None, {"tx_hash": event_hash}, action, caller, mod.TokenIdRemapper(), None, sequence)
+            self.assertEqual(call["msg"]["mint_drop"]["quantity"], 20); self.assertEqual(call["msg"]["mint_drop"]["recipient"], recipient)
+
+    def test_cw721_drop_translation_audit_recognizes_airdrop_and_reserve_mint_paths(self):
+        path = ROOT / "tools/vegeta/audit-vegeta-s1-cw721-drop-translation.py"
+        spec = importlib.util.spec_from_file_location("vegeta_cw721_drop_translation_audit", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        for ep in (
+            "execute::signed_mint_drop",
+            "execute::purchase_drop",
+            "execute::airdrop_public_drop",
+            "execute::airdrop_array_drop",
+            "execute::airdrop_phase_drop",
+            "execute::reserve_drop",
+        ):
+            self.assertTrue(mod.is_drop_mint_entrypoint(ep), ep)
+        for ep in ("execute::transfer_nft", "query::owner_of", "reviewed::token_uri_stateless"):
+            self.assertFalse(mod.is_drop_mint_entrypoint(ep), ep)
+
+    def test_reviewed_stateless_noop_does_not_require_native_instance(self):
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_native_noop", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        action = {"action_id": 9, "selector": "0x79df72bd", "ethereum_input": "0x79df72bd"}
+        call = mod.translate(
+            "marketplace-router", "reviewed::get_order_hash_stateless", None, {}, action,
+            "0x" + "11"*20, mod.TokenIdRemapper(),
+        )
+        self.assertEqual(call["kind"], "noop")
+        self.assertNotIn("instance_id", call)
+        instances = {}; stats = {}
+        iid = mod.register_translated_instance(call, "marketplace-router", instances, stats)
+        self.assertIsNone(iid)
+        self.assertEqual(instances, {})
+        self.assertEqual(stats["reviewed_noop_calls"], 1)
+        self.assertNotIn("contract_calls", stats)
+        with self.assertRaisesRegex(ValueError, "missing required instance_id"):
+            mod.register_translated_instance(
+                {"kind": "execute", "origin_action_id": 10}, "marketplace-router", {}, {}
+            )
 
     def test_stargate_mainnet_bridge_adapter_uses_qty_and_decodes_receive_payload(self):
         path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
@@ -420,16 +672,26 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
             td = Path(td); report = td / "mints.json"
             owner = "0x" + "ab" * 20; tx_hash = "0x" + "11" * 32
             report.write_text(json.dumps({
+                "schema_version": 2,
                 "dataset": "vegeta-s1",
                 "summary": {"all_observed_sequences_plus_one": True, "all_token_ids_fit_u64": True},
                 "owners": {owner: {
                     "first_token_id": 3847,
-                    "transactions": {tx_hash: {"mint_count": 2, "token_ids": [3847, 3848]}},
+                    "transactions": {tx_hash: {
+                        "mint_count": 2, "token_ids": [3847, 3848],
+                        "recipients": ["0x" + "cd" * 20, "0x" + "cd" * 20],
+                    }},
                 }},
             }) + "\n")
             sequence = mod.Cw721DropMintSequence(report)
             iid = "cw721-drop:" + owner
             self.assertEqual(sequence.first_token_id(iid), 3847)
+            self.assertIsNone(sequence.owner_for_instance("cw721-drop:0x" + "ef" * 20))
+            effect = sequence.mint_effect(
+                {"storage_context_address": owner}, {"tx_hash": tx_hash}, require_recipient=True
+            )
+            self.assertEqual(effect["quantity"], 2)
+            self.assertEqual(effect["recipient"], "0x" + "cd" * 20)
             msg = mod.instantiate_msg("cw721-drop", set(), iid, sequence)
             self.assertEqual(msg["next_token_id"], 3847)
             ok = mod.validate_drop_mint_translation(sequence, {(owner, tx_hash): 2})
@@ -451,7 +713,188 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         self.assertIn("eth_getLogs", collector)
         self.assertIn("ZERO_ADDRESS_TOPIC", collector)
         self.assertIn("all_observed_sequences_plus_one", collector)
+        self.assertIn('"schema_version": 2', collector)
+        self.assertIn('"recipients": []', collector)
+        self.assertIn("MINT_SEQUENCE_CURRENT", prepare)
         self.assertIn("collect-vegeta-cw721-drop-mints.py", audit)
+
+    def test_mia_selector_mint_audit_correlates_committed_effects_without_guessing_abi(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            plan = td / "plan.jsonl"; logs = td / "logs.json"; out = td / "audit.json"; txt = td / "audit.txt"
+            owner = "0x885523263378d6f27a5b8c533ad3b05ab9e105b5"
+            sender = "0x" + "12" * 20
+            committed_hash = "0x" + "aa" * 32
+            reverted_hash = "0x" + "bb" * 32
+            extra_hash = "0x" + "cc" * 32
+            action = {
+                "action_id": 0, "parent_action_id": None, "storage_context_address": owner,
+                "ethereum_code_address": owner, "ethereum_msg_sender": sender,
+                "selector": "0xfd883998", "call_type": "CALL", "failed_frame": False,
+                "dispatch": "mapped-opaque-selector", "semantic_effect": "OPAQUE",
+            }
+            plan.write_text(json.dumps({"block_number": 16774645, "transactions": [
+                {"tx_hash": committed_hash, "source_failed": False, "native_actions": [action]},
+                {"tx_hash": reverted_hash, "source_failed": False, "native_actions": [{**action, "failed_frame": True}]},
+            ]}) + "\n")
+            transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+            zero = "0x" + "00" * 32
+            recipient = "0x" + "00" * 12 + sender[2:]
+            def log(tx_hash, token_id, index):
+                return {
+                    "address": owner, "transactionHash": tx_hash,
+                    "blockNumber": "0x1000000", "transactionIndex": "0x0", "logIndex": hex(index),
+                    "topics": [transfer_topic, zero, recipient, "0x" + token_id.to_bytes(32, "big").hex()],
+                }
+            # One committed fd883998 mint and one unrelated owner mint. The reverted selector emits no log.
+            logs.write_text(json.dumps([log(committed_hash, 7, 0), log(extra_hash, 8, 1)]))
+            self.run_py(
+                "tools/vegeta/audit-vegeta-s1-erc721-selector-mints.py",
+                "--native-plan", plan, "--logs-json", logs, "--owner", owner, "--selector", "0xfd883998",
+                "--output", out, "--text-output", txt,
+            )
+            report = json.loads(out.read_text()); summary = report["summary"]
+            self.assertEqual(summary["source_committed_selector_actions"], 1)
+            self.assertEqual(summary["source_reverted_selector_actions"], 1)
+            self.assertTrue(summary["exactly_one_mint_event_per_committed_selector_tx"])
+            self.assertTrue(summary["reverted_selector_txs_have_no_committed_mint_events"])
+            self.assertTrue(summary["all_checked_mint_recipients_equal_msg_sender"])
+            self.assertTrue(summary["target_token_ids_unique"])
+            self.assertEqual(summary["target_distinct_token_id_count"], 1)
+            self.assertEqual(summary["min_target_token_id"], 7)
+            self.assertEqual(summary["max_target_token_id"], 7)
+            self.assertEqual(summary["extra_owner_mint_transactions_not_using_target_selector"], 1)
+            self.assertIn("High conflict gain alone", txt.read_text())
+
+
+    def test_owner_scoped_erc721_selector_effect_audit_classifies_public_logs_and_calldata(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            plan = td / "plan.jsonl"; logs = td / "logs.json"; out = td / "audit.json"; txt = td / "audit.txt"
+            owner = "0xbd18e233e12f2a066f5b5a351285ab5a39b1f2ac"
+            sender = "0x" + "12" * 20
+            committed_hash = "0x" + "aa" * 32
+            reverted_hash = "0x" + "bb" * 32
+            selector = "0xc96602d9"
+            def word(n): return int(n).to_bytes(32, "big").hex()
+            action = {
+                "action_id": 0, "parent_action_id": None, "storage_context_address": owner,
+                "ethereum_code_address": owner, "ethereum_msg_sender": sender,
+                "ethereum_input": selector + word(7) + word(64), "ethereum_value": "0x0",
+                "selector": selector, "call_type": "CALL", "failed_frame": False,
+                "dispatch": "mapped-opaque-selector", "semantic_effect": "OPAQUE",
+            }
+            plan.write_text(json.dumps({"block_number": 16774645, "transactions": [
+                {"tx_hash": committed_hash, "source_failed": False, "native_actions": [action]},
+                {"tx_hash": reverted_hash, "source_failed": False, "native_actions": [{**action, "failed_frame": True}]},
+            ]}) + "\n")
+            transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+            zero = "0x" + "00" * 32
+            recipient = "0x" + "00" * 12 + sender[2:]
+            logs.write_text(json.dumps([{
+                "address": owner, "transactionHash": committed_hash,
+                "blockNumber": "0x1000000", "transactionIndex": "0x0", "logIndex": "0x0",
+                "topics": [transfer_topic, zero, recipient, "0x" + (9).to_bytes(32, "big").hex()],
+                "data": "0x",
+            }]))
+            self.run_py(
+                "tools/vegeta/audit-vegeta-s1-erc721-selector-effects.py",
+                "--native-plan", plan, "--logs-json", logs, "--owner", owner, "--selector", selector,
+                "--output", out, "--text-output", txt,
+            )
+            report = json.loads(out.read_text()); summary = report["summary"]
+            self.assertEqual(summary["source_committed_selector_actions"], 1)
+            self.assertEqual(summary["source_reverted_selector_actions"], 1)
+            self.assertEqual(summary["erc721_transfer_effect_counts"], {"mint": 1})
+            self.assertEqual(summary["reverted_selector_tx_with_committed_owner_logs"], 0)
+            self.assertEqual(summary["calldata_byte_length_distribution"], {"68": 2})
+            self.assertFalse(summary["semantic_promotion_performed"])
+            self.assertIn("word[0]", txt.read_text())
+            self.assertIn("never promotes", txt.read_text())
+
+    def test_mia_verified_event_adapter_consumes_frozen_log_audit_and_fail_closes(self):
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_mia_verified", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); audit = td / "mia.json"
+            owner = "0x885523263378d6f27a5b8c533ad3b05ab9e105b5"
+            sender = "0x" + "34" * 20
+            committed = "0x" + "11" * 32; reverted = "0x" + "22" * 32
+            base_summary = {
+                "selector_transactions": 2, "selector_actions": 2,
+                "committed_selector_transactions": 1, "target_mint_events": 1,
+                "all_committed_selector_txs_have_mint_events": True,
+                "exactly_one_mint_event_per_committed_selector_tx": True,
+                "reverted_selector_txs_have_no_committed_mint_events": True,
+                "all_checked_mint_recipients_equal_msg_sender": True,
+                "target_token_ids_fit_u64": True,
+                "extra_owner_mint_transactions_not_using_target_selector": 0,
+            }
+            audit.write_text(json.dumps({
+                "dataset": "vegeta-s1", "owner": owner, "selector": "0xfd883998",
+                "summary": base_summary,
+                "transactions": {
+                    committed: {
+                        "committed_selector_actions": 1, "reverted_selector_actions": 0,
+                        "committed_msg_senders": [sender],
+                        "mint_events": [{"recipient": sender, "token_id": 765}],
+                    },
+                    reverted: {
+                        "committed_selector_actions": 0, "reverted_selector_actions": 1,
+                        "committed_msg_senders": [], "mint_events": [],
+                    },
+                },
+            }) + "\n")
+            audits = mod.Erc721SelectorMintAudits([audit]); ids = mod.TokenIdRemapper()
+            def mia_word(n): return int(n).to_bytes(32, "big")
+            def mia_input(token_id):
+                return "0xfd883998" + (mia_word(int(sender, 16)) + mia_word(96) + mia_word(token_id) + mia_word(98) + mia_word(0) + mia_word(0) + mia_word(0) + mia_word(0)).hex()
+            action = {
+                "action_id": 7, "selector": "0xfd883998", "storage_context_address": owner,
+                "native_instance_id": "cw721-mintable:" + owner, "ethereum_input": mia_input(765),
+            }
+            call = mod.translate(
+                "cw721-mintable", "execute::mint_verified_event", None, {"tx_hash": committed},
+                action, sender, ids, audits,
+            )
+            self.assertEqual(call["sender"], "native-s3-admin")
+            self.assertEqual(call["msg"]["mint"]["owner"], sender)
+            self.assertEqual(call["source_token_id"], 765)
+            self.assertTrue(call["selector_mint_effect_audit"])
+            reverted_action = {**action, "ethereum_input": mia_input(440)}
+            reverted_call = mod.translate(
+                "cw721-mintable", "execute::mint_verified_event", None, {"tx_hash": reverted},
+                reverted_action, sender, ids, audits,
+            )
+            self.assertTrue(reverted_call["reverted_token_id_from_public_calldata"])
+            self.assertEqual(reverted_call["source_token_id"],440)
+            mismatch_action = {**action, "ethereum_input": mia_input(766)}
+            with self.assertRaises(ValueError):
+                mod.translate(
+                    "cw721-mintable", "execute::mint_verified_event", None, {"tx_hash": committed},
+                    mismatch_action, sender, mod.TokenIdRemapper(), audits,
+                )
+            with self.assertRaises(ValueError):
+                mod.translate(
+                    "cw721-mintable", "execute::mint_verified_event", None, {"tx_hash": committed},
+                    action, sender, mod.TokenIdRemapper(), None,
+                )
+
+            duplicate = td / "duplicate.json"
+            duplicate_doc = json.loads(audit.read_text())
+            duplicate_doc["summary"]["selector_transactions"] = 3
+            duplicate_doc["summary"]["selector_actions"] = 3
+            duplicate_doc["summary"]["committed_selector_transactions"] = 2
+            duplicate_doc["summary"]["target_mint_events"] = 2
+            duplicate_doc["transactions"]["0x" + "33" * 32] = {
+                "committed_selector_actions": 1, "reverted_selector_actions": 0,
+                "committed_msg_senders": [sender],
+                "mint_events": [{"recipient": sender, "token_id": 765}],
+            }
+            duplicate.write_text(json.dumps(duplicate_doc) + "\n")
+            with self.assertRaises(ValueError):
+                mod.Erc721SelectorMintAudits([duplicate])
 
     def test_s1_semantic_only_wrapper_and_locked_new_contracts(self):
         wrapper = (ROOT / "tools/legacy-scripts/run-vegeta-s1-semantic-coverage.sh").read_text()
@@ -461,7 +904,12 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         self.assertIn("audit-vegeta-semantic-conflict-coverage.py", wrapper)
         self.assertIn("analyze-vegeta-s1-transaction-deficit.py", wrapper)
         self.assertIn("transaction-deficit.txt", wrapper)
+        self.assertTrue((ROOT / "tools/legacy-scripts/run-vegeta-s1-blitkin-c96602d9-effect-audit.sh").exists())
+        self.assertTrue((ROOT / "tools/legacy-scripts/run-vegeta-s1-mia-fd883998-effect-audit.sh").exists())
+        self.assertTrue((ROOT / "tools/vegeta/audit-vegeta-s1-erc721-selector-effects.py").exists())
         self.assertIn("run-vegeta-s1-semantic-coverage.sh", prepare)
+        self.assertIn("run-vegeta-s1-mia-mint-audit.sh", prepare)
+        self.assertIn("--erc721-selector-mint-audit", prepare)
         self.assertIn('name = "acg-benchmark-native-s3-cw721-drop"', lock)
         self.assertIn('name = "acg-benchmark-native-s3-stargate-cw20"', lock)
 

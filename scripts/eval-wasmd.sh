@@ -55,6 +55,11 @@ SAMPLES="${EVAL_WASMD_SAMPLES:-$DEFAULT_SAMPLES}"
 REQUIRE_CLEAN="${EVAL_WASMD_REQUIRE_CLEAN:-$DEFAULT_REQUIRE_CLEAN}"
 BUILD="${EVAL_WASMD_BUILD:-1}"
 OVERWRITE="${EVAL_WASMD_OVERWRITE:-0}"
+SETUP_CHECK="${EVAL_WASMD_SETUP_CHECK:-1}"
+REUSE_SETUP_TEMPLATE="${EVAL_WASMD_REUSE_SETUP_TEMPLATE:-1}"
+ISOLATE_STRATEGIES="${EVAL_WASMD_ISOLATE_STRATEGIES:-0}"
+REUSE_ISOLATED_PARTS="${EVAL_WASMD_REUSE_ISOLATED_PARTS:-0}"
+REUSE_WEIGHTS="${EVAL_WASMD_REUSE_WEIGHTS:-0}"
 GO_TOOLCHAIN="${EVAL_WASMD_GO_TOOLCHAIN:-auto}"
 BASE_TOTAL_MS="${EVAL_WASMD_COMPUTE_BASE_TOTAL_MS:-1000}"
 COMPUTE_SCALE="${EVAL_WASMD_COMPUTE_SCALE:-4}"
@@ -75,6 +80,20 @@ PLAN="$EXEC_DIR/execution-plan.jsonl"
 for p in "$MANIFEST" "$PLAN"; do
   [[ -s "$p" ]] || { echo "missing evaluation input: $p" >&2; echo "prepare the frozen Wasmd translation before running this stage" >&2; exit 2; }
 done
+PLAN_BLOCKS="$(python3 - "$MANIFEST" <<'PYBLOCKS'
+import json, sys
+obj=json.load(open(sys.argv[1], encoding="utf-8"))
+blocks=int(obj.get("blocks", 0))
+if blocks <= 0:
+    raise SystemExit("execution manifest is missing a positive blocks count")
+print(blocks)
+PYBLOCKS
+)"
+if (( MAX_BLOCKS > 0 )); then
+  EXPECTED_BLOCKS="$MAX_BLOCKS"
+else
+  EXPECTED_BLOCKS="$PLAN_BLOCKS"
+fi
 [[ -d "$SYMBOLIC_DIR" ]] || { echo "missing symbolic profile directory: $SYMBOLIC_DIR" >&2; exit 2; }
 case "${STREAM_PLAN,,}" in
   1|true|yes|on) STREAM_PLAN=1 ;;
@@ -127,6 +146,11 @@ ENV_FILE="$OUT_DIR/environment.txt"
   echo "dataset=$DATASET_LABEL"
   echo "exact_oracle=$EXACT_ORACLE"
   echo "stream_plan=$STREAM_PLAN"
+  echo "setup_check=$SETUP_CHECK"
+  echo "reuse_setup_template=$REUSE_SETUP_TEMPLATE"
+  echo "isolate_strategies=$ISOLATE_STRATEGIES"
+  echo "reuse_isolated_parts=$REUSE_ISOLATED_PARTS"
+  echo "reuse_compute_weights=$REUSE_WEIGHTS"
   echo "max_blocks=$MAX_BLOCKS"
   echo "uname=$(uname -a)"
   command -v lscpu >/dev/null 2>&1 && lscpu || true
@@ -136,21 +160,44 @@ ENV_FILE="$OUT_DIR/environment.txt"
 } > "$ENV_FILE"
 
 WEIGHTS="$OUT_DIR/compute-weights.jsonl"
-if [[ "$EXACT_ORACLE" == "1" ]]; then
-  python3 tools/vegeta/build-native-s3-compute-weights.py \
-    --execution-plan "$PLAN" \
-    --source-traces-dir "$TRACE_DIR" \
-    --output "$WEIGHTS" \
-    --summary "$OUT_DIR/compute-weights-summary.json" \
-    --max-missing-source "$ALLOWED_MISSING_SOURCE" \
-    --max-blocks "$MAX_BLOCKS"
+WEIGHTS_SUMMARY="$OUT_DIR/compute-weights-summary.json"
+WEIGHTS_META="$OUT_DIR/compute-weights.meta"
+WEIGHT_BUILDER="tools/vegeta/build-native-s3-compute-weights.py"
+PLAN_STAMP="$(stat -c '%s:%Y' "$PLAN" 2>/dev/null || stat -f '%z:%m' "$PLAN")"
+weights_cache_ok() {
+  [[ "$REUSE_WEIGHTS" == "1" && -s "$WEIGHTS" && -s "$WEIGHTS_SUMMARY" && -s "$WEIGHTS_META" ]] || return 1
+  grep -Fxq "plan_stamp=$PLAN_STAMP" "$WEIGHTS_META" || return 1
+  grep -Fxq "max_blocks=$MAX_BLOCKS" "$WEIGHTS_META" || return 1
+  grep -Fxq "exact_oracle=$EXACT_ORACLE" "$WEIGHTS_META" || return 1
+  grep -Fxq "allowed_missing_source=$ALLOWED_MISSING_SOURCE" "$WEIGHTS_META" || return 1
+  [[ ! "$WEIGHT_BUILDER" -nt "$WEIGHTS" ]] || return 1
+  [[ ! "$PLAN" -nt "$WEIGHTS" ]] || return 1
+}
+if weights_cache_ok; then
+  echo "reusing cached compute weights: $WEIGHTS"
 else
-  python3 tools/vegeta/build-native-s3-compute-weights.py \
-    --execution-plan "$PLAN" \
-    --fallback-plan-gas \
-    --output "$WEIGHTS" \
-    --summary "$OUT_DIR/compute-weights-summary.json" \
-    --max-blocks "$MAX_BLOCKS"
+  if [[ "$EXACT_ORACLE" == "1" ]]; then
+    python3 "$WEIGHT_BUILDER" \
+      --execution-plan "$PLAN" \
+      --source-traces-dir "$TRACE_DIR" \
+      --output "$WEIGHTS" \
+      --summary "$WEIGHTS_SUMMARY" \
+      --max-missing-source "$ALLOWED_MISSING_SOURCE" \
+      --max-blocks "$MAX_BLOCKS"
+  else
+    python3 "$WEIGHT_BUILDER" \
+      --execution-plan "$PLAN" \
+      --fallback-plan-gas \
+      --output "$WEIGHTS" \
+      --summary "$WEIGHTS_SUMMARY" \
+      --max-blocks "$MAX_BLOCKS"
+  fi
+  cat > "$WEIGHTS_META" <<EOF
+plan_stamp=$PLAN_STAMP
+max_blocks=$MAX_BLOCKS
+exact_oracle=$EXACT_ORACLE
+allowed_missing_source=$ALLOWED_MISSING_SOURCE
+EOF
 fi
 
 BIN="$OUT_DIR/bin/wasmd-scheduler-eval"
@@ -166,14 +213,17 @@ fi
 
 ITER_PER_NS="${EVAL_WASMD_GO_ITERATIONS_PER_NANO:-$($BIN --calibrate-only)}"
 echo "Wasmd evaluation: mode=$MODE workers=$WORKERS_LIST samples=$SAMPLES physical_cores=$PHYSICAL_CORES iter/ns=$ITER_PER_NS"
-"$BIN" --repo-root "$ROOT" --manifest "$MANIFEST" --plan "$PLAN" --dataset "$DATASET_LABEL" --exact-oracle="$EXACT_ORACLE" --stream-plan="$STREAM_PLAN" --max-blocks "$MAX_BLOCKS" --setup-only
+if [[ "$SETUP_CHECK" == "1" ]]; then
+  "$BIN" --repo-root "$ROOT" --manifest "$MANIFEST" --plan "$PLAN" --dataset "$DATASET_LABEL" --exact-oracle="$EXACT_ORACLE" --stream-plan="$STREAM_PLAN" --max-blocks "$MAX_BLOCKS" --reuse-setup-template="$REUSE_SETUP_TEMPLATE" --setup-only
+else
+  echo "skipping redundant standalone setup-only pass; campaign setup template will validate Wasmd initialization"
+fi
 
 RECORDS="$OUT_DIR/records.jsonl"
 : > "$RECORDS"
 IFS=',' read -r -a WORKERS <<< "$WORKERS_LIST"
-for workers in "${WORKERS[@]}"; do
-  raw="$OUT_DIR/raw/records-w${workers}.jsonl"
-  echo "=== Wasmd scheduler campaign workers=$workers samples=$SAMPLES ==="
+run_campaign() {
+  local workers="$1" output="$2" strategy="$3"
   "$BIN" \
     --repo-root "$ROOT" \
     --manifest "$MANIFEST" \
@@ -181,12 +231,14 @@ for workers in "${WORKERS[@]}"; do
     --exact-oracle="$EXACT_ORACLE" \
     --stream-plan="$STREAM_PLAN" \
     --max-blocks "$MAX_BLOCKS" \
+    --reuse-setup-template="$REUSE_SETUP_TEMPLATE" \
+    --campaign-strategy "$strategy" \
     --plan "$PLAN" \
     --compute-weights "$WEIGHTS" \
     --symbolic-dir "$SYMBOLIC_DIR" \
     --exact-trace-dir "$TRACE_DIR" \
     --exact-native-accesses "$NATIVE_ACCESSES" \
-    --output "$raw" \
+    --output "$output" \
     --workers "$workers" \
     --samples "$SAMPLES" \
     --compute-scale "$COMPUTE_SCALE" \
@@ -195,6 +247,105 @@ for workers in "${WORKERS[@]}"; do
     --symbgraph-rust-visibility mvcc \
     --symbgraph-rust-validation indexed \
     --symbgraph-rust-feedback profile
+}
+
+isolated_part_complete() {
+  local part="$1" strategy="$2" workers="$3" meta="$part.meta"
+  [[ "$REUSE_ISOLATED_PARTS" == "1" && -s "$part" && -s "$meta" ]] || return 1
+  local plan_stamp
+  plan_stamp="$(stat -c '%s:%Y' "$PLAN" 2>/dev/null || stat -f '%z:%m' "$PLAN")"
+  grep -Fxq "strategy=$strategy" "$meta" || return 1
+  grep -Fxq "workers=$workers" "$meta" || return 1
+  grep -Fxq "samples=$SAMPLES" "$meta" || return 1
+  grep -Fxq "compute_scale=$COMPUTE_SCALE" "$meta" || return 1
+  grep -Fxq "compute_base_total_ms=$BASE_TOTAL_MS" "$meta" || return 1
+  grep -Fxq "iterations_per_nano=$ITER_PER_NS" "$meta" || return 1
+  grep -Fxq "max_blocks=$MAX_BLOCKS" "$meta" || return 1
+  grep -Fxq "expected_blocks=$EXPECTED_BLOCKS" "$meta" || return 1
+  grep -Fxq "dataset=$DATASET_LABEL" "$meta" || return 1
+  grep -Fxq "exact_oracle=$EXACT_ORACLE" "$meta" || return 1
+  grep -Fxq "plan_stamp=$plan_stamp" "$meta" || return 1
+  python3 - "$part" "$strategy" "$workers" "$SAMPLES" "$EXPECTED_BLOCKS" <<'PYREC'
+import json, sys
+from collections import defaultdict
+
+path, campaign, workers, samples, blocks = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+labels = {
+    "serial": "cosmos-wasmd-direct-serial",
+    "blockstm": "cosmos-wasmd-block-stm",
+    "ariafb": "cosmos-wasmd-aria-fb",
+    "symbgraph-rust": "cosmos-wasmd-symbgraph-rust",
+    "vegeta": "cosmos-wasmd-vegeta",
+    "exact-oracle": "cosmos-wasmd-symbgraph-rust-exact-trace-oracle",
+}
+expected = labels[campaign]
+seen = defaultdict(set)
+rows = 0
+try:
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("strategy") != expected or int(row.get("workers", -1)) != workers:
+                raise ValueError("strategy/workers mismatch")
+            sample = int(row.get("sample", -1))
+            if not 0 <= sample < samples:
+                raise ValueError("sample out of range")
+            block = int(row["block_number"])
+            if block in seen[sample]:
+                raise ValueError("duplicate block")
+            seen[sample].add(block)
+            rows += 1
+except Exception:
+    raise SystemExit(1)
+if rows != samples * blocks or any(len(seen[s]) != blocks for s in range(samples)):
+    raise SystemExit(1)
+PYREC
+}
+
+write_isolated_part_meta() {
+  local part="$1" strategy="$2" workers="$3" plan_stamp
+  plan_stamp="$(stat -c '%s:%Y' "$PLAN" 2>/dev/null || stat -f '%z:%m' "$PLAN")"
+  cat > "$part.meta" <<EOF
+strategy=$strategy
+workers=$workers
+samples=$SAMPLES
+compute_scale=$COMPUTE_SCALE
+compute_base_total_ms=$BASE_TOTAL_MS
+iterations_per_nano=$ITER_PER_NS
+max_blocks=$MAX_BLOCKS
+expected_blocks=$EXPECTED_BLOCKS
+dataset=$DATASET_LABEL
+exact_oracle=$EXACT_ORACLE
+plan_stamp=$plan_stamp
+EOF
+}
+
+for workers in "${WORKERS[@]}"; do
+  raw="$OUT_DIR/raw/records-w${workers}.jsonl"
+  : > "$raw"
+  echo "=== Wasmd scheduler campaign workers=$workers samples=$SAMPLES ==="
+  if [[ "$ISOLATE_STRATEGIES" == "1" ]]; then
+    strategies=(serial blockstm ariafb symbgraph-rust vegeta)
+    if [[ "$EXACT_ORACLE" != "0" ]]; then strategies+=(exact-oracle); fi
+    echo "isolating scheduler strategies into separate processes to bound live Wasmd state"
+    for strategy in "${strategies[@]}"; do
+      part="$OUT_DIR/raw/records-w${workers}-${strategy}.jsonl"
+      echo "--- Wasmd isolated strategy=$strategy workers=$workers ---"
+      if isolated_part_complete "$part" "$strategy" "$workers"; then
+        echo "reusing completed isolated strategy=$strategy workers=$workers"
+      else
+        : > "$part"
+        rm -f "$part.meta"
+        run_campaign "$workers" "$part" "$strategy"
+        write_isolated_part_meta "$part" "$strategy" "$workers"
+      fi
+      cat "$part" >> "$raw"
+    done
+  else
+    run_campaign "$workers" "$raw" all
+  fi
   cat "$raw" >> "$RECORDS"
 done
 

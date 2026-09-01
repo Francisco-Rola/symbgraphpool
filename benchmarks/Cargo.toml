@@ -16,6 +16,7 @@ members = [
     "contracts/native-s3/operator-filter-helper",
     "contracts/native-s3/cw721-drop",
     "contracts/native-s3/stargate-cw20",
+    "contracts/native-s1/cw721-drop-exact",
 ]
 resolver = "2"
 

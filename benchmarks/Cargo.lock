@@ -51,7 +51,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "acg-benchmark-native-s3-fiat-token-cw20"
+name = "acg-benchmark-native-s1-cw721-drop-exact"
 version = "0.1.0"
 dependencies = [
  "cosmwasm-std",
@@ -107,6 +107,17 @@ dependencies = [
 
 [[package]]
 name = "acg-benchmark-native-s3-fee-token-cw20"
+version = "0.1.0"
+dependencies = [
+ "cosmwasm-std",
+ "cw-storage-plus",
+ "schemars",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "acg-benchmark-native-s3-fiat-token-cw20"
 version = "0.1.0"
 dependencies = [
  "cosmwasm-std",

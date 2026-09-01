@@ -101,10 +101,13 @@ def main() -> int:
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--text-output", type=Path, required=True)
     ap.add_argument("--target-coverage", type=float, default=0.80)
+    ap.add_argument("--conflict-target-coverage", type=float, default=0.80)
     ap.add_argument("--top", type=int, default=100)
     ns = ap.parse_args()
     if not (0.0 <= ns.target_coverage <= 1.0):
         raise SystemExit("--target-coverage must be between 0 and 1")
+    if not (0.0 <= ns.conflict_target_coverage <= 1.0):
+        raise SystemExit("--conflict-target-coverage must be between 0 and 1")
 
     all_tx_count = successful_tx_count = state_touch_tx_count = 0
     source_state_tx_count = source_state_successful_count = source_state_touch_count = 0
@@ -252,6 +255,8 @@ def main() -> int:
 
     target_success = math.ceil(ns.target_coverage * all_tx_count - 1e-12)
     additional_for_gate = max(0, target_success - successful_tx_count)
+    conflict_target_success = math.ceil(ns.conflict_target_coverage * conflict_tx_count - 1e-12)
+    additional_for_conflict_target = max(0, conflict_target_success - conflict_successful_count)
 
     opaque_rows = []
     for cand, txs in mapped_opaque_txs.items():
@@ -317,6 +322,16 @@ def main() -> int:
         "target_coverage": ns.target_coverage,
         "target_successful_reviewed_state_transactions": target_success,
         "additional_successful_reviewed_state_transactions_needed_for_current_gate": additional_for_gate,
+        "contention_scheduler_diagnostic": {
+            "target_coverage": ns.conflict_target_coverage,
+            "target_successful_reviewed_state_transactions": conflict_target_success,
+            "additional_successful_reviewed_state_transactions_needed": additional_for_conflict_target,
+            "coverage": conflict_row["successful_reviewed_state_coverage"],
+            "successful_reviewed_state_transactions": conflict_row["successful_reviewed_state_transactions"],
+            "source_conflict_participating_transactions": conflict_row["transactions"],
+            "target_met": additional_for_conflict_target == 0,
+            "publication_gate_changed": False,
+        },
         "denominators": {
             "all_source_transactions": all_row,
             "source_storage_access_transactions": state_row,
@@ -342,6 +357,7 @@ def main() -> int:
         "Diagnostic denominator alignment (does not change the frozen gate):",
         f"  source storage-access tx: {state_row['successful_reviewed_state_transactions']}/{state_row['transactions']} ({100*state_row['successful_reviewed_state_coverage']:.2f}%)",
         f"  source conflict-participant tx: {conflict_row['successful_reviewed_state_transactions']}/{conflict_row['transactions']} ({100*conflict_row['successful_reviewed_state_coverage']:.2f}%)",
+        f"  contention-oriented 80% target: {conflict_target_success}/{conflict_row['transactions']} (need {additional_for_conflict_target} additional successful reviewed-state conflict participants; {'PASS' if additional_for_conflict_target == 0 else 'FAIL'})",
         "",
         "Top mapped-owner opaque selectors by current deficit transactions:",
     ]
@@ -365,6 +381,8 @@ def main() -> int:
         "Interpretation: use conflict_tx/state_access_tx to decide whether the 80% all-transaction gate",
         "is exposing missing benchmark semantics or mostly non-contention background. Do not lower the",
         "publication gate solely because a diagnostic denominator produces a higher percentage.",
+        "The explicit contention target is a scheduler-fidelity diagnostic until the benchmark methodology",
+        "formally adopts it; it does not replace the frozen all-transaction semantic-replay gate.",
     ]
     ns.text_output.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))

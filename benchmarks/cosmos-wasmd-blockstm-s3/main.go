@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -257,12 +259,217 @@ type preparedCall struct {
 
 type benchApp struct {
 	app          *wasmapp.WasmApp
+	db           dbm.DB
 	permissioned *wasmkeeper.PermissionedKeeper
 	contracts    map[string]sdk.AccAddress
 	addresses    map[string]sdk.AccAddress
 	repl         map[string]string
 	prepared     map[preparedCallKey]preparedCall
 	home         string
+}
+
+type setupDBEntry struct {
+	key   []byte
+	value []byte
+}
+
+type benchAppTemplate struct {
+	dbEntries   []setupDBEntry
+	contracts   map[string]sdk.AccAddress
+	addresses   map[string]sdk.AccAddress
+	repl        map[string]string
+	home        string
+	stateDigest [32]byte
+	stateBytes  uint64
+}
+
+func cloneAddrMap(src map[string]sdk.AccAddress) map[string]sdk.AccAddress {
+	out := make(map[string]sdk.AccAddress, len(src))
+	for k, v := range src {
+		out[k] = append(sdk.AccAddress(nil), v...)
+	}
+	return out
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneSetupDBBytes(src []byte) []byte {
+	// Cosmos DB distinguishes an empty value from a nil value: Set rejects
+	// nil, while zero-length non-nil values are valid. append(nil, src...)
+	// collapses an empty slice to nil, so allocate explicitly here.
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func captureSetupDB(db dbm.DB) ([]setupDBEntry, uint64, error) {
+	it, err := db.Iterator(nil, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer it.Close()
+	entries := make([]setupDBEntry, 0, 4096)
+	var bytes uint64
+	for ; it.Valid(); it.Next() {
+		k := cloneSetupDBBytes(it.Key())
+		v := cloneSetupDBBytes(it.Value())
+		entries = append(entries, setupDBEntry{key: k, value: v})
+		bytes += uint64(len(k) + len(v))
+	}
+	if err := it.Error(); err != nil {
+		return nil, 0, err
+	}
+	return entries, bytes, nil
+}
+
+func restoreSetupDB(entries []setupDBEntry) (dbm.DB, error) {
+	db := dbm.NewMemDB()
+	batch := db.NewBatchWithSize(len(entries))
+	for _, entry := range entries {
+		if err := batch.Set(entry.key, entry.value); err != nil {
+			_ = batch.Close()
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	if err := batch.Write(); err != nil {
+		_ = batch.Close()
+		_ = db.Close()
+		return nil, err
+	}
+	if err := batch.Close(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode.Perm())
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+func copySetupHome(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if info.Mode().IsRegular() {
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			return copyFile(path, target, info.Mode())
+		}
+		// Wasmd's benchmark home is expected to contain directories and regular
+		// cache files only. Fail closed rather than sharing a special file or
+		// symlink between independently mutated benchmark apps.
+		return fmt.Errorf("unsupported setup-home entry %s mode=%s", path, info.Mode())
+	})
+}
+
+func captureBenchAppTemplate(b *benchApp) (*benchAppTemplate, error) {
+	entries, stateBytes, err := captureSetupDB(b.db)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot setup database: %w", err)
+	}
+	home, err := os.MkdirTemp("", "symbgraph-wasmd-blockstm-template-")
+	if err != nil {
+		return nil, err
+	}
+	if err := copySetupHome(b.home, home); err != nil {
+		_ = os.RemoveAll(home)
+		return nil, fmt.Errorf("snapshot wasm setup home: %w", err)
+	}
+	return &benchAppTemplate{
+		dbEntries:   entries,
+		contracts:   cloneAddrMap(b.contracts),
+		addresses:   cloneAddrMap(b.addresses),
+		repl:        cloneStringMap(b.repl),
+		home:        home,
+		stateDigest: digestApp(b.app),
+		stateBytes:  stateBytes,
+	}, nil
+}
+
+func (t *benchAppTemplate) close() {
+	if t != nil && t.home != "" {
+		_ = os.RemoveAll(t.home)
+	}
+}
+
+func newBenchAppFromTemplate(t *benchAppTemplate, blocks []ExecutionBlock, verify bool) (*benchApp, error) {
+	home, err := os.MkdirTemp("", "symbgraph-wasmd-blockstm-clone-")
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(home) }
+	if err := copySetupHome(t.home, home); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("clone wasm setup home: %w", err)
+	}
+	db, err := restoreSetupDB(t.dbEntries)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("clone setup database: %w", err)
+	}
+	opts := mapAppOptions{flags.FlagHome: home, "wasm": map[string]any{}}
+	a := wasmapp.NewWasmApp(log.NewNopLogger(), db, true, opts, nil, baseapp.SetChainID(chainID))
+	pk := wasmkeeper.NewDefaultPermissionKeeper(&a.WasmKeeper)
+	b := &benchApp{
+		app:          a,
+		db:           db,
+		permissioned: pk,
+		contracts:    cloneAddrMap(t.contracts),
+		addresses:    cloneAddrMap(t.addresses),
+		repl:         cloneStringMap(t.repl),
+		home:         home,
+	}
+	if err := b.prepareWorkloadCalls(blocks); err != nil {
+		b.close()
+		return nil, fmt.Errorf("prepare cloned workload calls: %w", err)
+	}
+	if verify && digestApp(a) != t.stateDigest {
+		b.close()
+		return nil, fmt.Errorf("cloned Wasmd setup state differs from template")
+	}
+	committedCtx := a.NewContext(true)
+	for id, addr := range b.contracts {
+		if !a.WasmKeeper.HasContractInfo(committedCtx, addr) {
+			b.close()
+			return nil, fmt.Errorf("cloned wasm instance %s (%s) missing", id, addr)
+		}
+	}
+	return b, nil
 }
 
 func deterministicCompute(iterations uint64) uint64 {
@@ -623,7 +830,8 @@ func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchAp
 	// asks BaseApp to load/materialize those mounted stores before InitChain. On a
 	// fresh MemDB this loads version 0; without it InitChain can enter module
 	// genesis with an empty cache-multistore and panic on stores such as x/upgrade.
-	a := wasmapp.NewWasmApp(log.NewNopLogger(), dbm.NewMemDB(), true, opts, nil, baseapp.SetChainID(chainID))
+	db := dbm.NewMemDB()
+	a := wasmapp.NewWasmApp(log.NewNopLogger(), db, true, opts, nil, baseapp.SetChainID(chainID))
 	genesisState, e := benchmarkGenesisWithValidator(a)
 	if e != nil {
 		return nil, fmt.Errorf("build benchmark genesis validator set: %w", e)
@@ -703,7 +911,11 @@ func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchAp
 		codes[f] = id
 	}
 	contracts := map[string]sdk.AccAddress{}
-	for _, i := range m.Instances {
+	setupStarted := time.Now()
+	if len(m.Instances) >= 500 || len(m.PrimingCalls) >= 10000 {
+		fmt.Fprintf(os.Stderr, "Wasmd setup: instances=%d priming_calls=%d\n", len(m.Instances), len(m.PrimingCalls))
+	}
+	for instanceIndex, i := range m.Instances {
 		msg := jsonBytes(i.InstantiateMsg, repl)
 		addr, _, e := pk.Instantiate(ctx, codes[i.Family], admin, nil, msg, i.InstanceID, nil)
 		if e != nil {
@@ -711,18 +923,26 @@ func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchAp
 		}
 		contracts[i.InstanceID] = addr
 		repl[i.InstanceID] = addr.String()
+		if len(m.Instances) >= 500 && ((instanceIndex+1)%500 == 0 || instanceIndex+1 == len(m.Instances)) {
+			fmt.Fprintf(os.Stderr, "Wasmd setup: instantiated %d/%d elapsed=%s\n", instanceIndex+1, len(m.Instances), time.Since(setupStarted).Round(time.Second))
+		}
 	}
 	b := &benchApp{
 		app:          a,
+		db:           db,
 		permissioned: pk,
 		contracts:    contracts,
 		addresses:    addrs,
 		repl:         repl,
 		home:         home,
 	}
+	primeStarted := time.Now()
 	for n, c := range m.PrimingCalls {
 		if e := b.executeCall(ctx, c, b.repl); e != nil {
 			return nil, fmt.Errorf("priming call %d: %w", n, e)
+		}
+		if len(m.PrimingCalls) >= 10000 && ((n+1)%10000 == 0 || n+1 == len(m.PrimingCalls)) {
+			fmt.Fprintf(os.Stderr, "Wasmd setup: primed %d/%d elapsed=%s\n", n+1, len(m.PrimingCalls), time.Since(primeStarted).Round(time.Second))
 		}
 	}
 	if e := b.prepareWorkloadCalls(blocks); e != nil {
@@ -929,6 +1149,16 @@ func (b *benchApp) executeTxIsolated(ctx sdk.Context, block ExecutionBlock, tx E
 	return b.executeTxCalls(ctx, block, tx)
 }
 
+func commitIDsEqual(a, b storetypes.CommitID) bool {
+	// Every strategy clone starts from the same committed setup version and
+	// commits exactly once per source block. The Cosmos SDK CommitID is the
+	// canonical Merkle commitment to all persistent multistore state, so after
+	// commit it is the correct O(1) equivalence check. Re-scanning every KV pair
+	// is prohibitively expensive for S1's multi-million-entry reconstructed
+	// state and is unnecessary for per-block correctness.
+	return a.Version == b.Version && len(a.Hash) > 0 && len(b.Hash) > 0 && bytes.Equal(a.Hash, b.Hash)
+}
+
 func digestApp(a *wasmapp.WasmApp) [32]byte {
 	h := sha256.New()
 	keys := append([]storetypes.StoreKey(nil), a.GetStoreKeys()...)
@@ -1103,6 +1333,8 @@ func main() {
 	iterPerNs := flag.Float64("go-iterations-per-nano", 0, "pin Go compute calibration")
 	calOnly := flag.Bool("calibrate-only", false, "print compute iterations/ns and exit")
 	setupOnly := flag.Bool("setup-only", false, "initialize Wasmd + upload/instantiate/prime contracts, then exit")
+	reuseSetupTemplate := flag.Bool("reuse-setup-template", boolEnvDefault("VEGETA_WASMD_REUSE_SETUP_TEMPLATE", true), "initialize/prime Wasmd once, snapshot the committed setup state, and clone that snapshot for every strategy/sample")
+	campaignStrategy := flag.String("campaign-strategy", "all", "run one scheduler strategy per process to bound live Wasmd state: all|serial|blockstm|ariafb|symbgraph-rust|vegeta|exact-oracle")
 	profileDir := flag.String(
 		"profile-dir",
 		os.Getenv("VEGETA_S3_WASMD_PPROF_DIR"),
@@ -1218,6 +1450,18 @@ func main() {
 	if rustPlanningErr != nil {
 		panic(rustPlanningErr)
 	}
+	*campaignStrategy = strings.ToLower(strings.TrimSpace(*campaignStrategy))
+	switch *campaignStrategy {
+	case "all", "serial", "blockstm", "ariafb", "symbgraph-rust", "vegeta", "exact-oracle":
+	default:
+		panic(fmt.Sprintf("unsupported --campaign-strategy=%q", *campaignStrategy))
+	}
+	if *campaignStrategy == "exact-oracle" && !*exactOracle {
+		panic("--campaign-strategy=exact-oracle requires --exact-oracle=true")
+	}
+	if *rustACGOnly && *campaignStrategy != "all" {
+		panic("--rust-acg-only is incompatible with --campaign-strategy isolation")
+	}
 	if *rustACGOnly && !*exactOracle {
 		panic("--rust-acg-only requires --exact-oracle=true")
 	}
@@ -1320,8 +1564,8 @@ func main() {
 		}
 		return
 	}
-	var exactTraceIndex exactEthereumTraceIndex
-	var exactNativeTranslationIndex exactNativeTranslationIndex
+	var exactTraceIndex *exactEthereumTraceIndex
+	var exactNativeTranslationIndex *exactNativeTranslationIndex
 	if *exactOracle {
 		exactTraceIndex, e = loadExactEthereumTraceIndex(resolveRepoPath(*repoRoot, *exactTraceDir))
 		if e != nil {
@@ -1345,114 +1589,222 @@ func main() {
 	if *investigateOverhead {
 		diagnosticSerialDigests = make([][32]byte, len(blocks))
 	}
-	for sample := 0; sample < *samples; sample++ {
-		initBlocks := blocks
-		if *streamPlan {
-			initBlocks = nil
+	runAllStrategies := *campaignStrategy == "all"
+	runSerialRecord := runAllStrategies || *campaignStrategy == "serial"
+	runBlockSTM := runAllStrategies || *campaignStrategy == "blockstm"
+	runAriaFB := runAllStrategies || *campaignStrategy == "ariafb"
+	runSymbGraph := runAllStrategies || *campaignStrategy == "symbgraph-rust"
+	runVegeta := runAllStrategies || *campaignStrategy == "vegeta"
+	runExactOracle := *exactOracle && (runAllStrategies || *campaignStrategy == "exact-oracle")
+	if runAllStrategies {
+		fmt.Fprintln(os.Stderr, "Wasmd campaign strategy=all live_state_mode=legacy-matrix")
+	} else {
+		fmt.Fprintf(os.Stderr, "Wasmd campaign strategy=%s live_state_mode=isolated\n", *campaignStrategy)
+	}
+	initBlocks := blocks
+	if *streamPlan {
+		initBlocks = nil
+	}
+	var setupTemplate *benchAppTemplate
+	if *reuseSetupTemplate {
+		started := time.Now()
+		fmt.Fprintf(os.Stderr, "Wasmd setup template: building once for %d instances / %d priming calls\n", len(manifest.Instances), len(manifest.PrimingCalls))
+		seed, err := newBenchApp(*repoRoot, manifest, initBlocks)
+		if err != nil {
+			panic(err)
 		}
+		setupTemplate, err = captureBenchAppTemplate(seed)
+		seed.close()
+		if err != nil {
+			panic(err)
+		}
+		defer setupTemplate.close()
+		fmt.Fprintf(os.Stderr, "Wasmd setup template: ready db_entries=%d state_bytes=%d elapsed=%s\n", len(setupTemplate.dbEntries), setupTemplate.stateBytes, time.Since(started).Round(time.Second))
+	}
+	newSampleApp := func(sample int, role string, verify bool) (*benchApp, error) {
+		started := time.Now()
+		var app *benchApp
+		var err error
+		if setupTemplate != nil {
+			app, err = newBenchAppFromTemplate(setupTemplate, initBlocks, verify)
+		} else {
+			app, err = newBenchApp(*repoRoot, manifest, initBlocks)
+		}
+		if err == nil && setupTemplate != nil {
+			fmt.Fprintf(os.Stderr, "Wasmd setup clone: sample=%d role=%s elapsed=%s\n", sample, role, time.Since(started).Round(time.Millisecond))
+		}
+		return app, err
+	}
+	for sample := 0; sample < *samples; sample++ {
 		rustBridge, e := NewRustSymbGraphBridgeWithPlanningAndDiagnostics(*repoRoot, *symbolicDir, rustPlanningOverrides, *rustDependencyDiagnostics)
 		if e != nil {
 			panic(e)
 		}
-		serial, e := newBenchApp(*repoRoot, manifest, initBlocks)
+		serial, e := newSampleApp(sample, "serial", true)
 		if e != nil {
 			rustBridge.Close()
 			panic(e)
 		}
-		stm, e := newBenchApp(*repoRoot, manifest, initBlocks)
-		if e != nil {
-			serial.close()
-			rustBridge.Close()
-			panic(e)
-		}
-		aria, e := newBenchApp(*repoRoot, manifest, initBlocks)
-		if e != nil {
-			serial.close()
-			stm.close()
-			rustBridge.Close()
-			panic(e)
-		}
-		symb, e := newBenchApp(*repoRoot, manifest, initBlocks)
-		if e != nil {
-			serial.close()
-			stm.close()
-			aria.close()
-			rustBridge.Close()
-			panic(e)
-		}
-		vegeta, e := newBenchApp(*repoRoot, manifest, initBlocks)
-		if e != nil {
-			serial.close()
-			stm.close()
-			aria.close()
-			symb.close()
-			rustBridge.Close()
-			panic(e)
-		}
-		var acgOracle *benchApp
-		if *exactOracle {
-			acgOracle, e = newBenchApp(*repoRoot, manifest, initBlocks)
+		var stm, aria, symb, vegeta, acgOracle, ariaReference, vegetaReference *benchApp
+		if runBlockSTM {
+			stm, e = newSampleApp(sample, "blockstm", false)
 			if e != nil {
 				serial.close()
-				stm.close()
+				rustBridge.Close()
+				panic(e)
+			}
+		}
+		if runAriaFB {
+			aria, e = newSampleApp(sample, "ariafb", false)
+			if e != nil {
+				serial.close()
+				if stm != nil {
+					stm.close()
+				}
+				rustBridge.Close()
+				panic(e)
+			}
+			ariaReference, e = newSampleApp(sample, "aria-reference", false)
+			if e != nil {
+				serial.close()
+				if stm != nil {
+					stm.close()
+				}
 				aria.close()
-				symb.close()
+				rustBridge.Close()
+				panic(e)
+			}
+		}
+		if runSymbGraph {
+			symb, e = newSampleApp(sample, "symbgraph-rust", false)
+			if e != nil {
+				serial.close()
+				if stm != nil {
+					stm.close()
+				}
+				if aria != nil {
+					aria.close()
+				}
+				if ariaReference != nil {
+					ariaReference.close()
+				}
+				rustBridge.Close()
+				panic(e)
+			}
+		}
+		if runVegeta {
+			vegeta, e = newSampleApp(sample, "vegeta", false)
+			if e != nil {
+				serial.close()
+				if stm != nil {
+					stm.close()
+				}
+				if aria != nil {
+					aria.close()
+				}
+				if ariaReference != nil {
+					ariaReference.close()
+				}
+				if symb != nil {
+					symb.close()
+				}
+				rustBridge.Close()
+				panic(e)
+			}
+			vegetaReference, e = newSampleApp(sample, "vegeta-reference", false)
+			if e != nil {
+				serial.close()
+				if stm != nil {
+					stm.close()
+				}
+				if aria != nil {
+					aria.close()
+				}
+				if ariaReference != nil {
+					ariaReference.close()
+				}
+				if symb != nil {
+					symb.close()
+				}
 				vegeta.close()
 				rustBridge.Close()
 				panic(e)
 			}
 		}
-		ariaReference, e := newBenchApp(*repoRoot, manifest, initBlocks)
-		if e != nil {
-			serial.close()
-			stm.close()
-			aria.close()
-			symb.close()
-			vegeta.close()
-			if acgOracle != nil {
-				acgOracle.close()
+		if runExactOracle {
+			acgOracle, e = newSampleApp(sample, "acg-oracle", false)
+			if e != nil {
+				serial.close()
+				if stm != nil {
+					stm.close()
+				}
+				if aria != nil {
+					aria.close()
+				}
+				if ariaReference != nil {
+					ariaReference.close()
+				}
+				if symb != nil {
+					symb.close()
+				}
+				if vegeta != nil {
+					vegeta.close()
+				}
+				if vegetaReference != nil {
+					vegetaReference.close()
+				}
+				rustBridge.Close()
+				panic(e)
 			}
-			rustBridge.Close()
-			panic(e)
-		}
-		vegetaReference, e := newBenchApp(*repoRoot, manifest, initBlocks)
-		if e != nil {
-			serial.close()
-			stm.close()
-			aria.close()
-			symb.close()
-			vegeta.close()
-			if acgOracle != nil {
-				acgOracle.close()
-			}
-			ariaReference.close()
-			rustBridge.Close()
-			panic(e)
 		}
 
 		func() {
 			defer rustBridge.Close()
 			defer serial.close()
-			defer stm.close()
-			defer aria.close()
-			defer symb.close()
-			defer vegeta.close()
+			if stm != nil {
+				defer stm.close()
+			}
+			if aria != nil {
+				defer aria.close()
+			}
+			if symb != nil {
+				defer symb.close()
+			}
+			if vegeta != nil {
+				defer vegeta.close()
+			}
 			if acgOracle != nil {
 				defer acgOracle.close()
 			}
-			defer ariaReference.close()
-			defer vegetaReference.close()
+			if ariaReference != nil {
+				defer ariaReference.close()
+			}
+			if vegetaReference != nil {
+				defer vegetaReference.close()
+			}
 
 			const preEstimate = false
+			// Store keys are app-local identity objects. The Block-STM runner must be
+			// constructed with the keys mounted by the same Wasmd app whose
+			// MultiStore it will execute against; using serial.app keys with stm.app
+			// causes cachemulti to reject otherwise-identically named stores. Keep a
+			// serial fallback only for isolated campaigns where Block-STM is absent
+			// (the runner is then never used).
+			blockSTMStoreKeys := serial.app.GetStoreKeys()
+			if stm != nil {
+				blockSTMStoreKeys = stm.app.GetStoreKeys()
+			}
 			blockSTMRunner := txnrunner.NewSTMRunner(
 				sdk.TxDecoder(func([]byte) (sdk.Tx, error) { return nil, nil }),
-				stm.app.GetStoreKeys(),
+				blockSTMStoreKeys,
 				*workers,
 				preEstimate,
 				func(storetypes.MultiStore) string { return sdk.DefaultBondDenom },
 			)
 			ariaRunner := NewAriaFBRunner(*workers)
 			vegetaRunner := NewVegetaRunner(*workers)
+			campaignStarted := time.Now()
+			fmt.Fprintln(os.Stderr, "Wasmd state equivalence: canonical committed-state CommitID checks")
 
 			processBlock := func(blockOffset int, block ExecutionBlock) {
 				header := tmproto.Header{ChainID: chainID, Height: int64(blockOffset + 2), Time: time.Unix(int64(block.Timestamp), 0)}
@@ -1473,10 +1825,12 @@ func main() {
 					panic(e)
 				}
 				serialNanos := uint64(serialWall.Nanoseconds())
-				serialDigest := digestApp(serial.app)
+				serialCommitID := serial.app.LastCommitID()
 				if *investigateOverhead && sample == 0 {
 					diagnosticDirectNanos += serialNanos
-					diagnosticSerialDigests[blockOffset] = serialDigest
+					// The overhead diagnostic intentionally retains the historical full
+					// state digest. Normal publication/smoke runs use CommitID below.
+					diagnosticSerialDigests[blockOffset] = digestApp(serial.app)
 				}
 				serialRec := Record{
 					SchemaVersion:         1,
@@ -1503,8 +1857,10 @@ func main() {
 					BaselineScope:         directSerialScope,
 					BlockSTMPreEstimate:   false,
 				}
-				if e := json.NewEncoder(w).Encode(&serialRec); e != nil {
-					panic(e)
+				if runSerialRecord {
+					if e := json.NewEncoder(w).Encode(&serialRec); e != nil {
+						panic(e)
+					}
 				}
 
 				estimatedCosts := make([]uint32, len(block.Transactions))
@@ -1512,7 +1868,7 @@ func main() {
 					estimatedCosts[i] = boundedCost(cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash))
 				}
 
-				if *exactOracle {
+				if runExactOracle {
 					// Evaluation-only Rust-ACG upper bound. The source exact SLOAD/SSTORE
 					// trace replaces symbolic access inference, but execution is the same
 					// ready-DAG MVCC path and indexed canonical validation used by Rust-ACG.
@@ -1544,7 +1900,7 @@ func main() {
 					if err := commitFinalizeState(acgOracle.app); err != nil {
 						panic(err)
 					}
-					oracleEq := serialDigest == digestApp(acgOracle.app)
+					oracleEq := commitIDsEqual(serialCommitID, acgOracle.app.LastCommitID())
 					if !oracleEq {
 						panic(fmt.Sprintf("exact-trace Rust-ACG oracle state mismatch sample=%d block=%d", sample, block.BlockNumber))
 					}
@@ -1580,7 +1936,7 @@ func main() {
 					}
 				}
 
-				if !*rustACGOnly {
+				if runBlockSTM && !*rustACGOnly {
 					// Cosmos SDK Block-STM: native SDK MVCC/scheduler baseline.
 					stmBlockCtx := stm.app.NewNextBlockContext(header)
 					var stmAttempts atomic.Uint64
@@ -1601,7 +1957,7 @@ func main() {
 					if e := commitFinalizeState(stm.app); e != nil {
 						panic(e)
 					}
-					stmEq := serialDigest == digestApp(stm.app)
+					stmEq := commitIDsEqual(serialCommitID, stm.app.LastCommitID())
 					if !stmEq {
 						panic(fmt.Sprintf("block-stm state mismatch sample=%d block=%d", sample, block.BlockNumber))
 					}
@@ -1616,7 +1972,7 @@ func main() {
 
 				}
 
-				if !*rustACGOnly {
+				if runAriaFB && !*rustACGOnly {
 					// AriaFB on the same Wasmd/WasmVM state machine. The initial Aria
 					// batch executes after consensus from one block-start snapshot. Rule-2
 					// survivors commit in a valid Aria serialization order; aborts use the
@@ -1642,7 +1998,7 @@ func main() {
 					if e != nil {
 						panic(e)
 					}
-					ariaEq := digestApp(ariaReference.app) == digestApp(aria.app)
+					ariaEq := commitIDsEqual(ariaReference.app.LastCommitID(), aria.app.LastCommitID())
 					if !ariaEq {
 						panic(fmt.Sprintf("aria-fb serialization mismatch sample=%d block=%d order=%v", sample, block.BlockNumber, ariaRunner.LastSerializationOrder()))
 					}
@@ -1663,85 +2019,88 @@ func main() {
 					}
 				}
 
-				// SymbGraph Rust: crates/acg-* owns symbolic parsing, candidate graph
-				// construction, conflict predicates, adaptive feedback, and risk-bounded
-				// ordering. Go executes only the emitted ordering_dependencies DAG against
-				// real Wasmd/WasmVM state and performs concrete validation/replay.
-				symbBlockCtx := symb.app.NewNextBlockContext(header)
-				symbRunner := NewRustSymbGraphRunnerWithOptions(*workers, block, rustBridge, estimatedCosts, rustRunnerOptions)
-				symbRunner.SetSerialServiceNanos(serialNanos)
-				symbStart := time.Now()
-				_, e = symbRunner.Run(context.Background(), symbBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
-					ctx := symbBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
-					tx := block.Transactions[idx]
-					if e := symb.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
-						return &abci.ExecTxResult{Code: 1, Log: e.Error()}
+				if runSymbGraph {
+					// SymbGraph Rust: crates/acg-* owns symbolic parsing, candidate graph
+					// construction, conflict predicates, adaptive feedback, and risk-bounded
+					// ordering. Go executes only the emitted ordering_dependencies DAG against
+					// real Wasmd/WasmVM state and performs concrete validation/replay.
+					symbBlockCtx := symb.app.NewNextBlockContext(header)
+					symbRunner := NewRustSymbGraphRunnerWithOptions(*workers, block, rustBridge, estimatedCosts, rustRunnerOptions)
+					symbRunner.SetSerialServiceNanos(serialNanos)
+					symbStart := time.Now()
+					_, e = symbRunner.Run(context.Background(), symbBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+						ctx := symbBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
+						tx := block.Transactions[idx]
+						if e := symb.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
+							return &abci.ExecTxResult{Code: 1, Log: e.Error()}
+						}
+						return &abci.ExecTxResult{}
+					})
+					symbWall := time.Since(symbStart)
+					if e != nil {
+						panic(e)
 					}
-					return &abci.ExecTxResult{}
-				})
-				symbWall := time.Since(symbStart)
-				if e != nil {
-					panic(e)
-				}
-				if e := commitFinalizeState(symb.app); e != nil {
-					panic(e)
-				}
-				symbEq := serialDigest == digestApp(symb.app)
-				if !symbEq {
-					panic(fmt.Sprintf("symbgraph-rust state mismatch sample=%d block=%d", sample, block.BlockNumber))
-				}
-				symbStats := symbRunner.LastStats()
-				symbDiag := symbRunner.LastDiagnostics()
-				symbPlan := symbRunner.LastPlan()
-				symbRec := Record{
-					SchemaVersion: 1, Dataset: *datasetLabel, Sample: sample, BlockNumber: block.BlockNumber,
-					Strategy: "cosmos-wasmd-symbgraph-rust", Workers: *workers, MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos,
-					StrategyTotalNanos: uint64(symbWall.Nanoseconds()), PreConsensusNanos: symbStats.PreConsensusNanos, PostConsensusNanos: symbStats.PostConsensusNanos, Transactions: len(block.Transactions), ExecutionAttempts: symbStats.Attempts,
-					Reexecutions: symbStats.Reexecutions, SerialEquivalent: symbEq, SerialReferenceScope: "historical-block-order", ComputeMetric: cal.Metric, ComputeScale: *scale,
-					GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion,
-					BaselineScope: rustRunnerOptions.Scope(), BlockSTMPreEstimate: false, SpeculatedTransactions: symbStats.Speculated,
-					ReusedTransactions: symbStats.Reused, ValidationNanos: symbDiag.ValidationNanos, ReplayExecutionNanos: symbDiag.ReplayExecutionNanos,
-					SymbGraphVariant: symbDiag.Variant, SymbPlanNanos: symbDiag.PlanNanos, SymbPreexecutionNanos: symbDiag.PreexecutionNanos,
-					SymbBranchCreateNanos: symbDiag.BranchCreateNanos, SymbVisibilityNanos: symbDiag.VisibilityNanos,
-					SymbSpecExecutionNanos: symbDiag.SpecExecutionNanos, SymbDeltaCaptureNanos: symbDiag.DeltaCaptureNanos,
-					SymbMVCCPublishNanos: symbDiag.MVCCPublishNanos, SymbFeedbackBuildNanos: symbDiag.FeedbackBuildNanos,
-					SymbReconciliationNanos: symbDiag.ReconciliationNanos, SymbValidationNanos: symbDiag.ValidationNanos,
-					SymbReplayExecutionNanos: symbDiag.ReplayExecutionNanos, SymbRustFeedbackNanos: symbDiag.RustFeedbackNanos,
-					SymbDependencyEdges: symbDiag.DependencyEdges, SymbFeedbackPairs: symbDiag.FeedbackPairs,
-					SymbPhysicalCandidateEdges: symbDiag.PhysicalCandidateEdges, SymbLogicalCandidateEdges: symbDiag.LogicalCandidateEdges, SymbCompactCandidateGroups: symbDiag.CompactCandidateGroups,
-					SymbParentDependenciesBeforeReduction: symbDiag.ParentDependenciesBeforeReduction, SymbParentDependenciesElidedReduction: symbDiag.ParentDependenciesElidedReduction,
-					SymbInitialReady: symbDiag.InitialReady, SymbMaxReady: symbDiag.MaxReady, SymbAverageReady: symbDiag.AverageReady(),
-					SymbMaxActive: symbDiag.MaxActive, SymbCriticalPathTx: symbDiag.CriticalPathTx, SymbCriticalPathCost: symbDiag.CriticalPathCost,
-					SymbTotalEstimatedCost: symbDiag.TotalEstimatedCost, SymbDAGParallelism: symbDiag.DAGParallelism,
-					SymbWorkerUtilization: symbDiag.WorkerUtilization, SymbWorkerIdleNanos: symbDiag.WorkerIdleNanos,
-					SymbMVCCPointReads: symbDiag.MVCCPointReads, SymbMVCCVersionHits: symbDiag.MVCCVersionHits,
-					SymbMVCCBaseFallbacks: symbDiag.MVCCBaseFallbacks, SymbMVCCRangeReads: symbDiag.MVCCRangeReads,
-					SymbMVCCRangeOverlayKeys: symbDiag.MVCCRangeOverlayKeys, SymbMVCCPublishes: symbDiag.MVCCPublishes,
-					SymbMVCCPublishedKeys: symbDiag.MVCCPublishedKeys,
-					SymbPlanning:          symbPlan.Planning, SymbDependencyReasons: symbDiag.DependencyReasons, SymbDependencyPrimary: symbDiag.DependencyPrimary,
-					SymbCriticalPath: symbDiag.CriticalPath, SymbCriticalPathReasons: symbDiag.CriticalPathReasons, SymbCriticalPathCostByReason: symbDiag.CriticalPathCostByReason,
-					SymbDependencyProvenance: symbDiag.DependencyProvenance, SymbDependencyDecisions: symbDiag.DependencyDecisions,
-					SymbCriticalPathProvenance: symbDiag.CriticalPathProvenance, SymbCriticalPathDecisions: symbDiag.CriticalPathDecisions,
-					SymbCandidateHard: symbDiag.CandidateHard, SymbCandidateSoft: symbDiag.CandidateSoft, SymbCandidateLow: symbDiag.CandidateLow,
-					SymbOrderedHard: symbDiag.OrderedHard, SymbOrderedSoft: symbDiag.OrderedSoft,
-					SymbOracleConflictEdges: symbDiag.OracleConflictEdges, SymbOracleCriticalPathTx: symbDiag.OracleCriticalPathTx,
-					SymbOracleCriticalPathCost: symbDiag.OracleCriticalPathCost, SymbOracleDAGParallelism: symbDiag.OracleDAGParallelism,
-					SymbOracleCriticalPath: symbDiag.OracleCriticalPath, SymbSerializationGap: symbDiag.SerializationGap,
-					SymbPlanRequestBuildNanos: symbDiag.PlanRequestBuildNanos, SymbPlanRequestMarshalNanos: symbDiag.PlanRequestMarshalNanos,
-					SymbPlanCGORoundTripNanos: symbDiag.PlanCGORoundTripNanos, SymbPlanResponseUnmarshalNanos: symbDiag.PlanResponseUnmarshalNanos,
-					SymbPlanRustDecodeNanos: symbDiag.PlanRustDecodeNanos, SymbPlanResolveComponentsNanos: symbDiag.PlanResolveComponentsNanos,
-					SymbPlanCandidateGraphNanos: symbDiag.PlanCandidateGraphNanos, SymbPlanSchedulerNanos: symbDiag.PlanSchedulerNanos,
-					SymbPlanProjectionNanos: symbDiag.PlanProjectionNanos, SymbPlanFeedbackPairsNanos: symbDiag.PlanFeedbackPairsNanos,
-					SymbPlanFinalizeNanos: symbDiag.PlanFinalizeNanos, SymbPlanBridgeOtherNanos: symbDiag.PlanBridgeOtherNanos,
-				}
-				if symbRec.StrategyTotalNanos > 0 {
-					symbRec.MatchedSerialSpeedup = float64(symbRec.MatchedSerialNanos) / float64(symbRec.StrategyTotalNanos)
-				}
-				if e := json.NewEncoder(w).Encode(&symbRec); e != nil {
-					panic(e)
+					if e := commitFinalizeState(symb.app); e != nil {
+						panic(e)
+					}
+					symbEq := commitIDsEqual(serialCommitID, symb.app.LastCommitID())
+					if !symbEq {
+						panic(fmt.Sprintf("symbgraph-rust state mismatch sample=%d block=%d", sample, block.BlockNumber))
+					}
+					symbStats := symbRunner.LastStats()
+					symbDiag := symbRunner.LastDiagnostics()
+					symbPlan := symbRunner.LastPlan()
+					symbRec := Record{
+						SchemaVersion: 1, Dataset: *datasetLabel, Sample: sample, BlockNumber: block.BlockNumber,
+						Strategy: "cosmos-wasmd-symbgraph-rust", Workers: *workers, MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos,
+						StrategyTotalNanos: uint64(symbWall.Nanoseconds()), PreConsensusNanos: symbStats.PreConsensusNanos, PostConsensusNanos: symbStats.PostConsensusNanos, Transactions: len(block.Transactions), ExecutionAttempts: symbStats.Attempts,
+						Reexecutions: symbStats.Reexecutions, SerialEquivalent: symbEq, SerialReferenceScope: "historical-block-order", ComputeMetric: cal.Metric, ComputeScale: *scale,
+						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion,
+						BaselineScope: rustRunnerOptions.Scope(), BlockSTMPreEstimate: false, SpeculatedTransactions: symbStats.Speculated,
+						ReusedTransactions: symbStats.Reused, ValidationNanos: symbDiag.ValidationNanos, ReplayExecutionNanos: symbDiag.ReplayExecutionNanos,
+						SymbGraphVariant: symbDiag.Variant, SymbPlanNanos: symbDiag.PlanNanos, SymbPreexecutionNanos: symbDiag.PreexecutionNanos,
+						SymbBranchCreateNanos: symbDiag.BranchCreateNanos, SymbVisibilityNanos: symbDiag.VisibilityNanos,
+						SymbSpecExecutionNanos: symbDiag.SpecExecutionNanos, SymbDeltaCaptureNanos: symbDiag.DeltaCaptureNanos,
+						SymbMVCCPublishNanos: symbDiag.MVCCPublishNanos, SymbFeedbackBuildNanos: symbDiag.FeedbackBuildNanos,
+						SymbReconciliationNanos: symbDiag.ReconciliationNanos, SymbValidationNanos: symbDiag.ValidationNanos,
+						SymbReplayExecutionNanos: symbDiag.ReplayExecutionNanos, SymbRustFeedbackNanos: symbDiag.RustFeedbackNanos,
+						SymbDependencyEdges: symbDiag.DependencyEdges, SymbFeedbackPairs: symbDiag.FeedbackPairs,
+						SymbPhysicalCandidateEdges: symbDiag.PhysicalCandidateEdges, SymbLogicalCandidateEdges: symbDiag.LogicalCandidateEdges, SymbCompactCandidateGroups: symbDiag.CompactCandidateGroups,
+						SymbParentDependenciesBeforeReduction: symbDiag.ParentDependenciesBeforeReduction, SymbParentDependenciesElidedReduction: symbDiag.ParentDependenciesElidedReduction,
+						SymbInitialReady: symbDiag.InitialReady, SymbMaxReady: symbDiag.MaxReady, SymbAverageReady: symbDiag.AverageReady(),
+						SymbMaxActive: symbDiag.MaxActive, SymbCriticalPathTx: symbDiag.CriticalPathTx, SymbCriticalPathCost: symbDiag.CriticalPathCost,
+						SymbTotalEstimatedCost: symbDiag.TotalEstimatedCost, SymbDAGParallelism: symbDiag.DAGParallelism,
+						SymbWorkerUtilization: symbDiag.WorkerUtilization, SymbWorkerIdleNanos: symbDiag.WorkerIdleNanos,
+						SymbMVCCPointReads: symbDiag.MVCCPointReads, SymbMVCCVersionHits: symbDiag.MVCCVersionHits,
+						SymbMVCCBaseFallbacks: symbDiag.MVCCBaseFallbacks, SymbMVCCRangeReads: symbDiag.MVCCRangeReads,
+						SymbMVCCRangeOverlayKeys: symbDiag.MVCCRangeOverlayKeys, SymbMVCCPublishes: symbDiag.MVCCPublishes,
+						SymbMVCCPublishedKeys: symbDiag.MVCCPublishedKeys,
+						SymbPlanning:          symbPlan.Planning, SymbDependencyReasons: symbDiag.DependencyReasons, SymbDependencyPrimary: symbDiag.DependencyPrimary,
+						SymbCriticalPath: symbDiag.CriticalPath, SymbCriticalPathReasons: symbDiag.CriticalPathReasons, SymbCriticalPathCostByReason: symbDiag.CriticalPathCostByReason,
+						SymbDependencyProvenance: symbDiag.DependencyProvenance, SymbDependencyDecisions: symbDiag.DependencyDecisions,
+						SymbCriticalPathProvenance: symbDiag.CriticalPathProvenance, SymbCriticalPathDecisions: symbDiag.CriticalPathDecisions,
+						SymbCandidateHard: symbDiag.CandidateHard, SymbCandidateSoft: symbDiag.CandidateSoft, SymbCandidateLow: symbDiag.CandidateLow,
+						SymbOrderedHard: symbDiag.OrderedHard, SymbOrderedSoft: symbDiag.OrderedSoft,
+						SymbOracleConflictEdges: symbDiag.OracleConflictEdges, SymbOracleCriticalPathTx: symbDiag.OracleCriticalPathTx,
+						SymbOracleCriticalPathCost: symbDiag.OracleCriticalPathCost, SymbOracleDAGParallelism: symbDiag.OracleDAGParallelism,
+						SymbOracleCriticalPath: symbDiag.OracleCriticalPath, SymbSerializationGap: symbDiag.SerializationGap,
+						SymbPlanRequestBuildNanos: symbDiag.PlanRequestBuildNanos, SymbPlanRequestMarshalNanos: symbDiag.PlanRequestMarshalNanos,
+						SymbPlanCGORoundTripNanos: symbDiag.PlanCGORoundTripNanos, SymbPlanResponseUnmarshalNanos: symbDiag.PlanResponseUnmarshalNanos,
+						SymbPlanRustDecodeNanos: symbDiag.PlanRustDecodeNanos, SymbPlanResolveComponentsNanos: symbDiag.PlanResolveComponentsNanos,
+						SymbPlanCandidateGraphNanos: symbDiag.PlanCandidateGraphNanos, SymbPlanSchedulerNanos: symbDiag.PlanSchedulerNanos,
+						SymbPlanProjectionNanos: symbDiag.PlanProjectionNanos, SymbPlanFeedbackPairsNanos: symbDiag.PlanFeedbackPairsNanos,
+						SymbPlanFinalizeNanos: symbDiag.PlanFinalizeNanos, SymbPlanBridgeOtherNanos: symbDiag.PlanBridgeOtherNanos,
+					}
+					if symbRec.StrategyTotalNanos > 0 {
+						symbRec.MatchedSerialSpeedup = float64(symbRec.MatchedSerialNanos) / float64(symbRec.StrategyTotalNanos)
+					}
+					if e := json.NewEncoder(w).Encode(&symbRec); e != nil {
+						panic(e)
+					}
+
 				}
 
-				if !*rustACGOnly {
+				if runVegeta && !*rustACGOnly {
 					// Vegeta SpeculateMod + ParallelMod adaptation: pre-consensus
 					// execution discovers actual accesses and a hot-key proposal reorder;
 					// after consensus every transaction executes in Rule-2-compatible DAG
@@ -1767,7 +2126,7 @@ func main() {
 					if e != nil {
 						panic(e)
 					}
-					vegetaEq := digestApp(vegetaReference.app) == digestApp(vegeta.app)
+					vegetaEq := commitIDsEqual(vegetaReference.app.LastCommitID(), vegeta.app.LastCommitID())
 					if !vegetaEq {
 						panic(fmt.Sprintf("vegeta serialization mismatch sample=%d block=%d proposal=%v serialization=%v", sample, block.BlockNumber, vegetaRunner.LastProposalOrder(), vegetaRunner.LastSerializationOrder()))
 					}
@@ -1788,14 +2147,20 @@ func main() {
 					}
 				}
 
+				completed := blockOffset + 1
+				if planBlockCount >= 20 && (completed%10 == 0 || completed == planBlockCount) {
+					fmt.Fprintf(os.Stderr, "Wasmd campaign progress: sample=%d blocks=%d/%d source_block=%d elapsed=%s\n", sample, completed, planBlockCount, block.BlockNumber, time.Since(campaignStarted).Round(time.Second))
+				}
 			}
 			prepareStreamBlock := func(block ExecutionBlock) {
 				if !*streamPlan {
 					return
 				}
-				apps := []*benchApp{serial, stm, aria, symb, vegeta, ariaReference, vegetaReference}
-				if acgOracle != nil {
-					apps = append(apps, acgOracle)
+				apps := []*benchApp{serial}
+				for _, app := range []*benchApp{stm, aria, symb, vegeta, ariaReference, vegetaReference, acgOracle} {
+					if app != nil {
+						apps = append(apps, app)
+					}
 				}
 				for _, app := range apps {
 					if err := app.prepareBlockCalls(block); err != nil {
