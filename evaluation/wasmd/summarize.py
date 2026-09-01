@@ -97,7 +97,7 @@ def mean_ci95(values: list[float]) -> tuple[float, float]:
     return mean, critical * sd / math.sqrt(len(values))
 
 
-def validate_campaign_completeness(rows: list[dict[str, Any]]) -> None:
+def validate_campaign_completeness(rows: list[dict[str, Any]], strategy_order: list[str]) -> None:
     """Require an identical block/transaction campaign for every strategy.
 
     Serial is the canonical key set for each (workers, sample). Publication
@@ -108,7 +108,7 @@ def validate_campaign_completeness(rows: list[dict[str, Any]]) -> None:
     samples: set[tuple[int, int]] = set()
     for row in rows:
         strategy = row.get("strategy")
-        if strategy not in STRATEGY_ORDER:
+        if strategy not in strategy_order:
             continue
         workers = int(row["workers"])
         sample = int(row["sample"])
@@ -128,7 +128,7 @@ def validate_campaign_completeness(rows: list[dict[str, Any]]) -> None:
         serial = keyed.get(serial_key)
         if not serial:
             raise SystemExit(f"missing serial campaign workers={workers} sample={sample}")
-        for strategy in STRATEGY_ORDER:
+        for strategy in strategy_order:
             actual = keyed.get((strategy, workers, sample))
             if actual is None:
                 raise SystemExit(
@@ -298,14 +298,23 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         w.writerows(rows)
 
 
-def render(rows: list[dict[str, Any]], window_ns: int) -> str:
+def render(rows: list[dict[str, Any]], window_ns: int, rust_acg_only: bool = False, exact_oracle: bool = True) -> str:
+    consensus_source = (
+        "Rust-ACG in this rust-only diagnostic campaign"
+        if rust_acg_only
+        else "Rust-ACG and Vegeta in this campaign"
+    )
     lines = [
         "Wasmd controlled scheduler evaluation",
         "",
         f"Campaign consensus window: {window_ns / 1e6:.3f} ms",
-        "  C = maximum measured pre-consensus interval across Rust-ACG and Vegeta in this campaign.",
-        "  Throughput denominator: every strategy uses C + post; ACG-Oracle is evaluated under the same C but does not set it.",
-        "  ACG-Oracle is hindsight-only: exact source SLOAD/SSTORE accesses replace prediction; frozen native-translation RAW aliases compensate EVM->Wasmd semantic compression; the normal ACG MVCC+validation path is retained.",
+        f"  C = maximum measured pre-consensus interval across {consensus_source}.",
+        ("  Throughput denominator: every strategy uses C + post; ACG-Oracle is evaluated under the same C but does not set it."
+         if exact_oracle else "  Throughput denominator: every strategy uses C + post; this campaign has no hindsight exact-access oracle."),
+    ]
+    if exact_oracle:
+        lines.append("  ACG-Oracle is hindsight-only: exact source SLOAD/SSTORE accesses replace prediction; frozen native-translation RAW aliases compensate EVM->Wasmd semantic compression; the normal ACG MVCC+validation path is retained.")
+    lines += [
         "  post-x = matched serial execution / consensus-visible post phase. wall-x is bookkeeping only.",
         "",
         f"{'system':<12} {'w':>3} {'n':>3} {'tps':>10} {'tput-x':>7} {'post-ms':>10} {'post-x':>7} {'wall-x':>7} {'replay':>8} {'val-ms':>9} {'replay-ms':>10}",
@@ -317,40 +326,49 @@ def render(rows: list[dict[str, Any]], window_ns: int) -> str:
             f"{r['post_ms']:>10.1f} {r['post_x']:>7.2f} {r['wall_x']:>7.2f} "
             f"{r['replay_pct']:>7.2f}% {r['validation_ms']:>9.1f} {r['replay_execution_ms']:>10.1f}"
         )
-    by_worker = defaultdict(dict)
-    for r in rows:
-        by_worker[r["workers"]][r["strategy"]] = r
-    lines += [
-        "",
-        "Rust-ACG perfect-access headroom",
-        f"{'w':>3} {'oracle-tps':>11} {'acg-tps':>10} {'oracle/acg':>10} {'oracle-dag':>11} {'acg-dag':>9} {'native+':>8} {'missing':>8}",
-    ]
-    for workers in sorted(by_worker):
-        oracle = by_worker[workers].get("cosmos-wasmd-symbgraph-rust-exact-trace-oracle")
-        acg = by_worker[workers].get("cosmos-wasmd-symbgraph-rust")
-        if not oracle or not acg:
-            continue
-        acg_tps = float(acg.get("throughput_tps", 0.0))
-        oracle_tps = float(oracle.get("throughput_tps", 0.0))
-        gap = oracle_tps / acg_tps if acg_tps else 0.0
-        lines.append(
-            f"{workers:>3} {oracle_tps:>11.1f} {acg_tps:>10.1f} {gap:>10.3f} "
-            f"{oracle.get('structural_parallelism', 0.0):>11.2f} {acg.get('structural_parallelism', 0.0):>9.2f} "
-            f"{oracle.get('translation_compensation_edges', 0.0):>8.0f} {oracle.get('source_trace_missing', 0.0):>8.0f}"
-        )
+    if exact_oracle:
+        by_worker = defaultdict(dict)
+        for r in rows:
+            by_worker[r["workers"]][r["strategy"]] = r
+        lines += [
+            "",
+            "Rust-ACG perfect-access headroom",
+            f"{'w':>3} {'oracle-tps':>11} {'acg-tps':>10} {'oracle/acg':>10} {'oracle-dag':>11} {'acg-dag':>9} {'native+':>8} {'missing':>8}",
+        ]
+        for workers in sorted(by_worker):
+            oracle = by_worker[workers].get("cosmos-wasmd-symbgraph-rust-exact-trace-oracle")
+            acg = by_worker[workers].get("cosmos-wasmd-symbgraph-rust")
+            if not oracle or not acg:
+                continue
+            acg_tps = float(acg.get("throughput_tps", 0.0))
+            oracle_tps = float(oracle.get("throughput_tps", 0.0))
+            gap = oracle_tps / acg_tps if acg_tps else 0.0
+            lines.append(
+                f"{workers:>3} {oracle_tps:>11.1f} {acg_tps:>10.1f} {gap:>10.3f} "
+                f"{oracle.get('structural_parallelism', 0.0):>11.2f} {acg.get('structural_parallelism', 0.0):>9.2f} "
+                f"{oracle.get('translation_compensation_edges', 0.0):>8.0f} {oracle.get('source_trace_missing', 0.0):>8.0f}"
+            )
     lines += [
         "",
         "Reporting notes:",
         "  * Use throughput_tps as the primary fixed-consensus-window throughput metric.",
         "  * Report post-x beside throughput: it isolates consensus-visible validation/replay from serial execution.",
         "  * Report wall-x and pre-consensus percentiles to show the real resource cost and whether speculation fits C.",
-        "  * AriaFB ports the attached repository's exact Rule-2 abort condition and hot-chain DAG fallback to Wasmd.",
-        "  * Vegeta ports SpeculateMod/ParallelMod hot-key proposal reordering, Rule-2 replay batches, and access-change handling to Wasmd.",
-        "  * ACG-Oracle replaces symbolic prediction with the frozen exact Ethereum SLOAD/SSTORE trace and materializes its minimal RAW visibility dependencies. Because the native Wasmd translation can alias multiple source states or introduce read-modify-write behavior, the frozen native-translation access audit contributes only the additional RAW edges absent from the Ethereum relation; adapter bank/funds hard resources remain unchanged.",
-        "  * The native-translation compensation is frozen before the scheduler campaign and is not a per-run Wasmd access-discovery pass. It exists solely to make the perfect-source oracle faithful to the workload actually executed after EVM->CosmWasm translation.",
-        "  * ACG-Oracle is required to finish with zero replay and historical-order state equivalence; any replay aborts the campaign instead of weakening the claimed upper bound.",
-        "  * Missing exact source traces are conservative serial barriers and are reported in the headroom table; they make the oracle slightly pessimistic rather than optimistic.",
-        "  * oracle/acg in the headroom table is the throughput gain still available if current symbolic access extraction became perfect under the same validation design.",
+    ]
+    if not rust_acg_only:
+        lines += [
+            "  * AriaFB ports the attached repository's exact Rule-2 abort condition and completion-driven hot-chain DAG fallback to Wasmd (successors launch as soon as their last predecessor completes).",
+            "  * Vegeta ports SpeculateMod/ParallelMod hot-key proposal reordering, Rule-2 replay batches, and access-change handling to Wasmd.",
+        ]
+    if exact_oracle:
+        lines += [
+            "  * ACG-Oracle replaces symbolic prediction with the frozen exact Ethereum SLOAD/SSTORE trace and materializes its minimal RAW visibility dependencies. Because the native Wasmd translation can alias multiple source states or introduce read-modify-write behavior, the frozen native-translation access audit contributes only the additional RAW edges absent from the Ethereum relation; adapter bank/funds hard resources remain unchanged.",
+            "  * The native-translation compensation is frozen before the scheduler campaign and is not a per-run Wasmd access-discovery pass. It exists solely to make the perfect-source oracle faithful to the workload actually executed after EVM->CosmWasm translation.",
+            "  * ACG-Oracle is required to finish with zero replay and historical-order state equivalence; any replay aborts the campaign instead of weakening the claimed upper bound.",
+            "  * Missing exact source traces are conservative serial barriers and are reported in the headroom table; they make the oracle slightly pessimistic rather than optimistic.",
+            "  * oracle/acg in the headroom table is the throughput gain still available if current symbolic access extraction became perfect under the same validation design.",
+        ]
+    lines += [
         "  * serial_equivalent and matched_serial_nanos use each strategy's serial_reference_scope; historical_serial_nanos retains the common historical-order control.",
         "  * safety_replays are conservative Wasmd-only fallbacks for dynamic key/range changes absent from the Ethereum access model.",
     ]
@@ -361,17 +379,39 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--records", required=True, type=Path)
     ap.add_argument("--output-dir", required=True, type=Path)
+    ap.add_argument(
+        "--rust-acg-only",
+        action="store_true",
+        help="summarize the direct-serial + ACG-Oracle + Rust-ACG diagnostic subset",
+    )
+    ap.add_argument(
+        "--no-exact-oracle",
+        action="store_true",
+        help="summarize the deployable five-system campaign without ACG-Oracle (for large datasets without exact SLOAD/SSTORE traces)",
+    )
     args = ap.parse_args()
 
     rows = read_jsonl(args.records)
-    required = set(STRATEGY_ORDER)
+    if args.rust_acg_only and args.no_exact_oracle:
+        raise SystemExit("--rust-acg-only requires ACG-Oracle; do not combine with --no-exact-oracle")
+    if args.rust_acg_only:
+        strategy_order = [
+            "cosmos-wasmd-direct-serial",
+            "cosmos-wasmd-symbgraph-rust-exact-trace-oracle",
+            "cosmos-wasmd-symbgraph-rust",
+        ]
+    elif args.no_exact_oracle:
+        strategy_order = [s for s in STRATEGY_ORDER if s != "cosmos-wasmd-symbgraph-rust-exact-trace-oracle"]
+    else:
+        strategy_order = STRATEGY_ORDER
+    required = set(strategy_order)
     present = {r.get("strategy") for r in rows}
     missing = sorted(required - present)
     if missing:
         raise SystemExit(f"missing Wasmd strategy rows: {', '.join(missing)}")
     if not all(bool(r.get("serial_equivalent", False)) for r in rows if r.get("strategy") in required):
         raise SystemExit("one or more Wasmd records failed serial state equivalence")
-    validate_campaign_completeness(rows)
+    validate_campaign_completeness(rows, strategy_order)
 
     pre = [
         int(r.get("pre_consensus_nanos", 0))
@@ -389,16 +429,29 @@ def main() -> None:
     obj = {
         "schema_version": 1,
         "consensus_window_nanos": window_ns,
-        "consensus_window_definition": "max pre_consensus_nanos across Rust-ACG and Vegeta for the entire campaign; ACG-Oracle never sets C",
+        "consensus_window_definition": (
+            "max pre_consensus_nanos across Rust-ACG for the rust-only diagnostic campaign; ACG-Oracle never sets C"
+            if args.rust_acg_only
+            else "max pre_consensus_nanos across Rust-ACG and Vegeta for the entire campaign; ACG-Oracle never sets C"
+        ),
+        "exact_oracle_enabled": not args.no_exact_oracle,
         "throughput_definition": {
             "all_strategies": "transactions / (blocks * consensus_window + sum(post_consensus))",
-            "interpretation": "Rust-ACG and Vegeta determine the fixed consensus interval. ACG-Oracle is evaluated under that same C without changing it; Serial/BlockSTM/AriaFB wait for the same fixed interval before post-consensus execution. ACG-Oracle uses exact source accesses plus frozen translation-only RAW compensation, but the same ACG execution/validation design.",
+            "interpretation": (
+                "Rust-ACG determines the fixed consensus interval in rust-only diagnostics. ACG-Oracle is evaluated under that same C without changing it; Serial waits for the same fixed interval before post-consensus execution. ACG-Oracle uses exact source accesses plus frozen translation-only RAW compensation, but the same ACG execution/validation design."
+                if args.rust_acg_only
+                else (
+                    "Rust-ACG and Vegeta determine the fixed consensus interval. Serial/BlockSTM/AriaFB wait for the same fixed interval before post-consensus execution; this large-dataset campaign has no hindsight exact-access oracle."
+                    if args.no_exact_oracle
+                    else "Rust-ACG and Vegeta determine the fixed consensus interval. ACG-Oracle is evaluated under that same C without changing it; Serial/BlockSTM/AriaFB wait for the same fixed interval before post-consensus execution. ACG-Oracle uses exact source accesses plus frozen translation-only RAW compensation, but the same ACG execution/validation design."
+                )
+            ),
         },
         "rows": aggregated,
         "per_sample": per_sample,
     }
     (args.output_dir / "summary.json").write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
-    text = render(aggregated, window_ns)
+    text = render(aggregated, window_ns, args.rust_acg_only, not args.no_exact_oracle)
     (args.output_dir / "summary.txt").write_text(text, encoding="utf-8")
     print(text, end="")
 

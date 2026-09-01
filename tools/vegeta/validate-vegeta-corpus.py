@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a reconstructed Vegeta Ethereum corpus against the paper's published S3 aggregates."""
+"""Validate a reconstructed Vegeta Ethereum corpus against a published dataset range."""
 
 from __future__ import annotations
 
@@ -12,61 +12,78 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from vegeta_corpus import (  # noqa: E402
-    S3_END_BLOCK,
-    S3_CANONICAL_TRANSACTIONS,
-    S3_EXPECTED_BLOCKS,
-    S3_EXPECTED_LONGEST_CHAIN_SUM,
-    S3_EXPECTED_RATIO,
-    S3_EXPECTED_TRANSACTIONS,
-    S3_START_BLOCK,
+    VEGETA_DATASETS,
     WETH_MAINNET,
+    VegetaDatasetSpec,
     compute_metrics,
-    load_blocks,
+    dataset_by_tag,
+    iter_blocks,
     validate_shape,
 )
 
 
 def validate_metrics(
     metrics: dict,
+    dataset: VegetaDatasetSpec | None = None,
     require_paper_chain_match: bool = False,
     require_weth_hotspot: bool = False,
+    require_paper_tx_count: bool = False,
 ) -> tuple[list[str], list[str]]:
+    """Validate aggregate metrics.
+
+    ``dataset`` defaults to S3 for backward compatibility with the original S3-only validator.
+    A transaction count becomes a hard corpus-identity check only after this repository has frozen
+    an independent canonical reconstruction for that range. Otherwise the paper count remains a
+    provenance target unless ``require_paper_tx_count`` is explicitly requested.
+    """
+
+    spec = dataset or dataset_by_tag("S3")
     errors: list[str] = []
     warnings: list[str] = []
 
-    if metrics["blocks"] != S3_EXPECTED_BLOCKS:
-        errors.append(f"expected {S3_EXPECTED_BLOCKS} blocks, got {metrics['blocks']}")
-    if metrics["transactions"] != S3_CANONICAL_TRANSACTIONS:
-        errors.append(
-            "canonical Ethereum S3 range transaction count mismatch: "
-            f"expected {S3_CANONICAL_TRANSACTIONS}, got {metrics['transactions']}"
+    if metrics["blocks"] != spec.blocks:
+        errors.append(f"expected {spec.blocks} blocks, got {metrics['blocks']}")
+
+    if spec.canonical_transactions is not None:
+        if metrics["transactions"] != spec.canonical_transactions:
+            errors.append(
+                f"canonical Ethereum {spec.tag} range transaction count mismatch: "
+                f"expected {spec.canonical_transactions}, got {metrics['transactions']}"
+            )
+        if spec.canonical_transactions != spec.paper_transactions:
+            warnings.append(
+                "Vegeta paper metadata reports "
+                f"{spec.paper_transactions} transactions for blocks "
+                f"{spec.start_block}..{spec.end_block}; canonical Ethereum reconstruction "
+                f"of that exact range contains {spec.canonical_transactions}. "
+                "The canonical count is used for corpus identity; the paper count is retained "
+                "for provenance only."
+            )
+    elif metrics["transactions"] != spec.paper_transactions:
+        message = (
+            f"Vegeta paper reports {spec.paper_transactions} transactions for {spec.tag} blocks "
+            f"{spec.start_block}..{spec.end_block}, while this canonical RPC reconstruction "
+            f"contains {metrics['transactions']}. No independent canonical transaction-count "
+            "freeze exists for this range yet."
         )
-    if S3_CANONICAL_TRANSACTIONS != S3_EXPECTED_TRANSACTIONS:
-        warnings.append(
-            "Vegeta paper metadata reports "
-            f"{S3_EXPECTED_TRANSACTIONS} transactions for blocks "
-            f"{S3_START_BLOCK}..{S3_END_BLOCK}; canonical Ethereum reconstruction "
-            f"of that exact range contains {S3_CANONICAL_TRANSACTIONS}. "
-            "The canonical count is used for corpus identity; the paper count is retained "
-            "for provenance only."
-        )
+        if require_paper_tx_count:
+            errors.append(message)
+        else:
+            warnings.append(message)
 
     if require_paper_chain_match:
-        if metrics["longest_chain_sum"] != S3_EXPECTED_LONGEST_CHAIN_SUM:
+        if metrics["longest_chain_sum"] != spec.paper_longest_chain_sum:
             errors.append(
                 "storage-trace longest-chain sum does not match Vegeta paper: "
-                f"expected {S3_EXPECTED_LONGEST_CHAIN_SUM}, got {metrics['longest_chain_sum']}"
+                f"expected {spec.paper_longest_chain_sum}, got {metrics['longest_chain_sum']}"
             )
         if metrics["ratio"] is None or not math.isclose(
-            metrics["ratio"], S3_EXPECTED_RATIO, rel_tol=0.0, abs_tol=0.01
+            metrics["ratio"], spec.paper_ratio, rel_tol=0.0, abs_tol=0.01
         ):
             errors.append(
-                f"expected ratio {S3_EXPECTED_RATIO:.2f}, got {metrics['ratio']}"
+                f"expected ratio {spec.paper_ratio:.2f}, got {metrics['ratio']}"
             )
-    if (
-        require_weth_hotspot
-        and metrics["dominant_longest_chain_contract"] != WETH_MAINNET
-    ):
+    if require_weth_hotspot and metrics["dominant_longest_chain_contract"] != WETH_MAINNET:
         errors.append(
             "WETH does not dominate the summed per-block longest-chain contribution in this "
             "reconstructed corpus: "
@@ -80,9 +97,23 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("corpus", type=Path)
     parser.add_argument(
+        "--dataset-tag",
+        choices=sorted(VEGETA_DATASETS),
+        default="S3",
+        help="Vegeta NSDI'25 Table-2 dataset to validate (default: S3)",
+    )
+    parser.add_argument(
+        "--require-paper-tx-count",
+        action="store_true",
+        help=(
+            "for ranges without an independently frozen canonical count, require the reconstructed "
+            "transaction count to equal the paper metadata"
+        ),
+    )
+    parser.add_argument(
         "--require-paper-chain-match",
         action="store_true",
-        help="also require the storage-only tracer to reproduce Vegeta's unpublished chain metric exactly",
+        help="also require the storage tracer to reproduce Vegeta's unpublished chain metric exactly",
     )
     parser.add_argument(
         "--require-weth-hotspot",
@@ -92,35 +123,39 @@ def main() -> int:
     parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
 
-    blocks = load_blocks(args.corpus)
-    errors = validate_shape(blocks, S3_START_BLOCK, S3_END_BLOCK)
-    metrics = compute_metrics(blocks)
+    spec = dataset_by_tag(args.dataset_tag)
+    errors = validate_shape(iter_blocks(args.corpus), spec.start_block, spec.end_block)
+    metrics = compute_metrics(iter_blocks(args.corpus))
     metric_errors, warnings = validate_metrics(
         metrics,
+        dataset=spec,
         require_paper_chain_match=args.require_paper_chain_match,
         require_weth_hotspot=args.require_weth_hotspot,
+        require_paper_tx_count=args.require_paper_tx_count,
     )
     errors.extend(metric_errors)
 
     report = {
+        "dataset": spec.tag,
         "canonical_reconstruction": {
-            "block_range": [S3_START_BLOCK, S3_END_BLOCK],
-            "blocks": S3_EXPECTED_BLOCKS,
-            "transactions": S3_CANONICAL_TRANSACTIONS,
+            "block_range": [spec.start_block, spec.end_block],
+            "blocks": spec.blocks,
+            "transactions": spec.canonical_transactions,
         },
         "paper": {
-            "blocks": S3_EXPECTED_BLOCKS,
-            "transactions": S3_EXPECTED_TRANSACTIONS,
-            "longest_chain_sum": S3_EXPECTED_LONGEST_CHAIN_SUM,
-            "ratio": S3_EXPECTED_RATIO,
+            "blocks": spec.blocks,
+            "transactions": spec.paper_transactions,
+            "longest_chain_sum": spec.paper_longest_chain_sum,
+            "ratio": spec.paper_ratio,
             "weth_hotspot_reported": True,
         },
         "observed": metrics,
         "instrumentation_note": (
-            "Block identity and transaction count are validated against the canonical Ethereum "
-            "mainnet reconstruction of the stated S3 range. Vegeta does not publish its exact "
-            "internal read/write corpus, so longest-chain/WETH checks remain optional "
-            "instrumentation-equivalence diagnostics."
+            "Block identity and transaction order are validated against the stated Ethereum "
+            "mainnet range. Vegeta does not publish its exact internal read/write corpus, so "
+            "longest-chain/WETH checks remain optional instrumentation-equivalence diagnostics. "
+            "A paper transaction count is a hard identity check only when an independent canonical "
+            "count has been frozen for that range or --require-paper-tx-count is supplied."
         ),
         "warnings": warnings,
         "errors": errors,

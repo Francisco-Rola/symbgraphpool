@@ -1413,48 +1413,275 @@ func ariaFallbackEdges(fallback []int, trackers []*accessTracker) map[int]map[in
 	for i := 1; i < len(chain); i++ {
 		addOrderEdge(edges, chain[i-1], chain[i])
 	}
+
+	// Upstream applies the hot-chain reversal after BuildDAG has already
+	// transitively reduced the historical conflict graph. Reversing one of those
+	// direct edges can therefore destroy the only path that ordered a different
+	// (transitively omitted) conflicting pair. The Ethereum implementation does
+	// not validate the resulting partial order; on Wasmd that can make two real
+	// conflicts execute as if independent and produce a state with no matching
+	// serial history.
+	//
+	// Preserve replayAriaP's intended priority while restoring conflict
+	// completeness. Its transformed edges all agree with the deterministic order
+	// "hot chain first, then remaining fallback transactions", so adding every
+	// missing conflict in that same direction cannot introduce a cycle and does
+	// not add serialization between non-conflicting transactions. Transitive
+	// edges may be redundant, but they do not reduce exploitable parallelism.
+	priority := make([]int, 0, len(fallback))
+	priority = append(priority, chain...)
+	for _, idx := range fallback {
+		if _, hot := inChain[idx]; !hot {
+			priority = append(priority, idx)
+		}
+	}
+	for laterPos := 1; laterPos < len(priority); laterPos++ {
+		later := priority[laterPos]
+		for earlierPos := 0; earlierPos < laterPos; earlierPos++ {
+			earlier := priority[earlierPos]
+			if dependencyBetween(trackers[earlier], trackers[later]) != 0 {
+				addOrderEdge(edges, earlier, later)
+			}
+		}
+	}
 	return edges
 }
 
-func nextDAGWave(nodes []int, completed map[int]struct{}, edges map[int]map[int]struct{}) []int {
-	incoming := make(map[int]int, len(nodes))
-	for _, node := range nodes {
-		if _, done := completed[node]; !done {
-			incoming[node] = 0
-		}
-	}
-	for from, tos := range edges {
-		if _, fromDone := completed[from]; fromDone {
+// ariaReleaseSuccessors applies replayAriaP's shrinkDag(done)+popNextTxBatch
+// transition to the forward-edge representation used by this port. A successor
+// is returned the instant its last predecessor completes; callers do not wait
+// for unrelated transactions from the same previous ready set.
+func ariaReleaseSuccessors(done int, indegree map[int]int, edges map[int]map[int]struct{}) []int {
+	released := make([]int, 0)
+	for to := range edges[done] {
+		degree, ok := indegree[to]
+		if !ok || degree <= 0 {
 			continue
 		}
-		if _, active := incoming[from]; !active {
+		degree--
+		indegree[to] = degree
+		if degree == 0 {
+			released = append(released, to)
+		}
+	}
+	sort.Ints(released)
+	return released
+}
+
+type ariaFallbackJob struct {
+	index  int
+	branch *trackingMultiStore
+}
+
+// executeAriaFallbackReadyDAG mirrors replayAriaP's completion-driven scheduler:
+// transactions become runnable immediately when their last direct predecessor
+// finishes, rather than waiting for an entire topological level. The hot chain
+// is given dispatch priority, preserving replayAriaP's dedicated serial-chain
+// continuity while keeping the benchmark's total worker budget comparable to
+// the other strategies (the port does not grant AriaFB an uncounted extra core).
+//
+// The canonical Wasmd parent is immutable during this speculative fallback. A
+// newly ready transaction materializes the already-completed deltas of its DAG
+// ancestors into a private branch before execution. This provides the same
+// predecessor visibility without concurrently mutating a shared CacheMultiStore.
+// If a transaction's concrete access footprint differs from the initial Aria
+// batch, the speculative fallback is discarded and the caller serially replays
+// the subset as a conservative Wasmd-only safety extension.
+func executeAriaFallbackReadyDAG(
+	ctx context.Context,
+	workers int,
+	ms storetypes.MultiStore,
+	txs [][]byte,
+	nodes []int,
+	edges map[int]map[int]struct{},
+	hotChain []int,
+	expected []*accessTracker,
+	deliverTx sdk.DeliverTxFunc,
+) (map[int]speculativeResult, []int, uint64, uint64, bool, error) {
+	order, err := topologicalOrder(nodes, edges)
+	if err != nil {
+		return nil, nil, 0, 0, false, err
+	}
+	if len(nodes) == 0 {
+		return map[int]speculativeResult{}, order, 0, 0, false, nil
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(nodes) {
+		workers = len(nodes)
+	}
+
+	inSet := make(map[int]struct{}, len(nodes))
+	indegree := make(map[int]int, len(nodes))
+	preds := make(map[int][]int, len(nodes))
+	for _, node := range nodes {
+		inSet[node] = struct{}{}
+		indegree[node] = 0
+	}
+	for from, tos := range edges {
+		if _, ok := inSet[from]; !ok {
 			continue
 		}
 		for to := range tos {
-			if _, active := incoming[to]; active {
-				incoming[to]++
+			if _, ok := inSet[to]; !ok {
+				continue
+			}
+			indegree[to]++
+			preds[to] = append(preds[to], from)
+		}
+	}
+	orderPos := make(map[int]int, len(order))
+	for pos, node := range order {
+		orderPos[node] = pos
+	}
+	ancestors := make(map[int][]int, len(nodes))
+	ancestorSets := make(map[int]map[int]struct{}, len(nodes))
+	for _, node := range order {
+		set := make(map[int]struct{})
+		for _, pred := range preds[node] {
+			set[pred] = struct{}{}
+			for ancestor := range ancestorSets[pred] {
+				set[ancestor] = struct{}{}
 			}
 		}
-	}
-	wave := make([]int, 0)
-	for node, degree := range incoming {
-		if degree == 0 {
-			wave = append(wave, node)
+		ancestorSets[node] = set
+		list := make([]int, 0, len(set))
+		for ancestor := range set {
+			list = append(list, ancestor)
 		}
+		sort.Slice(list, func(i, j int) bool { return orderPos[list[i]] < orderPos[list[j]] })
+		ancestors[node] = list
 	}
-	sort.Ints(wave)
-	return wave
-}
 
-func trackersConflict(indices []int, trackers []*accessTracker) bool {
-	for i := 0; i < len(indices); i++ {
-		for j := i + 1; j < len(indices); j++ {
-			if dependencyBetween(trackers[indices[i]], trackers[indices[j]]) != 0 {
-				return true
-			}
+	hot := make(map[int]struct{}, len(hotChain))
+	for _, idx := range hotChain {
+		hot[idx] = struct{}{}
+	}
+	lessReady := func(a, b int) bool {
+		_, ah := hot[a]
+		_, bh := hot[b]
+		if ah != bh {
+			return ah
+		}
+		return a < b
+	}
+	ready := make([]int, 0, len(nodes))
+	for _, node := range nodes {
+		if indegree[node] == 0 {
+			ready = append(ready, node)
 		}
 	}
-	return false
+	sort.Slice(ready, func(i, j int) bool { return lessReady(ready[i], ready[j]) })
+
+	jobs := make(chan ariaFallbackJob, workers)
+	done := make(chan speculativeResult, len(nodes))
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				select {
+				case <-ctx.Done():
+					done <- speculativeResult{index: job.index, store: job.branch, result: &abci.ExecTxResult{Code: 1, Log: ctx.Err().Error()}}
+					continue
+				default:
+				}
+				res := deliverTx(txs[job.index], nil, job.branch, job.index, map[string]any{})
+				done <- speculativeResult{index: job.index, store: job.branch, result: res, attempt: 1}
+			}
+		}()
+	}
+
+	results := make(map[int]speculativeResult, len(nodes))
+	deltas := make(map[int]rustTxDelta, len(nodes))
+	active := 0
+	finished := 0
+	var attempts uint64
+	var validationNanos uint64
+	unstable := false
+
+	drainAndClose := func() {
+		for active > 0 {
+			<-done
+			active--
+			attempts++
+		}
+		close(jobs)
+		wg.Wait()
+	}
+	dispatch := func() error {
+		for !unstable && active < workers && len(ready) > 0 {
+			idx := ready[0]
+			ready = ready[1:]
+			branch := newTrackingMultiStore(ms)
+			for _, ancestor := range ancestors[idx] {
+				delta, ok := deltas[ancestor]
+				if !ok {
+					return fmt.Errorf("aria-fb ready tx=%d missing completed ancestor delta tx=%d", idx, ancestor)
+				}
+				if err := applyRustDelta(branch.cacheMultiStoreDelegate.CacheMultiStore, delta); err != nil {
+					return fmt.Errorf("aria-fb materialize predecessor tx=%d into tx=%d: %w", ancestor, idx, err)
+				}
+			}
+			jobs <- ariaFallbackJob{index: idx, branch: branch}
+			active++
+		}
+		return nil
+	}
+
+	for finished < len(nodes) {
+		if err := dispatch(); err != nil {
+			drainAndClose()
+			return nil, nil, attempts, validationNanos, false, err
+		}
+		if active == 0 {
+			close(jobs)
+			wg.Wait()
+			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb fallback DAG stalled finished=%d total=%d", finished, len(nodes))
+		}
+		result := <-done
+		active--
+		attempts++
+		if result.result != nil && result.result.Code != 0 {
+			drainAndClose()
+			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb fallback tx %d failed: %s", result.index, result.result.Log)
+		}
+		if result.store == nil || result.index < 0 || result.index >= len(expected) {
+			drainAndClose()
+			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb invalid fallback result tx=%d", result.index)
+		}
+		delta, deltaErr := captureRustDelta(result.store)
+		if deltaErr != nil {
+			drainAndClose()
+			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb capture fallback tx %d delta: %w", result.index, deltaErr)
+		}
+		validationStarted := time.Now()
+		if !accessTrackersEqual(expected[result.index], result.store.tracker) {
+			unstable = true
+		}
+		validationNanos += uint64(time.Since(validationStarted).Nanoseconds())
+		if unstable {
+			drainAndClose()
+			return nil, order, attempts, validationNanos, true, nil
+		}
+
+		results[result.index] = result
+		deltas[result.index] = delta
+		finished++
+		indegree[result.index] = -1
+		ready = append(ready, ariaReleaseSuccessors(result.index, indegree, edges)...)
+		sort.Slice(ready, func(i, j int) bool { return lessReady(ready[i], ready[j]) })
+	}
+	close(jobs)
+	wg.Wait()
+	for _, idx := range order {
+		if err := applyRustDelta(ms, deltas[idx]); err != nil {
+			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb commit fallback tx %d delta: %w", idx, err)
+		}
+	}
+	return results, order, attempts, validationNanos, false, nil
 }
 
 // AriaFBRunner adapts the attached repository's AriaFB mechanism to Wasmd:
@@ -1528,55 +1755,40 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 	if len(fallback) > 0 {
 		replayStarted := time.Now()
 		edges := ariaFallbackEdges(fallback, trackers)
-		completed := make(map[int]struct{}, len(fallback))
-		for len(completed) < len(fallback) {
-			wave := nextDAGWave(fallback, completed, edges)
-			if len(wave) == 0 {
-				return nil, fmt.Errorf("aria-fb fallback DAG stalled completed=%d total=%d", len(completed), len(fallback))
-			}
-			waveSpec := speculateIndices(ctx, r.workers, ms, txs, wave, deliverTx)
-			stats.Attempts += uint64(len(wave))
-			waveTrackers := make([]*accessTracker, len(txs))
-			for _, idx := range wave {
-				result, ok := waveSpec[idx]
-				if !ok || result.store == nil {
-					return nil, fmt.Errorf("aria-fb missing fallback execution tx=%d", idx)
+		hotChain := hottestAccessChain(fallback, trackers)
+		fallbackSpec, fallbackOrder, attempts, validationNanos, unstable, err := executeAriaFallbackReadyDAG(
+			ctx, r.workers, ms, txs, fallback, edges, hotChain, trackers, deliverTx,
+		)
+		if err != nil {
+			return nil, err
+		}
+		stats.Attempts += attempts
+		stats.ValidationNanos += validationNanos
+		if unstable {
+			// The released Ethereum implementation assumes replay accesses match
+			// the initial Aria batch. Wasmd translations can change key/range sets;
+			// discard the staged fallback cache and deterministically serialize the
+			// whole fallback subset rather than letting that adaptation weaken safety.
+			for _, idx := range fallbackOrder {
+				final := replayOne(ms, txs[idx], idx, deliverTx)
+				stats.Attempts++
+				stats.SafetyReplays++
+				if final.result != nil && final.result.Code != 0 {
+					return nil, fmt.Errorf("aria-fb safety replay tx %d failed: %s", idx, final.result.Log)
 				}
-				waveTrackers[idx] = result.store.tracker
+				final.store.Write()
+				results[idx] = final.result
 			}
-			validationStarted := time.Now()
-			changedConflict := trackersConflict(wave, waveTrackers)
-			stats.ValidationNanos += uint64(time.Since(validationStarted).Nanoseconds())
-			if changedConflict {
-				// The pre-execution DAG missed a conflict because a Wasmd execution
-				// changed its concrete access set. Re-run this wave serially from the
-				// current canonical state rather than committing a non-serializable batch.
-				for _, idx := range wave {
-					final := replayOne(ms, txs[idx], idx, deliverTx)
-					stats.Attempts++
-					stats.SafetyReplays++
-					if final.result != nil && final.result.Code != 0 {
-						return nil, fmt.Errorf("aria-fb safety replay tx %d failed: %s", idx, final.result.Log)
-					}
-					final.store.Write()
-					results[idx] = final.result
-					r.serializationOrder = append(r.serializationOrder, idx)
+		} else {
+			for _, idx := range fallbackOrder {
+				result, ok := fallbackSpec[idx]
+				if !ok || result.result == nil {
+					return nil, fmt.Errorf("aria-fb missing committed fallback result tx=%d", idx)
 				}
-			} else {
-				for _, idx := range wave {
-					result := waveSpec[idx]
-					if result.result != nil && result.result.Code != 0 {
-						return nil, fmt.Errorf("aria-fb fallback tx %d failed: %s", idx, result.result.Log)
-					}
-					result.store.Write()
-					results[idx] = result.result
-					r.serializationOrder = append(r.serializationOrder, idx)
-				}
-			}
-			for _, idx := range wave {
-				completed[idx] = struct{}{}
+				results[idx] = result.result
 			}
 		}
+		r.serializationOrder = append(r.serializationOrder, fallbackOrder...)
 		stats.ReplayExecutionNanos = uint64(time.Since(replayStarted).Nanoseconds())
 	}
 	stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,6 +18,7 @@ sys.path.insert(0, str(VEGETA_DIR))
 from vegeta_corpus import (  # noqa: E402
     WETH_MAINNET,
     compute_metrics,
+    dataset_by_tag,
     storage_contract,
     validate_shape,
 )
@@ -41,6 +44,7 @@ final_map_builder = load_script("finalize-native-s3-map.py")
 native_impl_validator = load_script("validate-native-s3-implementation.py")
 native_execution_preparer = load_script("prepare-native-s3-execution.py")
 native_fidelity = load_script("measure-native-s3-fidelity.py")
+s1_family_planner = load_script("plan-vegeta-s1-family-expansion.py")
 
 
 class VegetaCorpusTests(unittest.TestCase):
@@ -79,6 +83,37 @@ class VegetaCorpusTests(unittest.TestCase):
         self.assertEqual(metrics["dominant_longest_chain_contract"], WETH_MAINNET)
         self.assertEqual(metrics["weth_longest_chain_contribution"], 5)
 
+
+    def test_rpc_client_retries_truncated_json_response(self):
+        truncated = io.BytesIO(b'{"jsonrpc":"2.0","id":1,"result":"unterminated')
+        complete = io.BytesIO(b'{"jsonrpc":"2.0","id":2,"result":{"ok":true}}')
+        client = characterizer.RpcClient("https://example.invalid", retries=1, backoff=0)
+        with mock.patch.object(characterizer.urllib.request, "urlopen", side_effect=[truncated, complete]) as urlopen:
+            self.assertEqual(client.call("debug_traceBlockByNumber", ["0x1", {}]), {"ok": True})
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_s1_spec_matches_vegeta_table2(self):
+        s1 = dataset_by_tag("S1")
+        self.assertEqual((s1.start_block, s1.end_block), (16_774_645, 16_779_644))
+        self.assertEqual(s1.blocks, 5_000)
+        self.assertEqual(s1.paper_transactions, 739_863)
+        self.assertEqual(s1.paper_longest_chain_sum, 88_136)
+        self.assertAlmostEqual(s1.paper_ratio, 8.39)
+
+    def test_metrics_accept_streaming_iterable(self):
+        blocks = iter([
+            {
+                "block_number": 1,
+                "transactions": [
+                    {"tx_index": 0, "reads": [], "writes": []},
+                    {"tx_index": 1, "reads": [], "writes": []},
+                ],
+            }
+        ])
+        metrics = compute_metrics(blocks)
+        self.assertEqual(metrics["blocks"], 1)
+        self.assertEqual(metrics["transactions"], 2)
+
     def test_shape_rejects_non_contiguous_or_reordered_transactions(self):
         blocks = [
             {
@@ -113,6 +148,25 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(any("15129" in warning for warning in warnings))
         self.assertTrue(any("13783" in warning for warning in warnings))
+
+
+    def test_s1_paper_tx_count_is_provenance_until_canonical_freeze(self):
+        spec = dataset_by_tag("S1")
+        metrics = {
+            "blocks": 5_000,
+            "transactions": 739_862,
+            "longest_chain_sum": 88_136,
+            "ratio": 8.39,
+            "dominant_longest_chain_contract": WETH_MAINNET,
+        }
+        errors, warnings = validator.validate_metrics(metrics, dataset=spec)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("739863" in warning for warning in warnings))
+
+        errors, _ = validator.validate_metrics(
+            metrics, dataset=spec, require_paper_tx_count=True
+        )
+        self.assertTrue(any("739863" in error for error in errors))
 
     def test_paper_transaction_count_is_not_used_as_canonical_identity(self):
         metrics = {
@@ -1990,6 +2044,81 @@ class NativeS3ExecutionPreparationTests(unittest.TestCase):
         self.assertEqual(a["summary"]["false_positive_pair_key_incidences"], 2)
         self.assertAlmostEqual(sum(x["pair_credit"] for x in a["false_positive"]["by_family"]), 1.0)
         self.assertAlmostEqual(sum(x["pair_credit"] for x in a["false_positive"]["top_concrete_keys"]), 1.0)
+
+
+
+class S1FamilyExpansionPlannerTests(unittest.TestCase):
+    def test_greedy_cluster_gain_is_overlap_aware(self):
+        ranked, covered = s1_family_planner.greedy_clusters(
+            {"a": {1, 2, 3}, "b": {3, 4}},
+            {1},
+            5,
+            0.8,
+        )
+        self.assertEqual([row["cluster_id"] for row in ranked], ["a", "b"])
+        self.assertEqual([row["incremental_unique_conflict_pairs"] for row in ranked], [2, 1])
+        self.assertEqual(covered, {1, 2, 3, 4})
+
+    def test_proxy_owners_with_same_effective_runtime_cluster_together(self):
+        owner_a = "0x" + "aa" * 20
+        owner_b = "0x" + "bb" * 20
+        impl = "0x" + "cc" * 20
+        owners = {
+            owner_a: s1_family_planner.OwnerFeatures(owner_a, 10, 20),
+            owner_b: s1_family_planner.OwnerFeatures(owner_b, 8, 12),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            trace = {
+                "transactions": [
+                    {"tx_hash": "0x1", "result": {
+                        "type": "CALL", "to": owner_a, "input": "0x12345678",
+                        "calls": [{"type": "DELEGATECALL", "to": impl, "input": "0x42842e0e"}],
+                    }},
+                    {"tx_hash": "0x2", "result": {
+                        "type": "CALL", "to": owner_b, "input": "0x87654321",
+                        "calls": [{"type": "DELEGATECALL", "to": impl, "input": "0x42842e0e"}],
+                    }},
+                ]
+            }
+            (cache / "1.json").write_text(json.dumps(trace), encoding="utf-8")
+            s1_family_planner.scan_call_cache(cache, owners)
+        clusters, owner_to_cluster = s1_family_planner.build_clusters(
+            owners, {impl: {"code": "0x60016000"}}
+        )
+        self.assertEqual(owner_to_cluster[owner_a], owner_to_cluster[owner_b])
+        cluster = clusters[owner_to_cluster[owner_a]]
+        self.assertEqual(set(cluster["owners"]), {owner_a, owner_b})
+        self.assertEqual(cluster["delegate_target_counts"][impl], 2)
+
+    def test_exact_candidate_pairs_separate_mapped_and_unmapped_clusters(self):
+        mapped = "11" * 20
+        candidate = "22" * 20
+        mapped_key = f"evm/{mapped}/" + "01" * 32
+        candidate_key = f"evm/{candidate}/" + "02" * 32
+        block = {
+            "block_number": 1,
+            "transactions": [
+                {"reads": [], "writes": [candidate_key]},
+                {"reads": [candidate_key], "writes": [mapped_key]},
+                {"reads": [mapped_key], "writes": []},
+            ],
+        }
+
+        class Resolver:
+            def native_family_for_storage_context(self, address):
+                return ("mapped", "cw20-base") if address == "0x" + mapped else (None, None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "corpus.jsonl"
+            corpus.write_text(json.dumps(block) + "\n", encoding="utf-8")
+            total, mapped_ids, cluster_ids, owner_ids = s1_family_planner.exact_candidate_pair_sets(
+                corpus, Resolver(), {"0x" + candidate: "candidate-cluster"}
+            )
+        self.assertEqual(total, 2)
+        self.assertEqual(len(mapped_ids), 1)
+        self.assertEqual(len(cluster_ids["candidate-cluster"]), 1)
+        self.assertEqual(len(owner_ids["0x" + candidate]), 1)
 
 
 

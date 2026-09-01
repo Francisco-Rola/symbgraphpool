@@ -38,12 +38,9 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from vegeta_corpus import (  # noqa: E402
     SCHEMA_VERSION,
     S3_END_BLOCK,
-    S3_EXPECTED_BLOCKS,
-    S3_EXPECTED_LONGEST_CHAIN_SUM,
-    S3_EXPECTED_RATIO,
-    S3_EXPECTED_TRANSACTIONS,
     S3_START_BLOCK,
     compute_metrics,
+    dataset_for_range,
     write_jsonl,
 )
 
@@ -724,24 +721,27 @@ def main() -> int:
         temp.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
         temp.replace(output)
 
-    blocks = [
-        json.loads((blocks_dir / f"{number}.json").read_text(encoding="utf-8"))
-        for number in range(args.start_block, args.end_block + 1)
-    ]
+    def extracted_blocks():
+        for number in range(args.start_block, args.end_block + 1):
+            yield json.loads(
+                (blocks_dir / f"{number}.json").read_text(encoding="utf-8")
+            )
+
+    # S1 contains roughly three quarters of a million transactions. Assemble and
+    # characterize the corpus as streams rather than retaining all 5,000 blocks and
+    # their access sets in memory at once. Two passes over local block checkpoints are
+    # cheap compared with RPC tracing and keep peak memory bounded.
     corpus_path = args.output_dir / "corpus.jsonl"
-    write_jsonl(corpus_path, blocks)
-    metrics = compute_metrics(blocks)
+    write_jsonl(corpus_path, extracted_blocks())
+    metrics = compute_metrics(extracted_blocks())
     access_semantics, extractor, compute_proxy = manifest_trace_metadata(args.trace_mode)
+    dataset_spec = dataset_for_range(args.start_block, args.end_block)
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "dataset": "vegeta-s3"
-        if (args.start_block, args.end_block) == (S3_START_BLOCK, S3_END_BLOCK)
-        else "vegeta-custom",
+        "dataset": f"vegeta-{dataset_spec.tag.lower()}" if dataset_spec else "vegeta-custom",
         "source": {
             "paper": "Vegeta: Enabling Parallel Smart Contract Execution in Leaderless Blockchains, NSDI 2025",
-            "paper_dataset_tag": "S3"
-            if (args.start_block, args.end_block) == (S3_START_BLOCK, S3_END_BLOCK)
-            else None,
+            "paper_dataset_tag": dataset_spec.tag if dataset_spec else None,
             "block_range": [args.start_block, args.end_block],
         },
         "trace_mode": args.trace_mode,
@@ -789,12 +789,16 @@ def main() -> int:
             if fallback_provenance
             else None
         ),
-        "paper_targets": {
-            "blocks": S3_EXPECTED_BLOCKS,
-            "transactions": S3_EXPECTED_TRANSACTIONS,
-            "longest_chain_sum": S3_EXPECTED_LONGEST_CHAIN_SUM,
-            "ratio": S3_EXPECTED_RATIO,
-        },
+        "paper_targets": (
+            {
+                "blocks": dataset_spec.blocks,
+                "transactions": dataset_spec.paper_transactions,
+                "longest_chain_sum": dataset_spec.paper_longest_chain_sum,
+                "ratio": dataset_spec.paper_ratio,
+            }
+            if dataset_spec
+            else None
+        ),
         "observed": metrics,
         "corpus": "corpus.jsonl",
     }

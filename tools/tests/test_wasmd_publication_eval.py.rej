@@ -1,0 +1,35 @@
+--- tools/tests/test_wasmd_publication_eval.py	2026-08-30 16:19:31.000000000 +0000
++++ tools/tests/test_wasmd_publication_eval.py	2026-08-31 00:42:45.380622844 +0000
+@@ -143,6 +143,32 @@
+             self.assertNotEqual(proc.returncode, 0)
+             self.assertIn("incomplete/mismatched Wasmd campaign", proc.stderr + proc.stdout)
+ 
++    def test_no_exact_oracle_summary_accepts_five_system_campaign(self):
++        strategies = [
++            "cosmos-wasmd-direct-serial", "cosmos-wasmd-block-stm",
++            "cosmos-wasmd-aria-fb", "cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust",
++        ]
++        with tempfile.TemporaryDirectory() as td:
++            td = Path(td); records = td / "records.jsonl"
++            rows = []
++            for strategy in strategies:
++                for block in range(2):
++                    pre = 25 if strategy in {"cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust"} else 0
++                    rows.append({
++                        "strategy": strategy, "workers": 2, "sample": 0, "block_number": block,
++                        "transactions": 10, "matched_serial_nanos": 100, "strategy_total_nanos": 100,
++                        "pre_consensus_nanos": pre, "post_consensus_nanos": 75 if pre else 100,
++                        "serial_equivalent": True,
++                    })
++            records.write_text("".join(json.dumps(r)+"\n" for r in rows))
++            out = td / "out"
++            subprocess.run([sys.executable, str(SUMMARIZER), "--records", str(records), "--output-dir", str(out), "--no-exact-oracle"], check=True)
++            obj = json.loads((out / "summary.json").read_text())
++            self.assertFalse(obj["exact_oracle_enabled"])
++            self.assertEqual(len(obj["rows"]), 5)
++            self.assertNotIn("ACG-Oracle", (out / "summary.txt").read_text())
++            self.assertIn("no hindsight exact-access oracle", obj["throughput_definition"]["interpretation"])
++
+     def test_rust_acg_only_summary_accepts_diagnostic_subset(self):
+         strategies = [
+             "cosmos-wasmd-direct-serial",

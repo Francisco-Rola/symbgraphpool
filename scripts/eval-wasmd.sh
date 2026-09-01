@@ -59,19 +59,39 @@ GO_TOOLCHAIN="${EVAL_WASMD_GO_TOOLCHAIN:-auto}"
 BASE_TOTAL_MS="${EVAL_WASMD_COMPUTE_BASE_TOTAL_MS:-1000}"
 COMPUTE_SCALE="${EVAL_WASMD_COMPUTE_SCALE:-4}"
 ALLOWED_MISSING_SOURCE="${EVAL_WASMD_ALLOWED_MISSING_SOURCE:-2}"
+EXACT_ORACLE="${EVAL_WASMD_EXACT_ORACLE:-1}"
+STREAM_PLAN="${EVAL_WASMD_STREAM_PLAN:-0}"
+DATASET_LABEL="${EVAL_WASMD_DATASET:-vegeta-s3-wasmd-blockstm}"
+MAX_BLOCKS="${EVAL_WASMD_MAX_BLOCKS:-0}"
 EXEC_DIR="${EVAL_WASMD_EXEC_DIR:-benchmarks/corpora/vegeta-ethereum/s3/native-execution}"
 TRACE_DIR="${EVAL_WASMD_TRACE_DIR:-benchmarks/corpora/vegeta-ethereum/s3-exact-sload-sstore/tx-traces}"
 NATIVE_ACCESSES="${EVAL_WASMD_EXACT_NATIVE_ACCESSES:-$EXEC_DIR/native-accesses.jsonl}"
 SYMBOLIC_DIR="${EVAL_WASMD_SYMBOLIC_DIR:-benchmarks/symbolic/native-s3}"
 OUT_DIR="${EVAL_WASMD_OUTPUT_DIR:-benchmark-results/wasmd-${MODE}}"
+RUST_ACG_ONLY="${VEGETA_S3_RUST_ACG_ONLY:-0}"
 
 MANIFEST="$EXEC_DIR/execution-manifest.json"
 PLAN="$EXEC_DIR/execution-plan.jsonl"
-for p in "$MANIFEST" "$PLAN" "$NATIVE_ACCESSES"; do
-  [[ -s "$p" ]] || { echo "missing evaluation input: $p" >&2; echo "prepare the frozen Vegeta S3 Wasmd translation before running this stage" >&2; exit 2; }
+for p in "$MANIFEST" "$PLAN"; do
+  [[ -s "$p" ]] || { echo "missing evaluation input: $p" >&2; echo "prepare the frozen Wasmd translation before running this stage" >&2; exit 2; }
 done
-[[ -d "$TRACE_DIR" ]] || { echo "missing source-trace directory: $TRACE_DIR" >&2; exit 2; }
 [[ -d "$SYMBOLIC_DIR" ]] || { echo "missing symbolic profile directory: $SYMBOLIC_DIR" >&2; exit 2; }
+case "${STREAM_PLAN,,}" in
+  1|true|yes|on) STREAM_PLAN=1 ;;
+  0|false|no|off) STREAM_PLAN=0 ;;
+  *) echo "EVAL_WASMD_STREAM_PLAN must be 0/1 (or true/false)" >&2; exit 2 ;;
+esac
+[[ "$MAX_BLOCKS" =~ ^[0-9]+$ ]] || { echo "EVAL_WASMD_MAX_BLOCKS must be a non-negative integer" >&2; exit 2; }
+
+case "${EXACT_ORACLE,,}" in
+  1|true|yes|on)
+    EXACT_ORACLE=1
+    [[ -s "$NATIVE_ACCESSES" ]] || { echo "missing exact-oracle native access audit: $NATIVE_ACCESSES" >&2; exit 2; }
+    [[ -d "$TRACE_DIR" ]] || { echo "missing exact-oracle source-trace directory: $TRACE_DIR" >&2; exit 2; }
+    ;;
+  0|false|no|off) EXACT_ORACLE=0 ;;
+  *) echo "EVAL_WASMD_EXACT_ORACLE must be 0/1 (or true/false)" >&2; exit 2 ;;
+esac
 
 if [[ "$REQUIRE_CLEAN" == "1" ]] && [[ -n "$(git status --porcelain)" ]]; then
   echo "paper mode requires a clean committed tree (set EVAL_WASMD_REQUIRE_CLEAN=0 only for non-publication diagnostics)" >&2
@@ -103,6 +123,11 @@ ENV_FILE="$OUT_DIR/environment.txt"
   echo "symbolic_dir=$SYMBOLIC_DIR"
   echo "trace_dir=$TRACE_DIR"
   echo "exact_native_accesses=$NATIVE_ACCESSES"
+  echo "rust_acg_only=$RUST_ACG_ONLY"
+  echo "dataset=$DATASET_LABEL"
+  echo "exact_oracle=$EXACT_ORACLE"
+  echo "stream_plan=$STREAM_PLAN"
+  echo "max_blocks=$MAX_BLOCKS"
   echo "uname=$(uname -a)"
   command -v lscpu >/dev/null 2>&1 && lscpu || true
   command -v rustc >/dev/null 2>&1 && rustc --version || true
@@ -111,12 +136,22 @@ ENV_FILE="$OUT_DIR/environment.txt"
 } > "$ENV_FILE"
 
 WEIGHTS="$OUT_DIR/compute-weights.jsonl"
-python3 tools/vegeta/build-native-s3-compute-weights.py \
-  --execution-plan "$PLAN" \
-  --source-traces-dir "$TRACE_DIR" \
-  --output "$WEIGHTS" \
-  --summary "$OUT_DIR/compute-weights-summary.json" \
-  --max-missing-source "$ALLOWED_MISSING_SOURCE"
+if [[ "$EXACT_ORACLE" == "1" ]]; then
+  python3 tools/vegeta/build-native-s3-compute-weights.py \
+    --execution-plan "$PLAN" \
+    --source-traces-dir "$TRACE_DIR" \
+    --output "$WEIGHTS" \
+    --summary "$OUT_DIR/compute-weights-summary.json" \
+    --max-missing-source "$ALLOWED_MISSING_SOURCE" \
+    --max-blocks "$MAX_BLOCKS"
+else
+  python3 tools/vegeta/build-native-s3-compute-weights.py \
+    --execution-plan "$PLAN" \
+    --fallback-plan-gas \
+    --output "$WEIGHTS" \
+    --summary "$OUT_DIR/compute-weights-summary.json" \
+    --max-blocks "$MAX_BLOCKS"
+fi
 
 BIN="$OUT_DIR/bin/wasmd-scheduler-eval"
 if [[ "$BUILD" == "1" ]]; then
@@ -131,7 +166,7 @@ fi
 
 ITER_PER_NS="${EVAL_WASMD_GO_ITERATIONS_PER_NANO:-$($BIN --calibrate-only)}"
 echo "Wasmd evaluation: mode=$MODE workers=$WORKERS_LIST samples=$SAMPLES physical_cores=$PHYSICAL_CORES iter/ns=$ITER_PER_NS"
-"$BIN" --repo-root "$ROOT" --manifest "$MANIFEST" --plan "$PLAN" --setup-only
+"$BIN" --repo-root "$ROOT" --manifest "$MANIFEST" --plan "$PLAN" --dataset "$DATASET_LABEL" --exact-oracle="$EXACT_ORACLE" --stream-plan="$STREAM_PLAN" --max-blocks "$MAX_BLOCKS" --setup-only
 
 RECORDS="$OUT_DIR/records.jsonl"
 : > "$RECORDS"
@@ -142,6 +177,10 @@ for workers in "${WORKERS[@]}"; do
   "$BIN" \
     --repo-root "$ROOT" \
     --manifest "$MANIFEST" \
+    --dataset "$DATASET_LABEL" \
+    --exact-oracle="$EXACT_ORACLE" \
+    --stream-plan="$STREAM_PLAN" \
+    --max-blocks "$MAX_BLOCKS" \
     --plan "$PLAN" \
     --compute-weights "$WEIGHTS" \
     --symbolic-dir "$SYMBOLIC_DIR" \
@@ -159,7 +198,12 @@ for workers in "${WORKERS[@]}"; do
   cat "$raw" >> "$RECORDS"
 done
 
-python3 evaluation/wasmd/summarize.py --records "$RECORDS" --output-dir "$OUT_DIR/summary"
+SUMMARY_ARGS=(--records "$RECORDS" --output-dir "$OUT_DIR/summary")
+case "${RUST_ACG_ONLY,,}" in
+  1|true|yes|on) SUMMARY_ARGS+=(--rust-acg-only) ;;
+esac
+if [[ "$EXACT_ORACLE" == "0" ]]; then SUMMARY_ARGS+=(--no-exact-oracle); fi
+python3 evaluation/wasmd/summarize.py "${SUMMARY_ARGS[@]}"
 sha256sum "$RECORDS" > "$OUT_DIR/records.sha256"
 
 echo

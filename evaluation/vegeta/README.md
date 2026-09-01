@@ -857,3 +857,116 @@ bash tools/legacy-scripts/run-vegeta-s3-native-execution.sh
 
 Source concrete keys remain evaluation-only ground truth; they are not consumed by symbolic
 analysis, native planning, initial-state priming, or execution.
+
+## Vegeta S1 large-workload Wasmd pipeline
+
+S1 is the 5,000-block parent workload of S3. After reconstructing
+`benchmarks/corpora/vegeta-ethereum/s1/corpus.jsonl`, do **not** feed its conservative public-RPC
+storage keys into Rust-ACG. The large-workload pipeline keeps those keys only in an offline family
+coverage audit and builds the executable call plan from transaction metadata plus geth `callTracer`.
+
+First collect the resumable block-level call graph and audit whether the reviewed S3 native contract
+families still cover S1 well enough:
+
+```bash
+ETH_RPC_URL=https://YOUR_ARCHIVE_DEBUG_RPC \
+bash tools/legacy-scripts/run-vegeta-s1-native-coverage.sh
+```
+
+This stage writes a thin access-free corpus, historical code cache, one callTracer checkpoint per
+block, proxy/delegate resolution evidence, and `source-family-coverage.{json,txt}` under
+`benchmarks/corpora/vegeta-ethereum/s1/native-characterization/`. It also verifies that S1's first
+101 source blocks/transactions exactly reproduce S3 when the local S3 corpus is available. Coverage
+reports retain the top 200 unmapped conflict owners by default (`VEGETA_S1_COVERAGE_TOP_UNMAPPED`
+can override this) so a low-coverage result can be expanded systematically rather than by address
+guesswork.
+
+If the coverage gate fails, generate the local family-expansion plan **before** attempting native
+preparation:
+
+```bash
+bash tools/legacy-scripts/run-vegeta-s1-family-expansion-plan.sh
+```
+
+The planner performs no RPCs. It reuses the frozen callTracer/code caches, clusters unmapped storage
+owners by effective implementation/runtime bytecode (including DELEGATECALL storage contexts),
+reports observed selector/call behavior, and performs one streaming source-corpus pass to compute
+exact overlap-aware incremental conflict-pair gain. Outputs are
+`family-expansion-plan.{json,md}` plus `family-expansion-source-addresses.json`. Runtime-code and
+selector clustering is triage only: every selected cluster still requires source/semantics review,
+a reviewed native implementation, and genuine symbolic-analysis evidence. After adding reviewed
+families, rerun the coverage audit and regenerate the plan until the publication gates pass.
+
+Then build the executable native workload:
+
+```bash
+ETH_RPC_URL=https://YOUR_ARCHIVE_DEBUG_RPC \
+bash tools/legacy-scripts/run-vegeta-s1-prepare-native.sh
+```
+
+By default this refuses to proceed below the publication-style S3 fidelity floors (95% aggregate
+source conflict coverage, 80% median conflict-bearing-block coverage, 75% semantic transaction
+coverage, 50% semantic frame coverage). `VEGETA_S1_ALLOW_LOW_COVERAGE=1` exists only for diagnostic
+work and should not be used for publication results without a reviewed family-map extension.
+
+S1 reuses the same native CosmWasm contract implementations and source-derived symbolic profile
+files as S3. No exact SLOAD/SSTORE oracle is required for the large-scale five-system campaign.
+Because S1 lacks full exact opcode traces, deterministic compute calibration uses canonical source
+`gas_used` as an explicitly labeled cost proxy instead of misreporting it as opcode steps.
+
+Run the main matrix with:
+
+```bash
+bash tools/legacy-scripts/run-vegeta-s1-wasmd-eval.sh debug
+# later, after coverage review and on publication hardware:
+bash tools/legacy-scripts/run-vegeta-s1-wasmd-eval.sh paper
+```
+
+The S1 wrapper disables ACG-Oracle, labels the dataset `vegeta-s1-wasmd`, and enables block-streamed
+plan execution. Streaming keeps only the current block's parsed/prepared calls in memory while every
+strategy's Wasmd state persists across all 5,000 blocks; current-block call preparation occurs before
+strategy timing. S3 retains the in-memory mode because its detailed profiling tools intentionally
+replay the complete 101-block plan.
+
+The expected S1 publication rows are Serial, Cosmos BlockSTM, AriaFB, Vegeta, and Rust-ACG. Exact
+access quality/oracle characterization remains an S3 mechanism study unless full S1 exact
+SLOAD/SSTORE traces are collected separately.
+
+### S1 reviewed state-semantics audit
+
+For the full Vegeta S1 translation, owner assignment and entrypoint semantics are audited separately.
+The public-RPC source corpus is a conservative **touched-state** instrument, so the audit no longer
+conflates read-only state access with pure computation or silently compares a touched-state denominator
+against only successful writes. Reviewed actions are classified as `STATE_READ`, `STATE_WRITE`,
+`READ_WRITE`, `PURE`, or `OPAQUE`; revert status is recorded independently.
+
+`run-vegeta-s1-opaque-selector-plan.sh` reuses the frozen S1 corpus, historical-code cache, and
+5,000-block callTracer cache; it performs no new chain tracing. The generated report presents three
+distinct fidelity views:
+
+- **owner structural coverage**: both source transactions touch a mapped storage-owner namespace;
+- **reviewed state-touch coverage**: both transactions have reviewed state-dependent semantics for the
+  conflicting owner and at least one side is write-capable. Reviewed paths that later revert remain in
+  this touched-state view because the public-RPC denominator can include their touched storage;
+- **successful/committed-path coverage**: the same semantic test with reverted reviewed paths removed,
+  reported as a lower-bound diagnostic rather than substituted for the touched-state denominator.
+
+A successful reviewed query such as `ownerOf`, `balanceOf`, `getOrderStatus`, or an AMM reserve query
+therefore counts as `STATE_READ`; a deterministic hash helper or Universal Router `receive()` is
+`PURE` and does not count toward storage-conflict coverage. Inlined reviewed `DELEGATECALL`
+implementation frames may provide semantic evidence for the proxy's storage namespace but are never
+emitted as duplicate native execution calls. Unknown selectors remain opaque and are ranked by exact
+unique conflict-pair unlock potential.
+
+The S1-only reviewed selector overlay includes the verified Bueno721Drop-style
+`mintPhaseAllowlist(uint256,uint64,bytes32[])` and
+`mintBatch(uint64[],bytes32[][],uint256[],uint64)` paths plus the FiatToken `mint(address,uint256)`
+entrypoint. High-gain selectors whose historical target implementation semantics have not been
+verified remain opaque rather than being inferred from selector collisions on unrelated contracts.
+
+Publication preparation requires at least 95% reviewed state-touch conflict coverage and 80% median
+conflict-bearing-block coverage. The transaction-volume gate defaults to at least 80% of source
+transactions containing a **successful reviewed state** action. Pure-only transactions and transactions
+whose only reviewed state path reverted are reported separately. Raw reviewed-state-touch frame share
+is descriptive and is not a publication gate by default because callTracer frame volume is dominated
+by helper/background calls and is not a dependency-fidelity denominator.

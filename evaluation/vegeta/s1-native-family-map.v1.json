@@ -1,0 +1,212 @@
+{
+  "coverage_measurement_status": "must-recompute-from-s1-public-rpc-conservative-source-access-corpus",
+  "dataset": "vegeta-s1",
+  "expected_native_code_families": 8,
+  "expected_profile_mappings": 15,
+  "extension_evidence": "evaluation/vegeta/s3-exact-family-extension.v1.json",
+  "methodology_note": "S1 starts at the same Ethereum block as S3. This candidate map deliberately reuses the reviewed native contract families and source-derived symbolic analyses frozen for S3, including the marketplace/router extensions. It is not accepted by inheritance: the S1 pipeline recomputes conservative source conflict/storage coverage over all 5,000 public-RPC blocks and reports the highest-impact unmapped owners before native execution. Those public-RPC accesses are an offline family-coverage diagnostic only; no S1 historical concrete storage keys are embedded in the call plan or exposed to Rust-ACG prediction. Exact access/oracle claims remain restricted to S3 unless exact S1 SLOAD/SSTORE traces are collected separately.",
+  "native_code_families": {
+    "astroport-pair": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+      "semantic_scope": "constant-product AMM pair behavior corresponding to the Uniswap-V2-like family",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/astroport-pair.symbolic.json"
+    },
+    "controlled-cw20": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+      "semantic_scope": "fungible token with pause/blacklist/mint-burn/config style state, used for Tether/FiatToken-like families",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/controlled-cw20.symbolic.json"
+    },
+    "cw20-base": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
+      "semantic_scope": "standard fungible-token transfer/balance/allowance behavior exercised by S3",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw20-base.symbolic.json"
+    },
+    "cw721-mintable": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+      "semantic_scope": "NFT ownership/approval/transfer plus mint behavior exercised by MIAToken and Mistfits-like families",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw721-mintable.symbolic.json"
+    },
+    "fee-token-cw20": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+      "semantic_scope": "fungible token with transfer policy/fee/router state",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/fee-token-cw20.symbolic.json"
+    },
+    "marketplace-router": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Seaport-style order status/counters, Universal Router execution lock, and Blur order status/internal execution guard; concrete EVM storage keys are not used",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "wrapped-native-token": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+      "semantic_scope": "wrapped native token deposit/withdraw plus fungible-token behavior",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/wrapped-native-token.symbolic.json"
+    },
+    "xen-like": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+      "semantic_scope": "rank/mint/stake state machine corresponding to the XENCrypto family; Math delegatecalls are treated as internal helpers rather than a separate state namespace",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/xen-like.symbolic.json"
+    }
+  },
+  "observed_source_conflict_coverage": null,
+  "observed_source_conflict_pairs": null,
+  "observed_total_conflict_pairs": null,
+  "profile_mappings": [
+    {
+      "ethereum_contract_identifier": "TetherToken.sol:TetherToken",
+      "ethereum_profile_family": "6d967f98f2f3843065688dc2065248e3686b56fc0b6ddfa82007df016148becb",
+      "mapping_basis": "verified-source-interface-review",
+      "native_code_family": "controlled-cw20",
+      "rank": 1,
+      "s3_conflict_pair_coverage": 0.6781428290379697
+    },
+    {
+      "ethereum_contract_identifier": "UniswapV2Pair.sol:UniswapV2Pair",
+      "ethereum_profile_family": "8b5db55fa9ab3b9527508d4abe0b39eb588bf310270c8e04b3f38214e8ba63b4",
+      "mapping_basis": "verified-source-interface-review",
+      "native_code_family": "astroport-pair",
+      "rank": 2,
+      "s3_conflict_pair_coverage": 0.1239425536100728
+    },
+    {
+      "ethereum_contract_identifier": "WETH9.sol:WETH9",
+      "ethereum_profile_family": "5566bf50796faf93c9b6f6adacd3b32c70bfe16b48ffc59db6cd144cbdc89739",
+      "mapping_basis": "verified-source-interface-review",
+      "native_code_family": "wrapped-native-token",
+      "rank": 3,
+      "s3_conflict_pair_coverage": 0.09708833366122369
+    },
+    {
+      "ethereum_contract_identifier": "MIAToken.sol:MIAToken",
+      "ethereum_profile_family": "51a81a6105cc3c7311e17c59b7228561425101e2c3f7844dfe8f4faf3882582f",
+      "mapping_basis": "verified ABI exposes ownerOf/getApproved/setApprovalForAll/safeTransferFrom/mint operations",
+      "native_code_family": "cw721-mintable",
+      "rank": 4,
+      "s3_conflict_pair_coverage": 0.05213456620106236
+    },
+    {
+      "ethereum_contract_identifier": "FiatTokenProxy.sol:FiatTokenProxy + observed FiatTokenV2_1 delegate target",
+      "ethereum_profile_family": "c1bcd4dc4f30c4dcf6c9fe462abeaf2efefc065dcb4dec74996e471f1ce219b4",
+      "mapping_basis": "verified proxy plus verified FiatTokenV2_1 source/interface; historical generic-DELEGATECALL status remains unresolved in trace metadata",
+      "native_code_family": "controlled-cw20",
+      "rank": 5,
+      "s3_conflict_pair_coverage": 0.04082234900649223
+    },
+    {
+      "ethereum_contract_identifier": "shibariumcash.sol:shibariumcash",
+      "ethereum_profile_family": "6eaa756f42c049e367b2c6efdb27a6290260e50f311ff5ce1eba5493a8a8b71a",
+      "mapping_basis": "verified source/interface includes token transfer plus wallet-limit/fee/router state",
+      "native_code_family": "fee-token-cw20",
+      "rank": 6,
+      "s3_conflict_pair_coverage": 0.037477867401141056
+    },
+    {
+      "ethereum_contract_identifier": "TokenMintERC20Token.sol:TokenMintERC20Token",
+      "ethereum_profile_family": "c120860259b3a050e6f7dca1bb7d337ff57d0c9d7b9604c87e8930bc072bfc7b",
+      "mapping_basis": "verified-source-interface-review",
+      "native_code_family": "cw20-base",
+      "rank": 7,
+      "s3_conflict_pair_coverage": 0.023313004131418454
+    },
+    {
+      "ethereum_contract_identifier": "project:/contracts/XENCrypto.sol:XENCrypto",
+      "ethereum_profile_family": "ed357d169c8acac5245ebb366bce1d610c0ff26ceeaa6f1777d1dd9a3a9266c2",
+      "mapping_basis": "verified source/interface; S3 activity is dominated by claim/rank operations, while the observed Math delegate target is treated as an internal helper",
+      "native_code_family": "xen-like",
+      "rank": 8,
+      "s3_conflict_pair_coverage": 0.01839464882943144
+    },
+    {
+      "ethereum_contract_identifier": "MistfitsNFTV3.sol:MistfitsNFTV3",
+      "ethereum_profile_family": "1298c624e85f5c43022509dd2ca830e3b94330780b35117d8b3c2970e23d3254",
+      "mapping_basis": "verified-source-interface-review",
+      "native_code_family": "cw721-mintable",
+      "rank": 9,
+      "s3_conflict_pair_coverage": 0.015050167224080268
+    },
+    {
+      "ethereum_contract_identifier": "ENJToken.sol:ENJToken",
+      "ethereum_profile_family": "20eb99b3610cc2648b0e918931736af025155d5dc0f37d0023b7418364022720",
+      "mapping_basis": "verified ERC20-like ABI; S3 exercises transfer",
+      "native_code_family": "cw20-base",
+      "rank": 10,
+      "s3_conflict_pair_coverage": 0.015050167224080268
+    },
+    {
+      "ethereum_contract_identifier": "MaskToken.sol:MaskToken",
+      "ethereum_profile_family": "29aa63c9f1f3ff6664753a81efa3f87fef503049c8304e27be0bc727adb5865b",
+      "mapping_basis": "verified ERC20-like ABI; S3 primarily exercises transfer/balanceOf",
+      "native_code_family": "cw20-base",
+      "rank": 11,
+      "s3_conflict_pair_coverage": 0.0065905961046626
+    },
+    {
+      "ethereum_contract_identifier": "Seaport 1.4 canonical deployment",
+      "ethereum_profile_family": "fadfcfe6593c02018bbb951d5f28e0541684eade287b32a0d41e7d283a38a163",
+      "exact_ground_truth_extension": true,
+      "mapping_basis": "official canonical deployment + reviewed Seaport function/interface semantics; exact-FN owner attribution selected this pre-declared candidate family",
+      "native_code_family": "marketplace-router",
+      "rank": 12,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0x00000000000001ad428e4906ae43d8f9852d0dd6"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Uniswap UniversalRouterV1 canonical mainnet deployment",
+      "ethereum_profile_family": "1473855ce1b22d4c0da2c64c807beedf0698bc44e9e272abaee9b4ed85e3c23d",
+      "exact_ground_truth_extension": true,
+      "mapping_basis": "official Uniswap deployment registry + reviewed execute/callback interface and execution-lock semantics; exact-FN owner attribution selected this pre-declared candidate family",
+      "native_code_family": "marketplace-router",
+      "rank": 13,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0xef1c6e67703c7bd7107eed8303fbe6ec2554bf6b"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Blur Exchange Proxy / verified BlurExchange implementation",
+      "ethereum_profile_family": "593f1950bcc35516cc41b8c5e012f883050182a10ab79bbdcb59acc58d11432f",
+      "exact_ground_truth_extension": true,
+      "mapping_basis": "Blur Foundation proxy deployment + verified BlurExchange ABI/source storage classes cancelledOrFilled, nonces, and isInternal; exact-FN owner attribution selected this pre-declared candidate family",
+      "native_code_family": "marketplace-router",
+      "rank": 14,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0x000000000000ad05ccc4f10045630fb830b95127"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Seaport 1.1 canonical deployment",
+      "ethereum_profile_family": "b576eb61c2dfd35404f209ebe93f8371b9d2cb58f915730a4d4aca38368a98c6",
+      "exact_ground_truth_extension": true,
+      "mapping_basis": "official canonical deployment + reviewed Seaport function/interface semantics; exact-FN owner attribution selected this pre-declared candidate family",
+      "native_code_family": "marketplace-router",
+      "rank": 15,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0x00000000006c3852cbef3e08e8df289169ede581"
+      ]
+    }
+  ],
+  "schema_version": "1-native-s1-reuse-reviewed-s3-families",
+  "selected_profile_families": 15,
+  "status": "candidate-reviewed-family-reuse-pending-s1-coverage-audit",
+  "target_conflict_coverage": 0.95,
+  "translation_rules": [
+    "Every source Ethereum transaction remains in the same block and transaction position.",
+    "Every distinct Ethereum storage-owner address maps to a distinct native instance namespace even when code families are shared.",
+    "Mapped CALL/STATICCALL frames become native contract actions; DELEGATECALL/CALLCODE frames inherit the parent storage namespace and are represented as inlined implementation/helper actions.",
+    "Unsupported or unselected calls become explicit background-fallback actions and are never deleted.",
+    "Concrete historical reads/writes are used only for offline coverage accounting and must never be embedded in the native execution plan or exposed to SymbGraph prediction.",
+    "Native conflict-topology fidelity is not claimed until concrete accesses from translated native execution are measured against the source trace.",
+    "Version-2 exact-ground-truth family extensions may use owner-level attribution to select a pre-declared semantic family, but may not consume historical concrete EVM storage keys, values, or per-transaction access sets during planning/execution."
+  ]
+}

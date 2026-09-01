@@ -110,6 +110,39 @@ ENTRYPOINTS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
         "0x081812fc": ("query::approval", [("token_id", "uint256")]),
         "0x6352211e": ("query::owner_of", [("token_id", "uint256")]),
     },
+    "cw721-drop": {
+        "0x42842e0e": ("execute::transfer_nft", [("sender", "address"), ("recipient", "address"), ("token_id", "uint256")]),
+        "0xb88d4fde": ("execute::transfer_nft", [("sender", "address"), ("recipient", "address"), ("token_id", "uint256"), ("data", "bytes")]),
+        "0x23b872dd": ("execute::transfer_nft", [("sender", "address"), ("recipient", "address"), ("token_id", "uint256")]),
+        "0x095ea7b3": ("execute::approve_nft", [("spender", "address"), ("token_id", "uint256")]),
+        "0xa22cb465": ("execute::approve_all", [("operator", "address"), ("approved", "bool")]),
+        "0x081812fc": ("query::approval", [("token_id", "uint256")]),
+        "0x6352211e": ("query::owner_of", [("token_id", "uint256")]),
+        "0x70a08231": ("query::balance", [("owner", "address")]),
+        "0x18160ddd": ("query::total_supply", []),
+        # Reviewed S1 mint/drop selectors. Complex proof/signature payloads remain public-input
+        # fingerprints in the executable adapter; no historical storage keys are consumed.
+        "0xb03bc27c": ("execute::multi_stage_mint_drop", [("quantity", "uint256")]),
+        "0xa0712d68": ("execute::mint_drop", [("quantity", "uint256")]),
+        "0x6ecd2306": ("execute::mint_drop", [("quantity", "uint256")]),
+        "0x0d1d7ae5": ("execute::mint_drop", [("quantity", "uint256")]),
+        "0x26092b83": ("execute::mint_drop_one", []),
+        "0x2955a21d": ("execute::signed_mint_drop", [("signature", "bytes"), ("nonce", "uint256"), ("quantity", "uint256"), ("max_mints_per_wallet", "uint256"), ("recipient", "address")]),
+        "0x9e852f75": ("execute::whitelist_mint_drop", [("quantity", "uint256")]),
+        "0x64869dad": ("execute::mint_seadrop", [("recipient", "address"), ("quantity", "uint256")]),
+        "0xefef39a1": ("execute::purchase_drop", [("quantity", "uint256")]),
+        "0x2db11544": ("execute::mint_drop", [("quantity", "uint256")]),
+    },
+    "stargate-cw20": {
+        "0xa9059cbb": ("execute::transfer", [("recipient", "address"), ("amount", "uint256")]),
+        "0x23b872dd": ("execute::transfer_from", [("owner", "address"), ("recipient", "address"), ("amount", "uint256")]),
+        "0x70a08231": ("query::balance", [("address", "address")]),
+        "0x095ea7b3": ("execute::approve", [("spender", "address"), ("amount", "uint256")]),
+        "0xdd62ed3e": ("query::allowance", [("owner", "address"), ("spender", "address")]),
+        "0x18160ddd": ("query::total_supply", []),
+        "0x2e15238c": ("execute::bridge_send", [("dst_chain_id", "uint256"), ("to", "bytes"), ("quantity", "uint256"), ("zro_payment_address", "address"), ("adapter_param", "bytes")]),
+        "0x001d3567": ("execute::bridge_receive", [("src_chain_id", "uint256"), ("src_address", "bytes"), ("nonce", "uint256"), ("payload", "bytes")]),
+    },
     "xen-like": {
         "0x1c560305": ("execute::claim_mint_reward_and_share", [("other", "address"), ("pct", "uint256")]),
         "0x9ff054df": ("execute::claim_rank", [("term", "uint256")]),
@@ -133,7 +166,8 @@ ENTRYPOINTS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
         "0xfd9f1e10": ("execute::cancel_order", []),
         "0x88147732": ("execute::validate_order", []),
         "0x5b34b966": ("execute::increment_counter", []),
-        # Uniswap Universal Router V1.
+        # Retained for frozen S3 map compatibility; S1 maps the Universal Router owner to the
+        # dedicated universal-router family below.
         "0x3593564c": ("execute::execute_route", []),
         "0x24856bc3": ("execute::execute_route", []),
         "0xfa461e33": ("execute::v3_swap_callback", []),
@@ -144,6 +178,81 @@ ENTRYPOINTS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
         "0x627cdcb9": ("execute::increment_counter", []),
     },
 }
+
+
+# S1-only reviewed selector extensions. Keeping them out of the frozen global ENTRYPOINTS table
+# preserves the already-published S3 semantic/binary workload while allowing the larger S1 trace
+# to use additional source-reviewed entrypoints.
+S1_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
+    "fiat-token-cw20": {
+        "0xa9059cbb": ("execute::transfer", [("recipient", "address"), ("amount", "uint256")]),
+        "0x23b872dd": ("execute::transfer_from", [("owner", "address"), ("recipient", "address"), ("amount", "uint256")]),
+        "0x70a08231": ("query::balance", [("address", "address")]),
+        "0x095ea7b3": ("execute::increase_allowance_or_approve", [("spender", "address"), ("amount", "uint256")]),
+        "0xdd62ed3e": ("query::allowance", [("owner", "address"), ("spender", "address")]),
+        "0x42966c68": ("execute::burn", [("amount", "uint256")]),
+        "0x40c10f19": ("execute::mint", [("recipient", "address"), ("amount", "uint256")]),
+        "0xd505accf": ("execute::permit", [("owner", "address"), ("spender", "address"), ("amount", "uint256"), ("deadline", "uint256"), ("v", "uint256"), ("r", "bytes32"), ("s", "bytes32")]),
+        "0x313ce567": ("query::decimals", []),
+        "0x18160ddd": ("query::total_supply", []),
+    },
+    "cw721-drop": {
+        "0xdb980f4f": ("execute::mint_phase_drop", [("phase_index", "uint256"), ("quantity", "uint256")]),
+        # Bueno721Drop verified source: mintPhaseAllowlist(uint256,uint64,bytes32[]).
+        "0x97474f13": ("execute::mint_phase_allowlist_drop", [("phase_index", "uint256"), ("quantity", "uint256"), ("proof", "bytes")]),
+        # Bueno721Drop verified source: mintBatch(uint64[],bytes32[][],uint256[],uint64).
+        # Dynamic-array quantity is decoded by the executable adapter and checked against mint logs.
+        "0x9ff70755": ("execute::mint_batch_drop", []),
+    },
+    "xen-like": {
+        "0x52c7f8dc": ("execute::claim_mint_reward", []),
+    },
+    "marketplace-router": {
+        "0x46423aa7": ("query::get_order_status", [("order_hash", "bytes32")]),
+        "0xf07ec373": ("query::get_counter", [("offerer", "address")]),
+        "0x79df72bd": ("reviewed::get_order_hash_stateless", []),
+        "0xa8174404": ("execute::settle_order", []),
+    },
+    "universal-router": {
+        "0x3593564c": ("execute::execute_route", []),
+        "0x24856bc3": ("execute::execute_route", []),
+        "0xfa461e33": ("execute::v3_swap_callback", []),
+        "0x": ("reviewed::receive_eth_stateless", []),
+    },
+}
+
+
+SEMANTIC_STATE_READ = "STATE_READ"
+SEMANTIC_STATE_WRITE = "STATE_WRITE"
+SEMANTIC_READ_WRITE = "READ_WRITE"
+SEMANTIC_PURE = "PURE"
+SEMANTIC_OPAQUE = "OPAQUE"
+
+
+def semantic_effect_for_entrypoint(entrypoint: str | None, dispatch: str | None = None) -> str:
+    """Classify reviewed entrypoints by state dependency, not by call mutability alone.
+
+    The S1 public-RPC conflict corpus is a touched-state instrument. Queries therefore count as
+    reviewed STATE_READ semantics; pure/public-input computations do not. Execute paths are kept
+    conservatively READ_WRITE because the scheduler only needs to know that the reviewed path can
+    participate in a state conflict, not reproduce Solidity mutability annotations exactly.
+    """
+    ep = str(entrypoint or "")
+    if not ep:
+        return SEMANTIC_OPAQUE
+    if ep.startswith("reviewed::"):
+        return SEMANTIC_PURE
+    if ep.startswith("query::"):
+        return SEMANTIC_STATE_READ
+    if ep.startswith("execute::"):
+        return SEMANTIC_READ_WRITE
+    if ep == "system::bank_send":
+        return SEMANTIC_READ_WRITE
+    if ep.startswith("system::"):
+        return SEMANTIC_PURE
+    if dispatch in {"system-bank-transfer"}:
+        return SEMANTIC_READ_WRITE
+    return SEMANTIC_OPAQUE
 
 
 def read_json(path: Path) -> Any:
@@ -227,6 +336,7 @@ def load_call_cache(blocks: list[dict], cache_dir: Path) -> dict[int, dict]:
 
 class FamilyResolver:
     def __init__(self, frozen_map: dict, code_cache: dict[str, dict], mapping_candidates: dict):
+        self.dataset = str(frozen_map.get("dataset") or "")
         self.profile_to_native = {
             str(item["ethereum_profile_family"]): str(item["native_code_family"])
             for item in frozen_map.get("profile_mappings", [])
@@ -468,14 +578,28 @@ def translate_call_tree(
 
         selector = selector_from_frame(frame) if call_type in CALL_TYPES else "0x"
         entry = ENTRYPOINTS.get(native_family or "", {}).get(selector)
+        if resolver.dataset == "vegeta-s1":
+            entry = S1_ENTRYPOINT_EXTENSIONS.get(native_family or "", {}).get(selector, entry)
         system_action_kind = None
+        semantic_entrypoint = None
+        semantic_effect = SEMANTIC_OPAQUE
         if system is not None:
             dispatch = system["dispatch"]
             entrypoint = system["entrypoint"]
             arguments = system["arguments"]
             system_action_kind = system["system_action_kind"]
         elif status == "inlined-delegatecall":
-            dispatch = "inlined-helper-or-implementation"
+            # S1 retains reviewed semantic evidence from implementation frames for the proxy storage
+            # namespace, but never executes those frames a second time. Frozen S3 keeps its original
+            # inlined-helper dispatch byte-for-byte.
+            if resolver.dataset == "vegeta-s1" and entry is not None:
+                semantic_entrypoint, semantic_schema = entry
+                dispatch = "inlined-reviewed-entrypoint"
+                semantic_effect = semantic_effect_for_entrypoint(semantic_entrypoint, dispatch)
+            else:
+                dispatch = "inlined-helper-or-implementation"
+                semantic_entrypoint = None
+                semantic_effect = SEMANTIC_OPAQUE
             entrypoint = None
             arguments = {}
         elif native_family is None:
@@ -487,9 +611,13 @@ def translate_call_tree(
             entrypoint = f"opaque::{selector}"
             arguments = {}
         else:
-            dispatch = "mapped-entrypoint"
             entrypoint, schema = entry
+            dispatch = "reviewed-stateless-entrypoint" if entrypoint.startswith("reviewed::") else "mapped-entrypoint"
             arguments = decode_arguments(frame.get("input"), schema)
+
+        if status != "inlined-delegatecall":
+            semantic_entrypoint = entrypoint
+            semantic_effect = semantic_effect_for_entrypoint(entrypoint, dispatch)
 
         action_id = len(actions)
         action = {
@@ -516,6 +644,9 @@ def translate_call_tree(
             "ethereum_value": str(frame.get("value") or "0x0").lower(),
             "failed_frame": bool(frame.get("error")),
         }
+        if resolver.dataset == "vegeta-s1":
+            action["semantic_entrypoint"] = semantic_entrypoint
+            action["semantic_effect"] = semantic_effect
         actions.append(action)
         for child in frame.get("calls") or []:
             if isinstance(child, dict):
@@ -764,9 +895,9 @@ def render_coverage_text(report: dict) -> str:
         "",
         f"blocks retained: {report['blocks_retained']} / {report['source_blocks']}",
         f"transactions retained: {report['transactions_retained']} / {report['source_transactions']} ({report['transaction_retention'] * 100:.2f}%)",
-        f"call frames: {calls['total_frames']} total; {calls['mapped_native_frames']} native-contract; {calls['mapped_system_frames']} system; {calls['inlined_delegatecall_frames']} inlined delegatecall; {calls['background_fallback_frames']} background fallback",
+        f"call frames: {calls['total_frames']} total; {calls['mapped_native_frames']} mapped-owner native; {calls['semantic_frames']} reviewed semantic; {calls['mapped_system_frames']} system; {calls['inlined_delegatecall_frames']} inlined delegatecall; {calls['background_fallback_frames']} background fallback",
         f"system actions: bank-transfer={system['plain_value_transfer']} precompile={system['ethereum_precompile']} empty-code-noop={system['empty_code_noop']}",
-        f"semantic transactions: {txc['transactions_with_semantic_action']} / {report['source_transactions']} ({txc['semantic_transaction_coverage'] * 100:.2f}%)",
+        f"reviewed semantic transactions: {txc['transactions_with_semantic_action']} / {report['source_transactions']} ({txc['semantic_transaction_coverage'] * 100:.2f}%)",
         f"  fully semantic: {txc['fully_semantic_transactions']}",
         f"  mixed semantic+fallback: {txc['mixed_semantic_fallback_transactions']}",
         f"  background only: {txc['background_only_transactions']}",
@@ -809,7 +940,7 @@ def build_plan(
     fully_semantic_transactions = 0
     mixed_transactions = 0
     background_only_transactions = 0
-    total_frames = mapped_frames = system_frames = inline_frames = fallback_frames = opaque_frames = 0
+    total_frames = mapped_frames = system_frames = inline_frames = fallback_frames = opaque_frames = reviewed_semantic_frames = 0
     system_action_counts = Counter()
 
     for block in blocks:
@@ -820,8 +951,15 @@ def build_plan(
             actions = translate_call_tree(traced_tx["result"], resolver)
             all_actions.extend(actions)
             total_frames += len(actions)
-            semantic_here = any(action["translation_status"] in SEMANTIC_TRANSLATION_STATUSES for action in actions)
-            fallback_here = any(action["translation_status"] == "background-fallback" for action in actions)
+            semantic_here = any(
+                action["dispatch"] in {"mapped-entrypoint", "reviewed-stateless-entrypoint", "system-bank-transfer", "system-precompile", "system-noop-call", "inlined-helper-or-implementation"}
+                and not action.get("failed_frame")
+                for action in actions
+            )
+            fallback_here = any(
+                action["translation_status"] == "background-fallback" or action["dispatch"] == "mapped-opaque-selector"
+                for action in actions
+            )
             if semantic_here and not fallback_here:
                 semantic_class = "fully-semantic"
                 fully_semantic_transactions += 1
@@ -836,6 +974,11 @@ def build_plan(
             inline_frames += sum(action["translation_status"] == "inlined-delegatecall" for action in actions)
             fallback_frames += sum(action["translation_status"] == "background-fallback" for action in actions)
             opaque_frames += sum(action["dispatch"] == "mapped-opaque-selector" for action in actions)
+            reviewed_semantic_frames += sum(
+                action["dispatch"] in {"mapped-entrypoint", "reviewed-stateless-entrypoint", "system-bank-transfer", "system-precompile", "system-noop-call", "inlined-helper-or-implementation"}
+                and not action.get("failed_frame")
+                for action in actions
+            )
             system_action_counts.update(
                 action.get("system_action_kind") for action in actions if action.get("system_action_kind")
             )
@@ -866,7 +1009,7 @@ def build_plan(
     readiness = implementation_readiness(frozen_map, root)
     source_transactions = sum(len(block.get("transactions") or []) for block in blocks)
     semantic_transactions = fully_semantic_transactions + mixed_transactions
-    semantic_frames = mapped_frames + system_frames + inline_frames
+    semantic_frames = reviewed_semantic_frames
     coverage = {
         "schema_version": 2,
         "dataset": frozen_map.get("dataset", "vegeta-s3"),

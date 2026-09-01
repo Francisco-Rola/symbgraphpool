@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the translated Vegeta S3 call plan into executable CosmWasm bundles.
+"""Compile a translated Vegeta call plan into executable CosmWasm bundles.
 
 This stage never reads the source corpus's concrete read/write keys. It consumes only call-plan
 metadata, verified selector rules, and implementation metadata. Concrete EVM reads/writes remain
@@ -46,10 +46,22 @@ class TokenIdRemapper:
         mapping[raw] = native
         return native
 
+    def map_source_u64(self, instance_id: str, source_token_id: Any) -> int:
+        """Preserve sequential ERC721 drop token IDs so state-derived mint IDs stay aligned."""
+        raw = intv(source_token_id)
+        if raw < 0 or raw > U64_MAX:
+            raise OverflowError(f"cw721-drop source token ID does not fit u64 for {instance_id}: {raw}")
+        mapping = self._maps[instance_id]
+        existing = mapping.get(raw)
+        if existing is not None and existing != raw:
+            raise ValueError(f"mixed dense/identity token-ID mapping for {instance_id}: {raw}->{existing}")
+        mapping[raw] = raw
+        return raw
+
     def summary(self) -> dict[str, Any]:
         counts = {iid: len(mapping) for iid, mapping in sorted(self._maps.items())}
         return {
-            "policy": "per-instance-dense-u64-bijection",
+            "policy": "dense-u64-bijection except reviewed cw721-drop instances preserve source u64 token IDs for state-derived sequential mint alignment",
             "instances": len(counts),
             "distinct_source_token_ids": sum(counts.values()),
             "max_distinct_ids_per_instance": max(counts.values(), default=0),
@@ -115,6 +127,19 @@ def calldata_fingerprint(data: Any) -> str:
     return "calldata-sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+
+def collect_logical_strings(value: Any, out: set[str]) -> None:
+    if isinstance(value, str):
+        text = value.lower()
+        if (text.startswith("0x") and len(text) == 42) or text.startswith("native-s3-"):
+            out.add(value)
+    elif isinstance(value, list):
+        for item in value:
+            collect_logical_strings(item, out)
+    elif isinstance(value, dict):
+        for item in value.values():
+            collect_logical_strings(item, out)
+
 def approval_amount(v: Any) -> int:
     """Normalize ERC20-style approvals without breaking successful transferFrom paths.
 
@@ -139,6 +164,34 @@ def abi_addr(data: str,i:int)->str: return '0x'+word(data,i)[12:].hex()
 def abi_uint(data: str,i:int)->int: return int.from_bytes(word(data,i),'big')
 def abi_bool(data: str,i:int)->bool: return abi_uint(data,i)!=0
 def abi_bytes32(data: str,i:int)->str: return '0x'+word(data,i).hex()
+def abi_dynamic_bytes(data: str, i: int) -> bytes:
+    """Decode one top-level ABI bytes argument from selector-prefixed calldata."""
+    raw=bytes.fromhex(data[2:] if data.startswith('0x') else data)
+    offset=abi_uint(data,i); start=4+offset
+    if start+32>len(raw): return b''
+    length=int.from_bytes(raw[start:start+32],'big'); body=start+32
+    return raw[body:body+length] if body+length<=len(raw) else b''
+
+def abi_dynamic_uint_array(data: str, i: int, *, max_items: int = 10_000) -> list[int]:
+    """Decode one top-level ABI uint/int array without trusting provider-side decoding."""
+    raw=bytes.fromhex(data[2:] if data.startswith('0x') else data)
+    offset=abi_uint(data,i); start=4+offset
+    if start+32>len(raw): return []
+    length=int.from_bytes(raw[start:start+32],'big')
+    if length<0 or length>max_items: return []
+    body=start+32; end=body+32*length
+    if end>len(raw): return []
+    return [int.from_bytes(raw[body+32*j:body+32*(j+1)],'big') for j in range(length)]
+
+def stargate_receive_payload(data: str) -> tuple[str | None, int]:
+    """Decode STG lzReceive payload abi.encode(bytes to,uint256 qty)."""
+    payload=abi_dynamic_bytes(data,3)
+    if len(payload)<64: return None,0
+    to_offset=int.from_bytes(payload[:32],'big'); qty=int.from_bytes(payload[32:64],'big')
+    if to_offset+32>len(payload): return None,qty
+    n=int.from_bytes(payload[to_offset:to_offset+32],'big'); body=payload[to_offset+32:to_offset+32+n]
+    if len(body)<20: return None,qty
+    return norm_addr('0x'+body[:20].hex()),qty
 
 def abi_word_uint(v: int) -> str: return f"{int(v):064x}"
 def abi_word_addr(v: str) -> str:
@@ -234,6 +287,7 @@ def resolve_cw721_initial_state(
 ) -> dict[str,Any]:
     """Resolve ERC721 owner/getApproved/isApprovedForAll at the predecessor block."""
     owners: dict[str,dict[int,str]]=defaultdict(dict)
+    unresolved_tokens: set[tuple[str,int]]=set()
     approvals: dict[tuple[str,int],str]={}
     operators: set[tuple[str,str,str]]=set()
     stats=defaultdict(int)
@@ -250,7 +304,7 @@ def resolve_cw721_initial_state(
                 if approved and approved!="0x"+"0"*40:
                     approvals[(iid,native_tid)]=approved; stats["token_approvals_resolved"]+=1
             else:
-                stats["owner_queries_unresolved"]+=1
+                unresolved_tokens.add((iid,native_tid)); stats["owner_queries_unresolved"]+=1
     for iid,owner,operator in sorted(operator_pairs):
         contract=norm_addr(iid.split(":",1)[1] if ":" in iid else None)
         owner=norm_addr(owner); operator=norm_addr(operator)
@@ -263,7 +317,97 @@ def resolve_cw721_initial_state(
             stats["operator_approvals_false"]+=1
         else:
             stats["operator_queries_unresolved"]+=1
-    return {"owners":owners,"approvals":approvals,"operators":operators,"statistics":dict(stats)}
+    return {"owners":owners,"unresolved_tokens":sorted(unresolved_tokens),"approvals":approvals,"operators":operators,"statistics":dict(stats)}
+
+class Cw721DropMintSequence:
+    """Frozen public mint-event audit for reviewed sequential ERC721 drop owners."""
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.data: dict[str, Any] = {}
+        self.owners: dict[str, dict] = {}
+        if path is None:
+            return
+        self.data = read_json(path)
+        if self.data.get("dataset") != "vegeta-s1":
+            raise ValueError(f"unexpected cw721-drop mint-sequence dataset in {path}: {self.data.get('dataset')!r}")
+        summary = self.data.get("summary") or {}
+        if not bool(summary.get("all_observed_sequences_plus_one", False)):
+            raise ValueError(f"cw721-drop mint sequence is not sequential +1: {path}")
+        if not bool(summary.get("all_token_ids_fit_u64", False)):
+            raise ValueError(f"cw721-drop mint sequence contains token IDs outside u64: {path}")
+        self.owners = {str(k).lower(): v for k, v in (self.data.get("owners") or {}).items()}
+
+    def owner_for_instance(self, instance_id: str) -> str | None:
+        return norm_addr(instance_id.split(":", 1)[1] if ":" in instance_id else None)
+
+    def first_token_id(self, instance_id: str) -> int | None:
+        owner = self.owner_for_instance(instance_id)
+        row = self.owners.get(owner or "") or {}
+        value = row.get("first_token_id")
+        return None if value is None else int(value)
+
+    def expected_mints(self) -> dict[tuple[str, str], dict]:
+        out: dict[tuple[str, str], dict] = {}
+        for owner, row in self.owners.items():
+            for tx_hash, txrow in (row.get("transactions") or {}).items():
+                out[(owner, str(tx_hash).lower())] = txrow
+        return out
+
+    def summary(self) -> dict[str, Any]:
+        if not self.path:
+            return {"mode": "not-provided"}
+        return {
+            "mode": "erc721-transfer-mint-event-audit",
+            "path": str(self.path),
+            "reviewed_owners": len(self.owners),
+            **(self.data.get("summary") or {}),
+        }
+
+
+def validate_drop_mint_translation(
+    sequence: Cw721DropMintSequence,
+    translated: dict[tuple[str, str], int],
+) -> dict[str, Any]:
+    """Require every observed reviewed-owner mint tx to have the same translated mint quantity.
+
+    A missing source mint would advance the source contract's sequential token ID without advancing
+    native state, corrupting every later mint/transfer token key.  Therefore full S1 preparation is
+    intentionally stricter than the 95% scheduler coverage gate for these reviewed sequential-drop
+    owners: all in-window zero-address Transfer mint events must be accounted for exactly.
+    """
+    if sequence.path is None:
+        return {"mode": "not-provided", "validated": False}
+    expected = sequence.expected_mints()
+    mismatches = []
+    for key, row in sorted(expected.items()):
+        actual = int(translated.get(key, 0))
+        wanted = int(row.get("mint_count", 0))
+        if actual != wanted:
+            mismatches.append({
+                "owner": key[0], "tx_hash": key[1], "expected_mint_events": wanted,
+                "translated_quantity": actual, "token_ids": row.get("token_ids") or [],
+            })
+    unexpected = []
+    for key, actual in sorted(translated.items()):
+        if key not in expected:
+            unexpected.append({"owner": key[0], "tx_hash": key[1], "translated_quantity": int(actual)})
+    if mismatches or unexpected:
+        sample = (mismatches + unexpected)[:10]
+        raise ValueError(
+            "cw721-drop mint-event/translation mismatch; reviewed sequential mint state would diverge. "
+            f"mismatches={len(mismatches)} unexpected={len(unexpected)} sample={sample}"
+        )
+    return {
+        "mode": "strict-all-reviewed-owner-mint-events",
+        "validated": True,
+        "mint_transactions": len(expected),
+        "translated_mint_transactions": len(translated),
+        "mint_events": sum(int(row.get("mint_count", 0)) for row in expected.values()),
+        "mismatches": 0,
+        "unexpected_translated_mints": 0,
+    }
+
 
 def caller_for(tx: dict, action: dict, by_id: dict[int,dict], mode: str='exact') -> str:
     """Resolve the callee-visible EVM msg.sender for a translated frame.
@@ -355,8 +499,32 @@ def contract_call(kind: str, family: str, iid: str, sender: str | None, msg: dic
 
 def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: str, token_ids: TokenIdRemapper):
     args=a.get('arguments') or {}; data=str(a.get('ethereum_input') or '0x'); e=canon_ep(ep); ec=e.replace('_',''); iid=instance_id(family,a)
+    if str(ep).startswith('reviewed::'):
+        return {'kind':'noop','origin_action_id':a.get('action_id'),'reviewed_stateless_entrypoint':ep}
+    # STG's reviewed LayerZero-facing paths preserve balance/supply and route nonce state.
+    if family == 'stargate-cw20' and ('bridgesend' in ec or 'sendtokens' in ec):
+        # sendTokens(uint16,bytes,uint256,address,bytes): on Ethereum mainnet STG isMain=true, so
+        # word 2 is locked into the token contract's shared escrow balance rather than burned.
+        n=max(amount(abi_uint(data,2)),1)
+        return contract_call('execute',family,iid,caller,{'bridge_send':{'amount':str(n)}},a)
+    if family == 'stargate-cw20' and ('bridgereceive' in ec or 'lzreceive' in ec):
+        recipient,raw_amount=stargate_receive_payload(data)
+        if not recipient or raw_amount<=0: return None
+        return contract_call('execute',family,iid,caller,{'bridge_receive':{'recipient':recipient,'amount':str(max(amount(raw_amount),1))}},a)
+    # Reviewed FiatToken/USDC extensions. Permit updates allowance + owner nonce; burn debits the
+    # caller and total supply. Signature verification itself is public-input validation, not a
+    # historical-storage dependency, so the native model preserves only the state dependencies.
+    if family == 'fiat-token-cw20' and 'permit' in ec:
+        owner=args.get('owner') or abi_addr(data,0); spender=args.get('spender') or abi_addr(data,1); n=approval_amount(args.get('amount',abi_uint(data,2)))
+        return contract_call('execute',family,iid,owner,{'permit':{'owner':owner,'spender':spender,'amount':str(n)}},a)
+    if family == 'fiat-token-cw20' and ec.endswith('::burn'):
+        n=amount(args.get('amount',abi_uint(data,0)))
+        return contract_call('execute',family,iid,caller,{'burn':{'amount':str(max(n,1))}},a)
+    if family == 'fiat-token-cw20' and ec.endswith('::mint'):
+        recipient=args.get('recipient') or abi_addr(data,0); n=amount(args.get('amount',abi_uint(data,1)))
+        return contract_call('execute',family,iid,caller,{'mint':{'recipient':recipient,'amount':str(max(n,1))}},a)
     # Standard fungible interfaces.
-    if family in {'cw20-base','controlled-cw20','fee-token-cw20','wrapped-native-token'}:
+    if family in {'cw20-base','controlled-cw20','fiat-token-cw20','fee-token-cw20','wrapped-native-token','stargate-cw20'}:
         if 'transferfrom' in ec:
             owner=args.get('owner') or abi_addr(data,0); recipient=args.get('recipient') or abi_addr(data,1); n=amount(args.get('amount',abi_uint(data,2)))
             return contract_call('execute',family,iid,caller,{'transfer_from':{'owner':owner,'recipient':recipient,'amount':str(n)}},a)
@@ -413,8 +581,66 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         if 'ownerof' in ec:
             raw_tid=abi_uint(data,0); call=contract_call('query',family,iid,None,{'owner_of':{'token_id':token_ids.map(iid,raw_tid)}},a); call['source_token_id']=raw_tid
             return call
+        if e.endswith('::approval'):
+            raw_tid=abi_uint(data,0); call=contract_call('query',family,iid,None,{'approved':{'token_id':token_ids.map(iid,raw_tid)}},a); call['source_token_id']=raw_tid
+            return call
         if 'tokensbyownercount' in ec:
             return contract_call('query',family,iid,None,{'tokens_by_owner_count':{'owner':abi_addr(data,0)}},a)
+    if family=='cw721-drop':
+        if 'transfernft' in ec or 'sendorsafetransfernft' in ec:
+            source_owner,recipient,raw_tid=erc721_transfer_parts(data,args); tid=token_ids.map_source_u64(iid,raw_tid)
+            call=contract_call('execute',family,iid,caller,{'transfer_nft':{'recipient':recipient,'token_id':tid}},a)
+            call['source_owner']=source_owner; call['source_token_id']=raw_tid
+            return call
+        if 'approveall' in ec:
+            op=args.get('operator') or abi_addr(data,0); approved=args.get('approved',abi_bool(data,1))
+            return contract_call('execute',family,iid,caller,{'approve_all':{'operator':op,'approved':bool(approved)}},a)
+        if 'approvenft' in ec:
+            spender=args.get('spender') or abi_addr(data,0); raw_tid=intv(args.get('token_id',abi_uint(data,1))); tid=token_ids.map_source_u64(iid,raw_tid)
+            call=contract_call('execute',family,iid,caller,{'approve_nft':{'spender':spender,'token_id':tid}},a); call['source_token_id']=raw_tid
+            return call
+        if 'ownerof' in ec:
+            raw_tid=intv(args.get('token_id',abi_uint(data,0))); call=contract_call('query',family,iid,None,{'owner_of':{'token_id':token_ids.map_source_u64(iid,raw_tid)}},a); call['source_token_id']=raw_tid
+            return call
+        if e.endswith('::approval'):
+            raw_tid=intv(args.get('token_id',abi_uint(data,0))); call=contract_call('query',family,iid,None,{'approved':{'token_id':token_ids.map_source_u64(iid,raw_tid)}},a); call['source_token_id']=raw_tid
+            return call
+        if ec.endswith('::balance'):
+            return contract_call('query',family,iid,None,{'balance':{'owner':args.get('owner') or abi_addr(data,0)}},a)
+        if 'totalsupply' in ec:
+            return contract_call('query',family,iid,None,{'total_supply':{}},a)
+        if 'mint' in ec or 'purchase' in ec:
+            if 'mintbatchdrop' in ec:
+                # Bueno721Drop mintBatch(uint64[] quantities,bytes32[][] proofs,uint256[] phaseIndices,uint64 publicQuantity).
+                # Only public calldata is used: total minted quantity is the phase quantities plus public quantity.
+                phase_quantities=abi_dynamic_uint_array(data,0)
+                q=sum(phase_quantities)+abi_uint(data,3)
+            else:
+                q=intv(args.get('quantity',abi_uint(data,0)))
+            if 'mintdropone' in ec: q=1
+            if q <= 0 or q > 10_000:
+                return None
+            recipient=norm_addr(args.get('recipient')) or caller
+            fingerprint=calldata_fingerprint(data)
+            # Preserve reviewed state-key semantics where the source ABI exposes them. Seizon's
+            # multiStageMint stage is ABI word 2; signed mint nonce is decoded as argument `nonce`.
+            # Whitelist signatures lack an explicit nonce/stage in the reviewed ABI, so their public
+            # calldata fingerprint remains the conservative replay-key surrogate.
+            stage_key=None
+            if 'multistage' in ec:
+                stage_key=f"stage:{abi_uint(data,2)}"
+            elif 'mintbatch' in ec:
+                stage_key=f"batch:{fingerprint[16:40]}"
+            elif 'mintphase' in ec:
+                stage_key=f"phase:{intv(args.get('phase_index',abi_uint(data,0)))}"
+            elif 'whitelist' in ec:
+                stage_key=fingerprint[16:40]
+            nonce_key=None
+            if 'signed' in ec:
+                nonce_key=f"nonce:{intv(args.get('nonce',abi_uint(data,1)))}"
+            elif 'whitelist' in ec:
+                nonce_key=fingerprint[40:64]
+            return contract_call('execute',family,iid,caller,{'mint_drop':{'recipient':recipient,'quantity':q,'stage_key':stage_key,'nonce_key':nonce_key}},a)
     if family=='xen-like':
         if 'claimrank' in ec:
             term=intv(args.get('term',abi_uint(data,0))); return contract_call('execute',family,iid,caller,{'claim_rank':{'term_days':max(0,min(term,1))}},a)
@@ -432,7 +658,7 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         if 'sendfrom' in ec:
             return contract_call('execute',family,iid,caller,{'send_from':{'from':abi_addr(data,0),'to':abi_addr(data,1),'token_id':token_ids.map(iid,abi_uint(data,2)),'amount':str(max(amount(abi_uint(data,3)),1))}},a)
         if 'balance' in e: return contract_call('query',family,iid,None,{'balance':{'address':abi_addr(data,0),'token_id':token_ids.map(iid,abi_uint(data,1))}},a)
-    if family=='marketplace-router':
+    if family in {'marketplace-router','universal-router'}:
         semantic_id=calldata_fingerprint(data)
         if 'incrementcounter' in ec or 'incrementnonce' in ec:
             return contract_call('execute',family,iid,caller,{'increment_counter':{}},a)
@@ -449,34 +675,46 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         if 'settleorder' in ec or 'fulfillorder' in ec:
             return contract_call('execute',family,iid,caller,{'settle_order':{'order_id':semantic_id}},a)
         if 'getcounter' in ec:
-            return contract_call('query',family,iid,None,{'get_counter':{'address':abi_addr(data,0)}},a)
+            return contract_call('query',family,iid,None,{'get_counter':{'address':args.get('offerer') or abi_addr(data,0)}},a)
         if 'getorderstatus' in ec:
-            return contract_call('query',family,iid,None,{'get_order_status':{'order_id':abi_bytes32(data,0)}},a)
+            return contract_call('query',family,iid,None,{'get_order_status':{'order_id':args.get('order_hash') or abi_bytes32(data,0)}},a)
     if family=='operator-filter-helper':
         if 'registerandsubscribe' in ec: return contract_call('execute',family,iid,caller,{'register_and_subscribe':{'registrant':abi_addr(data,0),'subscription':abi_addr(data,1)}},a)
         if 'isoperatorallowed' in ec: return contract_call('query',family,iid,None,{'is_operator_allowed':{'registrant':abi_addr(data,0),'operator':abi_addr(data,1)}},a)
     return None
 
-def instantiate_msg(fam: str, participants: set[str]):
+def instantiate_msg(fam: str, participants: set[str], iid: str | None = None, drop_mint_sequence: Cw721DropMintSequence | None = None):
     bals=[{'address':a,'amount':str(SEED)} for a in sorted(participants) if norm_addr(a)]
     if fam=='cw20-base': return {'name':'S3','symbol':'S3','decimals':18,'initial_balances':bals}
-    if fam=='controlled-cw20': return {'admin':'native-s3-admin','initial_balances':bals}
+    if fam in {'controlled-cw20','fiat-token-cw20'}: return {'admin':'native-s3-admin','initial_balances':bals}
     if fam=='fee-token-cw20': return {'admin':'native-s3-admin','fee_collector':'native-s3-fee','fee_bps':10,'initial_balances':bals}
     if fam=='wrapped-native-token': return {'denom':'unative'}
+    if fam=='stargate-cw20': return {'name':'STG','symbol':'STG','decimals':18,'initial_balances':bals,'escrow_balance':str(SEED)}
     if fam=='cw721-mintable': return {'admin':'native-s3-admin','name':'S3NFT','symbol':'S3N'}
+    if fam=='cw721-drop':
+        first = drop_mint_sequence.first_token_id(iid or '') if drop_mint_sequence is not None else None
+        return {'admin':'native-s3-admin','name':'S1Drop','symbol':'S1D','next_token_id':int(first if first is not None else 1)}
     if fam=='astroport-pair': return {'asset0':'asset0','asset1':'asset1'}
     if fam=='xen-like': return {'genesis_ts':0}
     return {}
 
 def build(argv=None):
-    ap=argparse.ArgumentParser(); ap.add_argument('--plan',type=Path,default=DEFAULT_PLAN); ap.add_argument('--selector-map',type=Path,default=DEFAULT_SELECTOR); ap.add_argument('--code-cache',type=Path,default=DEFAULT_CODE_CACHE); ap.add_argument('--implementation-manifest',type=Path,default=DEFAULT_IMPL); ap.add_argument('--output-dir',type=Path,default=DEFAULT_OUT); ap.add_argument('--initial-state-mode',choices=('rpc','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_INITIAL_STATE_MODE','rpc')); ap.add_argument('--caller-mode',choices=('exact','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_CALLER_MODE','exact')); ap.add_argument('--rpc-url',default=os.environ.get('ETH_RPC_URL')); ap.add_argument('--initial-state-cache',type=Path,default=None); ns=ap.parse_args(argv)
+    ap=argparse.ArgumentParser(); ap.add_argument('--plan',type=Path,default=DEFAULT_PLAN); ap.add_argument('--selector-map',type=Path,default=DEFAULT_SELECTOR); ap.add_argument('--code-cache',type=Path,default=DEFAULT_CODE_CACHE); ap.add_argument('--implementation-manifest',type=Path,default=DEFAULT_IMPL); ap.add_argument('--output-dir',type=Path,default=DEFAULT_OUT); ap.add_argument('--initial-state-mode',choices=('rpc','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_INITIAL_STATE_MODE','rpc')); ap.add_argument('--caller-mode',choices=('exact','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_CALLER_MODE','exact')); ap.add_argument('--rpc-url',default=os.environ.get('ETH_RPC_URL')); ap.add_argument('--initial-state-cache',type=Path,default=None); ap.add_argument('--cw721-drop-mint-sequence',type=Path,default=None); ap.add_argument('--dataset-label',default='vegeta-s3-native'); ns=ap.parse_args(argv)
     selector=read_json(ns.selector_map); cache={str(k).lower():v for k,v in read_json(ns.code_cache).items() if isinstance(v,dict)}; idx,fam_by_addr=rule_index(selector,cache); impl=read_json(ns.implementation_manifest)
     wasm={r['native_code_family']:r['wasm_artifact'] for r in impl['families']}
     token_ids=TokenIdRemapper()
-    blocks=[]; instances={}; participant=defaultdict(set); allowances=set(); nft_tokens=defaultdict(dict); nft_owner_priority={}; nft_ops=set(); nft_operator_pairs=set(); nft_approve_senders=set(); nft_source_tokens=defaultdict(dict); multi_seed=set(); multi_approvals=set(); xen_first={}; bank_senders=set(); stats=defaultdict(int)
-    for line in ns.plan.read_text().splitlines():
+    drop_mint_sequence=Cw721DropMintSequence(ns.cw721_drop_mint_sequence)
+    drop_translated_mints: dict[tuple[str,str], int] = defaultdict(int)
+    workload_logical_addresses=set()
+    instances={}; participant=defaultdict(set); allowances=set(); nft_tokens=defaultdict(dict); nft_owner_priority={}; nft_ops=set(); nft_operator_pairs=set(); nft_approve_senders=set(); nft_source_tokens=defaultdict(dict); multi_seed=set(); multi_approvals=set(); xen_first={}; bank_senders=set(); stats=defaultdict(int)
+    out=ns.output_dir; out.mkdir(parents=True,exist_ok=True)
+    execution_tmp=out/'execution-plan.jsonl.tmp'
+    first_block=None; block_count=0
+    plan_handle=ns.plan.open(encoding='utf-8')
+    execution_handle=execution_tmp.open('w',encoding='utf-8')
+    for line in plan_handle:
         if not line.strip(): continue
-        b=json.loads(line); ob={'block_number':b['block_number'],'timestamp':b.get('timestamp',0),'transactions':[]}
+        b=json.loads(line); bn=int(b['block_number']); first_block=bn if first_block is None else min(first_block,bn); block_count+=1; ob={'block_number':bn,'timestamp':b.get('timestamp',0),'transactions':[]}
         for tx in b.get('transactions',[]):
             by_id={int(a['action_id']):a for a in tx.get('native_actions',[]) if a.get('action_id') is not None}; calls=[]; skipped=0
             for a in tx.get('native_actions',[]):
@@ -502,6 +740,10 @@ def build(argv=None):
                 c=translate(str(fam),str(ep),sig,tx,a,caller,token_ids)
                 if c is None: skipped+=1; continue
                 attach_revert_scope(c,a,by_id); calls.append(c); iid=c['instance_id']; instances[iid]=str(fam); stats['contract_calls']+=1
+                if str(fam)=='cw721-drop' and c['kind']=='execute' and 'mint_drop' in c.get('msg',{}):
+                    owner=drop_mint_sequence.owner_for_instance(iid)
+                    if owner:
+                        drop_translated_mints[(owner,str(tx.get('tx_hash') or '').lower())] += int(c['msg']['mint_drop']['quantity'])
                 if c['kind']=='execute':
                     m=c['msg']; participant[iid].add(c.get('sender',caller))
                     if 'transfer' in m: participant[iid].add(m['transfer']['recipient'])
@@ -509,7 +751,7 @@ def build(argv=None):
                         z=m['transfer_from']; participant[iid]|={z['owner'],z['recipient']}; allowances.add((iid,z['owner'],c.get('sender',caller)))
                     if 'approve' in m: participant[iid].add(c.get('sender',caller))
                     if fam=='wrapped-native-token' and ('deposit' in m or 'withdraw' in m): participant[iid].add(c.get('sender',caller)); bank_senders.add(c.get('sender',caller))
-                    if fam=='cw721-mintable':
+                    if fam in {'cw721-mintable','cw721-drop'}:
                         if 'transfer_nft' in m:
                             z=m['transfer_nft']; tid=int(z['token_id']); raw_tid=intv(c.get('source_token_id')); nft_source_tokens[iid][tid]=raw_tid; source_owner=norm_addr(c.get('source_owner')) or c.get('sender',caller)
                             note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,source_owner,3)
@@ -525,24 +767,34 @@ def build(argv=None):
                         z=m['send_from']; multi_seed.add((iid,int(z['token_id']),z['from']));
                         if c.get('sender')!=z['from']: multi_approvals.add((iid,z['from'],c.get('sender')))
                     if fam=='xen-like': xen_first.setdefault((iid,c.get('sender',caller)), next(iter(m)))
-                elif c['kind']=='query' and fam=='cw721-mintable' and 'owner_of' in c['msg']:
+                elif c['kind']=='query' and fam in {'cw721-mintable','cw721-drop'} and 'owner_of' in c['msg']:
                     tid=int(c['msg']['owner_of']['token_id']); nft_source_tokens[iid][tid]=intv(c.get('source_token_id')); note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,'native-s3-seed-owner',1)
+            for prepared_call in calls:
+                for key in ('sender','from','to'):
+                    value=prepared_call.get(key)
+                    if isinstance(value,str): workload_logical_addresses.add(value)
+                collect_logical_strings(prepared_call.get('msg'),workload_logical_addresses)
             scopes={int(c['source_revert_scope_action_id']) for c in calls if c.get('source_revert_scope_action_id') is not None}
             stats['internal_revert_scopes']+=len(scopes)
             stats['calls_in_internal_revert_scopes']+=sum(1 for c in calls if c.get('source_revert_scope_action_id') is not None)
-            ob['transactions'].append({'tx_index':tx['tx_index'],'tx_hash':tx['tx_hash'],'source_failed':bool(tx.get('source_failed')),'calls':calls,'skipped_actions':skipped})
+            ob['transactions'].append({'tx_index':tx['tx_index'],'tx_hash':tx['tx_hash'],'source_failed':bool(tx.get('source_failed')),'source_compute_proxy':int(tx.get('gas_used_compute_proxy') or 0),'calls':calls,'skipped_actions':skipped})
             stats['transactions']+=1; stats['skipped_actions']+=skipped
-        blocks.append(ob)
+        execution_handle.write(json.dumps(ob,separators=(',',':'))+'\n')
+        if block_count % 100 == 0: print(f'prepared execution blocks={block_count} tx={stats["transactions"]}', flush=True)
+    plan_handle.close(); execution_handle.close()
+    drop_mint_validation=validate_drop_mint_translation(drop_mint_sequence,drop_translated_mints)
     initial_state_meta={'mode':ns.initial_state_mode}
     rpc_nft_approvals={}
     if ns.initial_state_mode=='rpc':
-        if not blocks: raise RuntimeError('native S3 plan has no blocks')
-        initial_block=min(int(b['block_number']) for b in blocks)-1
+        if first_block is None: raise RuntimeError('native execution plan has no blocks')
+        initial_block=first_block-1
         cache_path=ns.initial_state_cache or (ns.output_dir/'evm-initial-state-cache.json')
         resolver=HistoricalEthCallCache(ns.rpc_url,initial_block,cache_path)
         if not ns.rpc_url and not resolver.has_cached_calls():
             raise RuntimeError('RPC-backed native initial state is required but ETH_RPC_URL is unset and no populated cache exists; rerun with ETH_RPC_URL=<archive-capable Ethereum RPC> or explicitly opt into --initial-state-mode heuristic')
         resolved=resolve_cw721_initial_state(resolver,nft_source_tokens,nft_operator_pairs)
+        for iid,tid in resolved.get('unresolved_tokens',[]):
+            nft_tokens.get(iid,{}).pop(int(tid),None)
         for iid,rows in resolved['owners'].items():
             for tid,owner in rows.items(): note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,int(tid),owner,100)
         rpc_nft_approvals=resolved['approvals']
@@ -553,11 +805,11 @@ def build(argv=None):
 
     # all instance participants need valid addresses; include tx actors only where relevant
     manifest_instances=[]
-    for iid,fam in sorted(instances.items()): manifest_instances.append({'instance_id':iid,'family':fam,'instantiate_msg':instantiate_msg(fam,participant[iid])})
+    for iid,fam in sorted(instances.items()): manifest_instances.append({'instance_id':iid,'family':fam,'instantiate_msg':instantiate_msg(fam,participant[iid],iid,drop_mint_sequence)})
     prime=[]
     for iid,owner,spender in sorted(allowances):
         fam=instances[iid]
-        if fam in {'cw20-base','controlled-cw20','fee-token-cw20','wrapped-native-token'}:
+        if fam in {'cw20-base','controlled-cw20','fiat-token-cw20','fee-token-cw20','wrapped-native-token','stargate-cw20'}:
             prime.append(contract_call('execute',fam,iid,owner,{'approve':{'spender':spender,'amount':str(SEED)}},{'action_id':None}))
     for iid,fam in sorted(instances.items()):
         if fam=='astroport-pair': prime.append(contract_call('execute',fam,iid,'native-s3-admin',{'sync':{'reserve0':str(PAIR_RESERVE),'reserve1':str(PAIR_RESERVE)}},{'action_id':None}))
@@ -570,24 +822,33 @@ def build(argv=None):
         owner=nft_tokens.get(iid,{}).get(tid)
         if owner and owner!=sender: nft_ops.add((iid,owner,sender))
     for iid,tokens in sorted(nft_tokens.items()):
-        for tid,owner in sorted(tokens.items()): prime.append(contract_call('execute','cw721-mintable',iid,'native-s3-admin',{'mint':{'owner':owner,'token_id':tid,'token_uri':None}},{'action_id':None}))
+        for tid,owner in sorted(tokens.items()):
+            fam=instances[iid]
+            msg={'seed_mint':{'owner':owner,'token_id':tid}} if fam=='cw721-drop' else {'mint':{'owner':owner,'token_id':tid,'token_uri':None}}
+            prime.append(contract_call('execute',fam,iid,'native-s3-admin',msg,{'action_id':None}))
     for (iid,tid),spender in sorted(rpc_nft_approvals.items()):
         owner=nft_tokens.get(iid,{}).get(int(tid))
-        if owner: prime.append(contract_call('execute','cw721-mintable',iid,owner,{'approve_nft':{'spender':spender,'token_id':int(tid)}},{'action_id':None}))
+        if owner:
+            fam=instances[iid]; prime.append(contract_call('execute',fam,iid,owner,{'approve_nft':{'spender':spender,'token_id':int(tid)}},{'action_id':None}))
     for iid,owner,operator in sorted(nft_ops):
-        prime.append(contract_call('execute','cw721-mintable',iid,owner,{'approve_all':{'operator':operator,'approved':True}},{'action_id':None}))
+        fam=instances[iid]; prime.append(contract_call('execute',fam,iid,owner,{'approve_all':{'operator':operator,'approved':True}},{'action_id':None}))
     for iid,tid,owner in sorted(multi_seed): prime.append(contract_call('execute','cw1155-like',iid,'native-s3-admin',{'mint':{'to':owner,'token_id':tid,'amount':str(SEED)}},{'action_id':None}))
     for iid,owner,op in sorted(multi_approvals): prime.append(contract_call('execute','cw1155-like',iid,owner,{'approve_all':{'operator':op,'approved':True}},{'action_id':None}))
     for (iid,user),first in sorted(xen_first.items()):
         if first in {'claim_mint_reward','claim_mint_reward_and_share'}: prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None}))
         elif first=='transfer':
             prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'claim_mint_reward':{}},{'action_id':None}))
-    out=ns.output_dir; out.mkdir(parents=True,exist_ok=True)
-    with (out/'execution-plan.jsonl').open('w') as f:
-        for b in blocks: f.write(json.dumps(b,separators=(',',':'))+'\n')
-    man={'schema_version':1,'dataset':'vegeta-s3-native','source_plan':str(ns.plan),'selector_map':str(ns.selector_map),'wasm_artifacts':wasm,'instances':manifest_instances,'bank_seeds':[{'address':a,'denom':'unative','amount':str(SEED*4)} for a in sorted(bank_senders) if a],'priming_calls':prime,'normalization':{'amount_policy':'positive EVM transfer amounts mapped to 1+(amount mod 1,000,000); zero remains zero','approval_policy':'zero approval remains zero; every positive ERC20-style approval maps to SEED so normalization cannot invert allowance>=spend for canonically successful transferFrom calls','nft_authorization_policy':'RPC mode reconstructs predecessor-block ERC721 ownerOf/getApproved/isApprovedForAll via high-level eth_call and primes only that logical state; heuristic mode remains an explicit non-publication fallback','caller_provenance':{'mode':ns.caller_mode,'source':'derived-geth-callTracer-effective-msg.sender' if ns.caller_mode=='exact' else 'legacy-frame-from-or-parent-context-fallback','delegatecall_rule':'inherit parent execution-scope msg.sender (EIP-7)' if ns.caller_mode=='exact' else None,'explicit_actions':stats.get('explicit_msg_senders',0),'missing_actions':stats.get('missing_msg_senders',0)},'initial_state':initial_state_meta,'token_ids':token_ids.summary(),'seed_balance':str(SEED),'pair_reserve':str(PAIR_RESERVE),'marketplace_order_key_policy':'sha256 of public calldata only; never source trace storage keys','purpose':'preserve storage/control-path key topology while avoiding uint256/u128, allowance-ordering, historical-state availability, caught-internal-revert artifacts, and trace-key leakage'},'statistics':dict(stats)}
+    execution_tmp.replace(out/'execution-plan.jsonl')
+    first_timestamp=0
+    try:
+        with (out/'execution-plan.jsonl').open(encoding='utf-8') as _f:
+            _first=next((json.loads(_line) for _line in _f if _line.strip()),None)
+            if _first: first_timestamp=int(_first.get('timestamp',0) or 0)
+    except (OSError, StopIteration, json.JSONDecodeError):
+        first_timestamp=0
+    man={'schema_version':2,'dataset':ns.dataset_label,'source_plan':str(ns.plan),'selector_map':str(ns.selector_map),'wasm_artifacts':wasm,'instances':manifest_instances,'bank_seeds':[{'address':a,'denom':'unative','amount':str(SEED*4)} for a in sorted(bank_senders) if a],'priming_calls':prime,'logical_addresses':sorted(workload_logical_addresses),'blocks':block_count,'transactions':int(stats['transactions']),'first_timestamp':first_timestamp,'normalization':{'amount_policy':'positive EVM transfer amounts mapped to 1+(amount mod 1,000,000); zero remains zero','approval_policy':'zero approval remains zero; every positive ERC20-style approval maps to SEED so normalization cannot invert allowance>=spend for canonically successful transferFrom calls','nft_authorization_policy':'RPC mode reconstructs predecessor-block ERC721 ownerOf/getApproved/isApprovedForAll via high-level eth_call and primes only that logical state; heuristic mode remains an explicit non-publication fallback','caller_provenance':{'mode':ns.caller_mode,'source':'derived-geth-callTracer-effective-msg.sender' if ns.caller_mode=='exact' else 'legacy-frame-from-or-parent-context-fallback','delegatecall_rule':'inherit parent execution-scope msg.sender (EIP-7)' if ns.caller_mode=='exact' else None,'explicit_actions':stats.get('explicit_msg_senders',0),'missing_actions':stats.get('missing_msg_senders',0)},'initial_state':initial_state_meta,'cw721_drop_mint_sequence':drop_mint_sequence.summary(),'cw721_drop_mint_translation_validation':drop_mint_validation,'token_ids':token_ids.summary(),'seed_balance':str(SEED),'pair_reserve':str(PAIR_RESERVE),'marketplace_order_key_policy':'sha256 of public calldata only; never source trace storage keys','purpose':'preserve storage/control-path key topology while avoiding uint256/u128, allowance-ordering, historical-state availability, caught-internal-revert artifacts, and trace-key leakage'},'statistics':dict(stats)}
     (out/'execution-manifest.json').write_text(json.dumps(man,indent=2,sort_keys=True)+'\n')
     print(f"wrote {out/'execution-plan.jsonl'}")
-    print(f"instances={len(manifest_instances)} priming_calls={len(prime)} tx={stats['transactions']} contract_calls={stats['contract_calls']} skipped_actions={stats['skipped_actions']}")
+    print(f"dataset={ns.dataset_label} blocks={block_count} instances={len(manifest_instances)} priming_calls={len(prime)} tx={stats['transactions']} contract_calls={stats['contract_calls']} skipped_actions={stats['skipped_actions']}")
     return 0
 if __name__=='__main__': raise SystemExit(build())

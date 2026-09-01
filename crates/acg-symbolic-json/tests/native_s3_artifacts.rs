@@ -6,6 +6,7 @@ use acg_symbolic_json::{normalize_document, parse_slice, IngestionContext};
 const FAMILIES: &[&str] = &[
     "cw20-base",
     "controlled-cw20",
+    "fiat-token-cw20",
     "fee-token-cw20",
     "wrapped-native-token",
     "cw721-mintable",
@@ -14,6 +15,8 @@ const FAMILIES: &[&str] = &[
     "cw1155-like",
     "marketplace-router",
     "operator-filter-helper",
+    "cw721-drop",
+    "stargate-cw20",
 ];
 
 #[test]

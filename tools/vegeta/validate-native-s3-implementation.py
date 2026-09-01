@@ -79,7 +79,8 @@ def main() -> int:
         unknown=sorted(used-set(fams))
         if unknown: errors.append(f"{label} references unimplemented families: {', '.join(unknown)}")
     report={'schema_version':1,'accepted':not errors,'families':len(fams),'errors':errors,'require_wasm_artifacts':args.require_wasm_artifacts,'require_generated_maps':args.require_generated_maps}
-    text=['Vegeta S3 native implementation + symbolic provenance validation','',f"accepted: {'yes' if report['accepted'] else 'no'}",f"families: {len(fams)}",f"errors: {len(errors)}"]+[f"ERROR: {e}" for e in errors]
+    dataset=str(manifest.get('dataset') or 'vegeta-s3')
+    text=[f'Vegeta native implementation + symbolic provenance validation ({dataset})','',f"accepted: {'yes' if report['accepted'] else 'no'}",f"families: {len(fams)}",f"errors: {len(errors)}"]+[f"ERROR: {e}" for e in errors]
     if args.json_output:
         p=root/args.json_output; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps(report,indent=2)+'\n')
     if args.text_output:

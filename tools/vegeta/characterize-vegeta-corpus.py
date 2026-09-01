@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -375,7 +376,17 @@ class RpcClient:
                 if payload.get("error") is not None:
                     raise RuntimeError(f"RPC {method} returned error: {payload['error']}")
                 return payload.get("result")
-            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, RuntimeError) as error:
+            except (
+                urllib.error.HTTPError,
+                urllib.error.URLError,
+                TimeoutError,
+                RuntimeError,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+                http.client.IncompleteRead,
+                ConnectionResetError,
+                BrokenPipeError,
+            ) as error:
                 last_error = error
                 retryable = True
                 if isinstance(error, urllib.error.HTTPError):

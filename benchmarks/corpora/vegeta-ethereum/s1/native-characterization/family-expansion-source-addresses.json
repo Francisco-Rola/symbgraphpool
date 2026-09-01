@@ -1,0 +1,166 @@
+{
+  "addresses": [
+    {
+      "address": "0x02eb6029adcb09bdc0bde2e61614be415689eabd",
+      "roles": [
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x046898045b351b57fb83421869c6e5d8e4bcc089",
+      "roles": [
+        "delegate-target",
+        "effective-code"
+      ]
+    },
+    {
+      "address": "0x05b1aec1267bb01b5d12c50ab926489805bbcc9c",
+      "roles": [
+        "effective-code",
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x0e6d176b5c50e2600da92c8ea7f4eed178e9bd07",
+      "roles": [
+        "effective-code",
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x1b1d2dccc2d3f25d7791e9dc4751856ec5eeafaa",
+      "roles": [
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x1bbec3ef715cce96b715bc0aa8fef8989f7ad3b2",
+      "roles": [
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x2b2fe81487cfdccd2e2cf32819125d9c8bddde01",
+      "roles": [
+        "effective-code",
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x50f210587307f0d0f5a963b77f6d25885567e336",
+      "roles": [
+        "effective-code",
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x516677d72c721f992e99033896b237b6123c16ca",
+      "roles": [
+        "delegate-target",
+        "effective-code"
+      ]
+    },
+    {
+      "address": "0x5eb5babcefea846b220c82f222f00df95934f5f0",
+      "roles": [
+        "delegate-target",
+        "effective-code"
+      ]
+    },
+    {
+      "address": "0x75b4fdcf7946d99d6fb1fa8c979da004b5bfbd33",
+      "roles": [
+        "effective-code",
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x7974e0b19d8ee4daf3fdfecb2420507c198d3dbe",
+      "roles": [
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x798116c6858dc4be729820d36554c4c427629744",
+      "roles": [
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0x83c3864e1b3da7655cdfbcf586296754522c4102",
+      "roles": [
+        "delegate-target",
+        "effective-code"
+      ]
+    },
+    {
+      "address": "0x925fe29ff5db1614e1344c803543ccbf60fd1641",
+      "roles": [
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0xa6cd272874ee7c872eb66801eff62784c0b13285",
+      "roles": [
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0xaadc1fe68b8cacfb12a58fe99b24311c32d15e67",
+      "roles": [
+        "effective-code",
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0xaf5191b0de278c7286d6c7cc6ab6bb8a73ba2cd6",
+      "roles": [
+        "effective-code",
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0xba3e7dce870b30d5c62deb99951ea235457bdd9e",
+      "roles": [
+        "delegate-target",
+        "effective-code"
+      ]
+    },
+    {
+      "address": "0xbd18e233e12f2a066f5b5a351285ab5a39b1f2ac",
+      "roles": [
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0xe3d28e90f110db9ccc056240aab5330a609b7c2e",
+      "roles": [
+        "effective-code",
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0xeae506c1bcd0f77f0802ca630f65bca442ba0bd9",
+      "roles": [
+        "effective-code",
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0xf66ef61f504a6d326d7bf1771f4b613af57c7126",
+      "roles": [
+        "storage-owner"
+      ]
+    },
+    {
+      "address": "0xf8d1c60111acea42eda055bc7e7c08ad487004a1",
+      "roles": [
+        "delegate-target",
+        "effective-code"
+      ]
+    }
+  ],
+  "dataset": "vegeta-s1",
+  "purpose": "addresses requiring source/semantics review for selected S1 family-expansion clusters",
+  "schema_version": 1
+}

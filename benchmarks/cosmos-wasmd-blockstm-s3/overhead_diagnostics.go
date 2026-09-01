@@ -43,6 +43,21 @@ func boolEnv(name string) bool {
 	}
 }
 
+func boolEnvDefault(name string, fallback bool) bool {
+	value, ok := os.LookupEnv(name)
+	if !ok || value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "TRUE", "yes", "YES", "on", "ON":
+		return true
+	case "0", "false", "FALSE", "no", "NO", "off", "OFF":
+		return false
+	default:
+		return fallback
+	}
+}
+
 func addSerialOverheadControl(dst *serialOverheadControl, src serialOverheadControl) {
 	dst.ActiveNanos += src.ActiveNanos
 	dst.BranchNanos += src.BranchNanos

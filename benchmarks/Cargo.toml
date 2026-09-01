@@ -5,6 +5,7 @@ members = [
     "contracts/vegeta-trace",
     "contracts/native-s3/cw20-base",
     "contracts/native-s3/controlled-cw20",
+    "contracts/native-s3/fiat-token-cw20",
     "contracts/native-s3/fee-token-cw20",
     "contracts/native-s3/wrapped-native-token",
     "contracts/native-s3/cw721-mintable",
@@ -13,6 +14,8 @@ members = [
     "contracts/native-s3/cw1155-like",
     "contracts/native-s3/marketplace-router",
     "contracts/native-s3/operator-filter-helper",
+    "contracts/native-s3/cw721-drop",
+    "contracts/native-s3/stargate-cw20",
 ]
 resolver = "2"
 

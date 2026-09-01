@@ -143,6 +143,103 @@ class WasmdPublicationEvalTests(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("incomplete/mismatched Wasmd campaign", proc.stderr + proc.stdout)
 
+    def test_no_exact_oracle_summary_accepts_five_system_campaign(self):
+        strategies = [
+            "cosmos-wasmd-direct-serial", "cosmos-wasmd-block-stm",
+            "cosmos-wasmd-aria-fb", "cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust",
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); records = td / "records.jsonl"
+            rows = []
+            for strategy in strategies:
+                for block in range(2):
+                    pre = 25 if strategy in {"cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust"} else 0
+                    rows.append({
+                        "strategy": strategy, "workers": 2, "sample": 0, "block_number": block,
+                        "transactions": 10, "matched_serial_nanos": 100, "strategy_total_nanos": 100,
+                        "pre_consensus_nanos": pre, "post_consensus_nanos": 75 if pre else 100,
+                        "serial_equivalent": True,
+                    })
+            records.write_text("".join(json.dumps(r)+"\n" for r in rows))
+            out = td / "out"
+            subprocess.run([sys.executable, str(SUMMARIZER), "--records", str(records), "--output-dir", str(out), "--no-exact-oracle"], check=True)
+            obj = json.loads((out / "summary.json").read_text())
+            self.assertFalse(obj["exact_oracle_enabled"])
+            self.assertEqual(len(obj["rows"]), 5)
+            self.assertNotIn("ACG-Oracle", (out / "summary.txt").read_text())
+            self.assertIn("no hindsight exact-access oracle", obj["throughput_definition"]["interpretation"])
+
+    def test_rust_acg_only_summary_accepts_diagnostic_subset(self):
+        strategies = [
+            "cosmos-wasmd-direct-serial",
+            "cosmos-wasmd-symbgraph-rust-exact-trace-oracle",
+            "cosmos-wasmd-symbgraph-rust",
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            records = td / "records.jsonl"
+            rows = []
+            for block in range(2):
+                for strategy in strategies:
+                    pre = 0
+                    post = 100
+                    total = 100
+                    if strategy == "cosmos-wasmd-symbgraph-rust-exact-trace-oracle":
+                        # The hindsight oracle must not set C even when its pre-phase is larger.
+                        pre = 100
+                        post = 2
+                        total = 102
+                    elif strategy == "cosmos-wasmd-symbgraph-rust":
+                        pre = 20 + 5 * block
+                        post = 5
+                        total = pre + post
+                    row = {
+                        "strategy": strategy,
+                        "workers": 2,
+                        "sample": 0,
+                        "block_number": block,
+                        "transactions": 10,
+                        "matched_serial_nanos": 100,
+                        "strategy_total_nanos": total,
+                        "pre_consensus_nanos": pre,
+                        "post_consensus_nanos": post,
+                        "serial_equivalent": True,
+                        "reexecutions": 0,
+                    }
+                    if strategy == "cosmos-wasmd-symbgraph-rust-exact-trace-oracle":
+                        row.update({
+                            "oracle_translation_compensation_edges": 4,
+                            "symb_dependency_edges": 3,
+                            "symb_total_estimated_cost": 100,
+                            "symb_critical_path_cost": 20,
+                        })
+                    elif strategy == "cosmos-wasmd-symbgraph-rust":
+                        row.update({
+                            "symb_dependency_edges": 5,
+                            "symb_total_estimated_cost": 100,
+                            "symb_critical_path_cost": 40,
+                        })
+                    rows.append(row)
+            records.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            out = td / "summary"
+            subprocess.run(
+                [
+                    sys.executable, str(SUMMARIZER),
+                    "--records", str(records),
+                    "--output-dir", str(out),
+                    "--rust-acg-only",
+                ],
+                check=True,
+            )
+            obj = json.loads((out / "summary.json").read_text())
+            self.assertEqual(obj["consensus_window_nanos"], 25)
+            self.assertEqual(len(obj["rows"]), 3)
+            self.assertIn("rust-only diagnostic campaign", obj["consensus_window_definition"])
+            text = (out / "summary.txt").read_text()
+            self.assertIn("Rust-ACG perfect-access headroom", text)
+            self.assertNotIn("AriaFB ports", text)
+            self.assertNotIn("Vegeta ports", text)
+
     def test_go_harness_contains_ariafb_same_wasmd_row(self):
         main = (ROOT / "benchmarks" / "cosmos-wasmd-blockstm-s3" / "main.go").read_text()
         runner = (ROOT / "benchmarks" / "cosmos-wasmd-blockstm-s3" / "policy_runner.go").read_text()

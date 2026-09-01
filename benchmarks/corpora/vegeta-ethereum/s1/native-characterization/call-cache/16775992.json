@@ -1,0 +1,7 @@
+{
+  "block_hash": "0x77e3c964bed153c6d5be5dc285d6b622b0234300832429ff51310fbdf2b9aebc",
+  "block_number": 16775992,
+  "schema_version": 1,
+  "trace_semantics": "geth-callTracer-v1",
+  "transactions": []
+}

@@ -97,7 +97,7 @@ The maintained controlled evaluator now runs five strategies over the same state
 
 - direct serial;
 - Cosmos SDK BlockSTM;
-- AriaFB same-Wasmd port with exact Rule-2 aborts and hot-chain dependency-DAG fallback;
+- AriaFB same-Wasmd port with exact Rule-2 aborts and completion-driven hot-chain dependency-DAG fallback;
 - Vegeta same-Wasmd `SpeculateMod`/`ParallelMod` port with hot-key proposal reordering, Rule-2 replay batches, and access-change handling;
 - Rust-ACG pre-consensus symbolic/adaptive scheduling + canonical validation/replay.
 

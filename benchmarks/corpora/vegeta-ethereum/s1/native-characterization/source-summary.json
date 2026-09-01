@@ -1,0 +1,13 @@
+{
+  "blocks": 5000,
+  "first_block": 16774645,
+  "last_block": 16779644,
+  "read_records": 6941448,
+  "relevant_address_file": "benchmarks/corpora/vegeta-ethereum/s1/native-characterization/relevant-addresses.json",
+  "relevant_addresses": 157080,
+  "schema_version": 1,
+  "source_corpus": "benchmarks/corpora/vegeta-ethereum/s1/corpus.jsonl",
+  "thin_corpus": "benchmarks/corpora/vegeta-ethereum/s1/native-characterization/thin-corpus.jsonl",
+  "transactions": 739863,
+  "write_records": 2422082
+}

@@ -451,6 +451,33 @@ func TestAriaDirectPredecessorsRemoveTransitiveConflictEdge(t *testing.T) {
 	}
 }
 
+func TestAriaFallbackReleasesSuccessorOnIndividualCompletion(t *testing.T) {
+	// Two independent ready transactions start together. tx1 has a short
+	// successor chain while tx0 has an unrelated successor. replayAriaP's
+	// shrinkDag(done)+popNextTxBatch behavior releases tx3 as soon as tx1
+	// finishes; it must not wait for tx0 or tx2 to complete a whole level.
+	edges := map[int]map[int]struct{}{
+		0: {2: {}},
+		1: {3: {}},
+		3: {4: {}},
+	}
+	indegree := map[int]int{0: 0, 1: 0, 2: 1, 3: 1, 4: 1}
+
+	got := ariaReleaseSuccessors(1, indegree, edges)
+	if len(got) != 1 || got[0] != 3 {
+		t.Fatalf("released after tx1=%v want [3]", got)
+	}
+	if indegree[2] != 1 {
+		t.Fatalf("unrelated tx2 indegree=%d want 1", indegree[2])
+	}
+	if indegree[3] != 0 {
+		t.Fatalf("tx3 indegree=%d want 0", indegree[3])
+	}
+	if indegree[4] != 1 {
+		t.Fatalf("tx4 must still wait for tx3, indegree=%d", indegree[4])
+	}
+}
+
 func TestAriaFallbackHotChainPrecedesEarlierConflictingNonChain(t *testing.T) {
 	store := storeIDFromName("wasm")
 	trackers := make([]*accessTracker, 4)
@@ -467,6 +494,37 @@ func TestAriaFallbackHotChainPrecedesEarlierConflictingNonChain(t *testing.T) {
 	edges := ariaFallbackEdges([]int{0, 1, 2, 3}, trackers)
 	if _, ok := edges[1][0]; !ok {
 		t.Fatalf("fallback edges=%v; hot-chain tx1 must precede conflicting earlier tx0", edges)
+	}
+}
+
+func TestAriaFallbackRestoresConflictLostByHotChainReversal(t *testing.T) {
+	store := storeIDFromName("wasm")
+	trackers := make([]*accessTracker, 5)
+	for i := range trackers {
+		trackers[i] = newAccessTracker(nil)
+	}
+
+	// Historical BuildDAG has the conflict path tx0 -> tx1 -> tx2 and removes
+	// the direct tx0 -> tx2 edge as transitive. tx2/3/4 form the hot chain.
+	// replayAriaP reverses tx1 -> tx2 into tx2 -> tx1; without restoring the
+	// omitted tx0/tx2 relation, tx0 and tx2 become unordered even though they
+	// still conflict on z.
+	trackers[0].write(store, []byte("x"))
+	trackers[0].write(store, []byte("z"))
+	trackers[1].read(store, []byte("x"))
+	trackers[1].write(store, []byte("y"))
+	trackers[2].read(store, []byte("y"))
+	trackers[2].read(store, []byte("z"))
+	trackers[2].read(store, []byte("hot"))
+	trackers[3].read(store, []byte("hot"))
+	trackers[4].read(store, []byte("hot"))
+
+	edges := ariaFallbackEdges([]int{0, 1, 2, 3, 4}, trackers)
+	if _, ok := edges[2][0]; !ok {
+		t.Fatalf("fallback edges=%v; hot-chain reversal must retain an ordering for conflicting tx2/tx0", edges)
+	}
+	if _, ok := edges[2][1]; !ok {
+		t.Fatalf("fallback edges=%v; hot-chain tx2 must retain priority over tx1", edges)
 	}
 }
 

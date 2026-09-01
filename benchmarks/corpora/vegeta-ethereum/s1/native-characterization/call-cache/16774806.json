@@ -1,0 +1,69 @@
+{
+  "block_hash": "0xad77c89c0e4593e46d6783cfcc62acd7ce7d45b01318d1f5452af307f9af938e",
+  "block_number": 16774806,
+  "schema_version": 1,
+  "trace_semantics": "geth-callTracer-v1",
+  "transactions": [
+    {
+      "result": {
+        "from": "0x9715254754284a0b3e4c7bf8f57e790415041c1c",
+        "gas": "0x5208",
+        "gasUsed": "0x5208",
+        "input": "0x",
+        "to": "0x4207a93dba092bd992081ecd602471a3b10d3e05",
+        "type": "CALL",
+        "value": "0x43fba35fc6e93"
+      },
+      "tx_hash": "0x21b112a72040504b7bf420f7d7229416221c4be5a54e6e3c1ba9c794b9cfb21f"
+    },
+    {
+      "result": {
+        "from": "0x3018018c44338b9728d02be12d632c6691e020d1",
+        "gas": "0x186a0",
+        "gasUsed": "0xed86",
+        "input": "0x23b872dd0000000000000000000000009d4b480bd19adff11131febe67dd11a59824e7ac0000000000000000000000000442ca57e8cb2586199ec44b7f6254c05ccd3afd0000000000000000000000000000000000000000000000000000000008f0d180",
+        "to": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        "type": "CALL",
+        "value": "0x0"
+      },
+      "tx_hash": "0x90481451dfc86b4c2af81c30653c518566f29cee667e48448ee0c7e068e08eea"
+    },
+    {
+      "result": {
+        "from": "0x0e0754c25261bb320dd27835b703b73ed2a53c59",
+        "gas": "0x8a53",
+        "gasUsed": "0x8a53",
+        "input": "0xa9059cbb000000000000000000000000c7deff2806ba11acf6b52ab9cfcd2cbc311c278b000000000000000000000000000000000000000000000120d23f994f66ffa780",
+        "output": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "to": "0x42b91f1d05afea671a2da3c780eda2abf0a2a366",
+        "type": "CALL",
+        "value": "0x0"
+      },
+      "tx_hash": "0x66f91ee079873c0e815e0b7beb685263b565256953a0c1202101b19728f2b352"
+    },
+    {
+      "result": {
+        "from": "0x5b7e009621946fb7646974da21a02137fea05e79",
+        "gas": "0x5208",
+        "gasUsed": "0x5208",
+        "input": "0x",
+        "to": "0x0de6d6833a254bd3f081587021b0fbe66e8985ee",
+        "type": "CALL",
+        "value": "0x5fe575071948"
+      },
+      "tx_hash": "0x4e1851f39506d9d5baf9ff740f1186d8fb86b9a607fcc61c9985466538bbb9d2"
+    },
+    {
+      "result": {
+        "from": "0x66c348c2d6f0a5c2d1b34dc87ab61bfd62feb9cd",
+        "gas": "0x5208",
+        "gasUsed": "0x5208",
+        "input": "0x",
+        "to": "0x621619c2f8a3578603d662d36394289c04e1d1bc",
+        "type": "CALL",
+        "value": "0x13e5ae31c40c429"
+      },
+      "tx_hash": "0x3b654e698b777b3ec057087f395b668ef018f5ea76af8db4d6496c1f0f36a705"
+    }
+  ]
+}

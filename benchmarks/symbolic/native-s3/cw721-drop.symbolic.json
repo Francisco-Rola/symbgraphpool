@@ -1,0 +1,760 @@
+{
+  "schema_version": "3.1-compact-config-field-groups",
+  "contract": "cw721-drop",
+  "source": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+  "analysis_provenance": {
+    "method": "llm-source-derived",
+    "source_sha256": "4d1511192c128dee34b7892bd4608fceda76c46b35d584c1fba41021c9ebfba0",
+    "source_scope": "complete native contract source",
+    "historical_trace_keys_used": false,
+    "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
+  },
+  "storage_resources": {
+    "CONFIG": {
+      "key_semantic_name": "singleton"
+    },
+    "OWNER": {
+      "key_semantic_name": "token_id"
+    },
+    "APPROVAL": {
+      "key_semantic_name": "token_id"
+    },
+    "OPERATORS": {
+      "key_semantic_name": "owner_operator"
+    },
+    "OWNER_COUNT": {
+      "key_semantic_name": "owner"
+    },
+    "MINTED_BY_WALLET": {
+      "key_semantic_name": "minter"
+    },
+    "MINTED_BY_STAGE": {
+      "key_semantic_name": "minter_stage"
+    },
+    "USED_NONCES": {
+      "key_semantic_name": "minter_nonce"
+    }
+  },
+  "dependency_kinds": {
+    "input": "depends only on message/sender/environment input",
+    "state": "depends only on stored state",
+    "input_and_state": "depends on both input and stored state",
+    "none": "unconditional"
+  },
+  "profiles": [
+    {
+      "entrypoint": "instantiate",
+      "input_parameters": [
+        "msg.admin",
+        "msg.name",
+        "msg.symbol",
+        "msg.next_token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 62,
+            "end_line": 62,
+            "code": "CONFIG.save(deps.storage, &Config { admin: deps.api.addr_validate(&msg.admin)?, name: msg.name, symbol: msg.symbol, next_token_id: msg.next_token_id, total_supply: 0 })?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SeedMint",
+      "input_parameters": [
+        "info.sender",
+        "owner",
+        "token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 82,
+            "end_line": 82,
+            "code": "let mut config = CONFIG.load(deps.storage)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 85,
+            "end_line": 85,
+            "code": "OWNER.save(deps.storage, token_id, &owner)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER_COUNT",
+          "key": {
+            "semantic_name": "owner",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 86,
+            "end_line": 86,
+            "code": "OWNER_COUNT.update(deps.storage, owner.as_str(), |value| -> StdResult<_> { Ok(value.unwrap_or_default() + 1) })?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "info.sender == CONFIG.admin",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 89,
+            "end_line": 89,
+            "code": "CONFIG.save(deps.storage, &config)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::MintDrop",
+      "input_parameters": [
+        "info.sender",
+        "recipient",
+        "quantity",
+        "stage_key",
+        "nonce_key"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "USED_NONCES",
+          "key": {
+            "semantic_name": "minter_nonce",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, nonce_key)"
+            }
+          },
+          "guard": {
+            "expression": "nonce_key is Some",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 97,
+            "end_line": 97,
+            "code": "if USED_NONCES.may_load(deps.storage, (minter.as_str(), nonce))?.unwrap_or(false) { return Err(ContractError::NonceUsed); }"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "USED_NONCES",
+          "key": {
+            "semantic_name": "minter_nonce",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, nonce_key)"
+            }
+          },
+          "guard": {
+            "expression": "nonce_key is Some and unused",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 98,
+            "end_line": 98,
+            "code": "USED_NONCES.save(deps.storage, (minter.as_str(), nonce), &true)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 82,
+            "end_line": 82,
+            "code": "let mut config = CONFIG.load(deps.storage)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "quantity > 0",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 103,
+            "end_line": 103,
+            "code": "OWNER.save(deps.storage, token_id, &recipient)?;"
+          },
+          "notes": [
+            "Sequential token_id is derived from CONFIG.next_token_id; wildcard key is deliberate conservative symbolic representation."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "quantity > 0",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 89,
+            "end_line": 89,
+            "code": "CONFIG.save(deps.storage, &config)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER_COUNT",
+          "key": {
+            "semantic_name": "owner",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "quantity > 0",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 108,
+            "end_line": 108,
+            "code": "OWNER_COUNT.update(deps.storage, recipient.as_str(), |value| -> StdResult<_> { Ok(value.unwrap_or_default() + u64::from(quantity)) })?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "MINTED_BY_WALLET",
+          "key": {
+            "semantic_name": "minter",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "quantity > 0",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 109,
+            "end_line": 109,
+            "code": "MINTED_BY_WALLET.update(deps.storage, minter.as_str(), |value| -> StdResult<_> { Ok(value.unwrap_or_default() + u64::from(quantity)) })?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "MINTED_BY_STAGE",
+          "key": {
+            "semantic_name": "minter_stage",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, stage_key)"
+            }
+          },
+          "guard": {
+            "expression": "stage_key is Some",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 111,
+            "end_line": 111,
+            "code": "MINTED_BY_STAGE.update(deps.storage, (minter.as_str(), stage), |value| -> StdResult<_> { Ok(value.unwrap_or_default() + u64::from(quantity)) })?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::TransferNft",
+      "input_parameters": [
+        "info.sender",
+        "recipient",
+        "token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 117,
+            "end_line": 117,
+            "code": "let owner = OWNER.may_load(deps.storage, token_id)?.ok_or(ContractError::NotFound)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "APPROVAL",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "sender != owner",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 119,
+            "end_line": 119,
+            "code": "if APPROVAL.may_load(deps.storage, token_id)?.as_ref() == Some(sender) { return Ok(owner); }"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "OPERATORS",
+          "key": {
+            "semantic_name": "owner_operator",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(owner, info.sender)"
+            }
+          },
+          "guard": {
+            "expression": "sender != owner and not token-approved",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 120,
+            "end_line": 120,
+            "code": "if OPERATORS.may_load(deps.storage, (owner.as_str(), sender.as_str()))?.unwrap_or(false) { return Ok(owner); }"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "authorized",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 103,
+            "end_line": 103,
+            "code": "OWNER.save(deps.storage, token_id, &recipient)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "APPROVAL",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "authorized",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 128,
+            "end_line": 128,
+            "code": "APPROVAL.remove(deps.storage, token_id);"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER_COUNT",
+          "key": {
+            "semantic_name": "owner",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "authorized; old owner is state-derived",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 129,
+            "end_line": 129,
+            "code": "OWNER_COUNT.update(deps.storage, old_owner.as_str(), |value| -> StdResult<_> { Ok(value.unwrap_or_default().saturating_sub(1)) })?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "OWNER_COUNT",
+          "key": {
+            "semantic_name": "owner",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "recipient"
+            }
+          },
+          "guard": {
+            "expression": "authorized",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 108,
+            "end_line": 108,
+            "code": "OWNER_COUNT.update(deps.storage, recipient.as_str(), |value| -> StdResult<_> { Ok(value.unwrap_or_default() + u64::from(quantity)) })?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ApproveNft",
+      "input_parameters": [
+        "info.sender",
+        "spender",
+        "token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 117,
+            "end_line": 117,
+            "code": "let owner = OWNER.may_load(deps.storage, token_id)?.ok_or(ContractError::NotFound)?;"
+          },
+          "notes": []
+        },
+        {
+          "kind": "read",
+          "resource": "OPERATORS",
+          "key": {
+            "semantic_name": "owner_operator",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "owner != sender",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 136,
+            "end_line": 136,
+            "code": "if owner != sender && !OPERATORS.may_load(deps.storage, (owner.as_str(), sender.as_str()))?.unwrap_or(false) { return Err(ContractError::Unauthorized); }"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "APPROVAL",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "owner == sender or approved operator",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 137,
+            "end_line": 137,
+            "code": "APPROVAL.save(deps.storage, token_id, &deps.api.addr_validate(&spender)?)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::ApproveAll",
+      "input_parameters": [
+        "info.sender",
+        "operator",
+        "approved"
+      ],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "OPERATORS",
+          "key": {
+            "semantic_name": "owner_operator",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, operator)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 75,
+            "end_line": 75,
+            "code": "OPERATORS.save(deps.storage, (info.sender.as_str(), operator.as_str()), &approved)?;"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::OwnerOf",
+      "input_parameters": [
+        "token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "OWNER",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 144,
+            "end_line": 144,
+            "code": "QueryMsg::OwnerOf { token_id } => to_json_binary(&OwnerResponse { owner: OWNER.load(deps.storage, token_id)?.into_string() }),"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Approved",
+      "input_parameters": [
+        "token_id"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "APPROVAL",
+          "key": {
+            "semantic_name": "token_id",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "token_id"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 145,
+            "end_line": 145,
+            "code": "QueryMsg::Approved { token_id } => to_json_binary(&APPROVAL.may_load(deps.storage, token_id)?.map(Addr::into_string)),"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::Balance",
+      "input_parameters": [
+        "owner"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "OWNER_COUNT",
+          "key": {
+            "semantic_name": "owner",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "owner"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 146,
+            "end_line": 146,
+            "code": "QueryMsg::Balance { owner } => to_json_binary(&CountResponse { count: OWNER_COUNT.may_load(deps.storage, &owner)?.unwrap_or_default() }),"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::MintedByWallet",
+      "input_parameters": [
+        "minter"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "MINTED_BY_WALLET",
+          "key": {
+            "semantic_name": "minter",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "minter"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 147,
+            "end_line": 147,
+            "code": "QueryMsg::MintedByWallet { minter } => to_json_binary(&CountResponse { count: MINTED_BY_WALLET.may_load(deps.storage, &minter)?.unwrap_or_default() }),"
+          },
+          "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::TotalSupply",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "CONFIG",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+            "start_line": 148,
+            "end_line": 148,
+            "code": "QueryMsg::TotalSupply {} => to_json_binary(&CountResponse { count: CONFIG.load(deps.storage)?.total_supply }),"
+          },
+          "notes": []
+        }
+      ]
+    }
+  ]
+}

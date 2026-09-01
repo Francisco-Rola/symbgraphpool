@@ -16,7 +16,11 @@ __pycache__/
 benchmarks/corpora/vegeta-ethereum/**/blocks/
 benchmarks/corpora/vegeta-ethereum/**/corpus.jsonl
 benchmarks/corpora/vegeta-ethereum/**/manifest.json
+benchmarks/corpora/vegeta-ethereum/**/tx-traces/
+benchmarks/corpora/vegeta-ethereum/**/validation-report.json
 benchmarks/corpora/vegeta-ethereum/**/characterization/
+benchmarks/corpora/vegeta-ethereum/s1/native-characterization/thin-corpus.jsonl
+benchmarks/corpora/vegeta-ethereum/s1/native-characterization/code-cache.json
 
 # Generated native translation plans (derived from reconstructed corpora/call caches).
 benchmarks/corpora/vegeta-ethereum/**/native-plan/
