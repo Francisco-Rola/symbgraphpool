@@ -467,6 +467,16 @@ def attach_revert_scope(call: dict, action: dict, by_id: dict[int,dict]) -> dict
     if scope is not None: call['source_revert_scope_action_id']=scope
     return call
 
+def counts_for_drop_mint_event_validation(tx: dict, call: dict) -> bool:
+    """Count only source-committed mint effects against ERC-721 Transfer mint events.
+
+    The touched-state semantic audit deliberately includes reviewed reverted paths because the
+    public-RPC source denominator records execution touches. The mint-sequence validator is
+    different: Transfer(from=0) logs only describe committed mint effects. Internal failed call
+    scopes (and failed top-level transactions) must therefore never inflate translated mint counts.
+    """
+    return not bool(tx.get('source_failed')) and call.get('source_revert_scope_action_id') is None
+
 def canon_ep(ep: str | None) -> str:
     if not ep: return ''
     return ep.replace('marketplace::','').replace('helper::','').lower()
@@ -740,7 +750,10 @@ def build(argv=None):
                 c=translate(str(fam),str(ep),sig,tx,a,caller,token_ids)
                 if c is None: skipped+=1; continue
                 attach_revert_scope(c,a,by_id); calls.append(c); iid=c['instance_id']; instances[iid]=str(fam); stats['contract_calls']+=1
-                if str(fam)=='cw721-drop' and c['kind']=='execute' and 'mint_drop' in c.get('msg',{}):
+                if (
+                    str(fam)=='cw721-drop' and c['kind']=='execute' and 'mint_drop' in c.get('msg',{})
+                    and counts_for_drop_mint_event_validation(tx,c)
+                ):
                     owner=drop_mint_sequence.owner_for_instance(iid)
                     if owner:
                         drop_translated_mints[(owner,str(tx.get('tx_hash') or '').lower())] += int(c['msg']['mint_drop']['quantity'])

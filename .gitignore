@@ -12,26 +12,25 @@
 __pycache__/
 *.pyc
 
-# Reconstructed public Ethereum/Vegeta corpora (large; regenerate from tools/vegeta/).
+# Reconstructed public Ethereum/Vegeta corpora and RPC-derived characterization outputs
+# (large/generated; regenerate from tools/vegeta/ and tools/legacy-scripts/).
 benchmarks/corpora/vegeta-ethereum/**/blocks/
 benchmarks/corpora/vegeta-ethereum/**/corpus.jsonl
 benchmarks/corpora/vegeta-ethereum/**/manifest.json
 benchmarks/corpora/vegeta-ethereum/**/tx-traces/
 benchmarks/corpora/vegeta-ethereum/**/validation-report.json
 benchmarks/corpora/vegeta-ethereum/**/characterization/
-benchmarks/corpora/vegeta-ethereum/s1/native-characterization/thin-corpus.jsonl
-benchmarks/corpora/vegeta-ethereum/s1/native-characterization/code-cache.json
+benchmarks/corpora/vegeta-ethereum/**/native-characterization/
 
 # Generated native translation plans (derived from reconstructed corpora/call caches).
 benchmarks/corpora/vegeta-ethereum/**/native-plan/
 # Generated execution bundles/concrete native traces and topology reports.
 benchmarks/corpora/vegeta-ethereum/**/native-execution/
 
-
-
-# RPC-derived characterization caches.
-benchmarks/corpora/vegeta-ethereum/**/native-characterization/call-cache/
-benchmarks/corpora/vegeta-ethereum/**/native-characterization/code-cache.json
-benchmarks/corpora/vegeta-ethereum/**/native-characterization/thin-corpus.jsonl
-
-
+# Local build/recovery/profiler artifacts that are not source-of-truth repository inputs.
+/benchmarks/cosmos-blockstm-s3/cosmos-blockstm-s3
+/benchmarks/cosmos-wasmd-blockstm-s3/cosmos-wasmd-blockstm-s3
+*.orig
+*.rej
+*~
+evaluation/vegeta/wasmd-pprof/*.pprof

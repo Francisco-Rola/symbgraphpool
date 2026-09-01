@@ -262,6 +262,96 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
             self.assertEqual(row["exact_single_selector_gain"],1)
             self.assertTrue(row["review_priority_eligible"])
 
+    def test_s1_transaction_deficit_reports_aligned_diagnostic_denominators(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            owner = "0x" + "ab" * 20
+            key = "evm/" + "ab" * 20 + "/" + "00" * 32
+            corpus = td / "corpus.jsonl"
+            plan = td / "plan.jsonl"
+            out = td / "deficit.json"
+            txt = td / "deficit.txt"
+            corpus.write_text(json.dumps({
+                "block_number": 11,
+                "transactions": [
+                    {"tx_index": 0, "tx_hash": "0x01", "reads": [], "writes": [key]},
+                    {"tx_index": 1, "tx_hash": "0x02", "reads": [key], "writes": []},
+                    {"tx_index": 2, "tx_hash": "0x03", "reads": [], "writes": []},
+                ],
+            }) + "\n")
+            plan.write_text(json.dumps({
+                "block_number": 11,
+                "transactions": [
+                    {"tx_hash": "0x01", "native_actions": [{
+                        "storage_context_address": owner, "native_code_family": "cw721-drop",
+                        "translation_status": "mapped-native-call", "dispatch": "mapped-entrypoint",
+                        "semantic_effect": "READ_WRITE", "selector": "0xaaaaaaaa", "failed_frame": False,
+                    }]},
+                    {"tx_hash": "0x02", "native_actions": [{
+                        "storage_context_address": owner, "native_code_family": "cw721-drop",
+                        "translation_status": "mapped-native-call", "dispatch": "mapped-opaque-selector",
+                        "semantic_effect": "OPAQUE", "selector": "0x29a0eee8", "failed_frame": False,
+                        "call_type": "CALL",
+                    }]},
+                    {"tx_hash": "0x03", "native_actions": [{
+                        "ethereum_code_address": "0x" + "cd" * 20,
+                        "translation_status": "background-fallback", "dispatch": "background-fallback",
+                        "semantic_effect": "OPAQUE", "selector": "0xdeadbeef", "failed_frame": False,
+                        "call_type": "CALL",
+                    }]},
+                ],
+            }) + "\n")
+            self.run_py(
+                "tools/vegeta/analyze-vegeta-s1-transaction-deficit.py",
+                "--corpus", corpus, "--native-plan", plan,
+                "--output", out, "--text-output", txt, "--target-coverage", "0.80",
+            )
+            report = json.loads(out.read_text())
+            all_row = report["denominators"]["all_source_transactions"]
+            state_row = report["denominators"]["source_storage_access_transactions"]
+            conflict_row = report["denominators"]["source_conflict_participating_transactions"]
+            self.assertEqual((all_row["successful_reviewed_state_transactions"], all_row["transactions"]), (1, 3))
+            self.assertEqual((state_row["successful_reviewed_state_transactions"], state_row["transactions"]), (1, 2))
+            self.assertEqual((conflict_row["successful_reviewed_state_transactions"], conflict_row["transactions"]), (1, 2))
+            self.assertEqual(report["additional_successful_reviewed_state_transactions_needed_for_current_gate"], 2)
+            candidate = report["mapped_owner_opaque_candidates"][0]
+            self.assertEqual(candidate["selector"], "0x29a0eee8")
+            self.assertEqual(candidate["deficit_transactions"], 1)
+            self.assertEqual(candidate["conflict_participant_deficit_transactions"], 1)
+            self.assertEqual(candidate["source_state_access_deficit_transactions"], 1)
+
+    def test_blitkin_mint_selector_is_owner_scoped_not_family_wide(self):
+        planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
+        sys.path.insert(0, str(ROOT / "tools/vegeta"))
+        spec = importlib.util.spec_from_file_location("vegeta_build_native_owner_scope", planner_path)
+        planner = importlib.util.module_from_spec(spec); spec.loader.exec_module(planner)
+        blitkin = "0xbd18e233e12f2a066f5b5a351285ab5a39b1f2ac"
+        other = "0x" + "de" * 20
+        profile = "profile-cw721-drop"
+        frozen = {
+            "dataset": "vegeta-s1",
+            "profile_mappings": [{
+                "ethereum_profile_family": profile,
+                "native_code_family": "cw721-drop",
+                "storage_owner_scope": [blitkin, other],
+            }],
+        }
+        cache = {blitkin: {"code": "0x6000"}, other: {"code": "0x6000"}}
+        resolver = planner.FamilyResolver(frozen, cache, {"resolution_records": []})
+        def word(n): return int(n).to_bytes(32, "big").hex()
+        calldata = "0x29a0eee8" + word(2) + word(7)
+        frame = {"type": "CALL", "from": "0x" + "11" * 20, "to": blitkin, "input": calldata, "value": "0x0"}
+        mapped = planner.translate_call_tree(frame, resolver)[0]
+        self.assertEqual(mapped["dispatch"], "mapped-entrypoint")
+        self.assertEqual(mapped["native_entrypoint"], "execute::mint_drop_one")
+        self.assertEqual(mapped["arguments"], {"trunk_id": 2, "critter_id": 7})
+        other_frame = {**frame, "to": other}
+        opaque = planner.translate_call_tree(other_frame, resolver)[0]
+        self.assertEqual(opaque["dispatch"], "mapped-opaque-selector")
+        self.assertEqual(opaque["native_entrypoint"], "opaque::0x29a0eee8")
+        self.assertNotIn("0x29a0eee8", planner.S1_ENTRYPOINT_EXTENSIONS["cw721-drop"])
+        self.assertIn("0x29a0eee8", planner.S1_OWNER_ENTRYPOINT_EXTENSIONS[blitkin])
+
     def test_reviewed_s1_selector_extensions_and_execution_adapters(self):
         planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
         sys.path.insert(0, str(ROOT / "tools/vegeta"))
@@ -289,6 +379,9 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         mint="0xdb980f4f"+(w(3)+w(5)).hex(); a={"ethereum_input":mint,"arguments":{"phase_index":3,"quantity":5},"native_instance_id":"cw721-drop:0x"+"55"*20,"action_id":2}
         call=mod.translate("cw721-drop","execute::mint_phase_drop",None,{},a,"0x"+"66"*20,mod.TokenIdRemapper())
         self.assertEqual(call["msg"]["mint_drop"]["quantity"],5); self.assertEqual(call["msg"]["mint_drop"]["stage_key"],"phase:3")
+        one="0x29a0eee8"+(w(2)+w(7)).hex(); a={"ethereum_input":one,"arguments":{"trunk_id":2,"critter_id":7},"native_instance_id":"cw721-drop:0x"+"55"*20,"action_id":22}
+        call=mod.translate("cw721-drop","execute::mint_drop_one",None,{},a,"0x"+"66"*20,mod.TokenIdRemapper())
+        self.assertEqual(call["msg"]["mint_drop"]["quantity"],1)
         # mintBatch(uint64[] quantities,bytes32[][] proofs,uint256[] phaseIndices,uint64 publicQuantity)
         # Head offsets: quantities at 128 bytes; dummy empty proofs/phase arrays follow.
         head=w(128)+w(224)+w(256)+w(4)
@@ -341,6 +434,11 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
             self.assertEqual(msg["next_token_id"], 3847)
             ok = mod.validate_drop_mint_translation(sequence, {(owner, tx_hash): 2})
             self.assertTrue(ok["validated"])
+            self.assertTrue(mod.counts_for_drop_mint_event_validation({"source_failed": False}, {}))
+            self.assertFalse(mod.counts_for_drop_mint_event_validation({"source_failed": True}, {}))
+            self.assertFalse(mod.counts_for_drop_mint_event_validation(
+                {"source_failed": False}, {"source_revert_scope_action_id": 17}
+            ))
             with self.assertRaises(ValueError):
                 mod.validate_drop_mint_translation(sequence, {(owner, tx_hash): 1})
 
@@ -361,6 +459,8 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         lock = (ROOT / "benchmarks/Cargo.lock").read_text()
         self.assertIn("VEGETA_S1_REUSE_CACHED_COVERAGE_INPUTS=1", wrapper)
         self.assertIn("audit-vegeta-semantic-conflict-coverage.py", wrapper)
+        self.assertIn("analyze-vegeta-s1-transaction-deficit.py", wrapper)
+        self.assertIn("transaction-deficit.txt", wrapper)
         self.assertIn("run-vegeta-s1-semantic-coverage.sh", prepare)
         self.assertIn('name = "acg-benchmark-native-s3-cw721-drop"', lock)
         self.assertIn('name = "acg-benchmark-native-s3-stargate-cw20"', lock)

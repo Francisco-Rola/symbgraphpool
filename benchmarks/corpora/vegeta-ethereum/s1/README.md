@@ -97,3 +97,15 @@ least 95%, median conflict-bearing-block coverage is at least 80%, and successfu
 transaction coverage is at least 80% (unless an explicit diagnostic-only low-coverage override is set).
 Concrete source access sets remain offline audit inputs and are never copied into `native-plan.jsonl`.
 
+The same wrapper also emits `native-plan/transaction-deficit.{json,txt}`.  This diagnostic keeps the
+80% all-transaction publication denominator unchanged, but reports the successful reviewed-state
+share among source storage-access transactions and source conflict participants separately.  It also
+ranks mapped-owner opaque selectors and background fallbacks by *unique currently-deficit
+transactions* so selector review is not driven by raw nested call-frame volume alone.
+
+Blitkin's S1 proxy owner (`0xbd18...f2ac`) has one owner-scoped mint adapter for selector
+`0x29a0eee8`; the selector is deliberately not enabled family-wide.  The executable translation treats
+that path as a one-token drop mint, and publication preparation still requires the independent
+zero-address ERC-721 `Transfer` log audit to agree with successful translated mint counts.  Reverted
+source call scopes are excluded from that mint-event count while remaining visible to touched-state
+semantic coverage.

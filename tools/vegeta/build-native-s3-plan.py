@@ -222,6 +222,21 @@ S1_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
 }
 
 
+# S1 owner-scoped reviewed selectors. These intentionally do not live in the family-wide table:
+# a 4-byte selector can collide across unrelated contracts. Blitkin is an EIP-1967 proxy whose
+# historical implementation is stable across S1; 0x29a0eee8 is independently decoded as
+# mint(uint8,uint8). The executable adapter treats it as a one-token mint, and the separate ERC-721
+# Transfer-log audit fail-closes if successful translated mint counts diverge from Ethereum.
+S1_OWNER_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
+    "0xbd18e233e12f2a066f5b5a351285ab5a39b1f2ac": {
+        "0x29a0eee8": (
+            "execute::mint_drop_one",
+            [("trunk_id", "uint8"), ("critter_id", "uint8")],
+        ),
+    },
+}
+
+
 SEMANTIC_STATE_READ = "STATE_READ"
 SEMANTIC_STATE_WRITE = "STATE_WRITE"
 SEMANTIC_READ_WRITE = "READ_WRITE"
@@ -424,6 +439,9 @@ def _decode_static_word(word: bytes, kind: str) -> Any:
         return "0x" + word[-20:].hex()
     if kind == "uint256":
         return int.from_bytes(word, "big")
+    if kind == "uint8":
+        value = int.from_bytes(word, "big")
+        return value if value <= 0xFF else None
     if kind == "bool":
         return bool(int.from_bytes(word, "big"))
     if kind == "bytes32":
@@ -580,6 +598,10 @@ def translate_call_tree(
         entry = ENTRYPOINTS.get(native_family or "", {}).get(selector)
         if resolver.dataset == "vegeta-s1":
             entry = S1_ENTRYPOINT_EXTENSIONS.get(native_family or "", {}).get(selector, entry)
+            # Apply target-specific review only after resolving the actual storage namespace. This
+            # also covers implementation DELEGATECALL frames because their storage context is the
+            # proxy owner, while keeping the selector opaque for every other cw721-drop instance.
+            entry = S1_OWNER_ENTRYPOINT_EXTENSIONS.get(storage_context or "", {}).get(selector, entry)
         system_action_kind = None
         semantic_entrypoint = None
         semantic_effect = SEMANTIC_OPAQUE

@@ -9,6 +9,7 @@ PLAN_DIR="${VEGETA_S1_NATIVE_PLAN_DIR:-benchmarks/corpora/vegeta-ethereum/s1/nat
 FAMILY_MAP="${VEGETA_S1_NATIVE_FAMILY_MAP:-evaluation/vegeta/s1-native-family-map.v2.json}"
 MIN_CONFLICT="${VEGETA_S1_MIN_CONFLICT_COVERAGE:-0.95}"
 MIN_MEDIAN_BLOCK="${VEGETA_S1_MIN_MEDIAN_BLOCK_COVERAGE:-0.80}"
+MIN_SEM_TX="${VEGETA_S1_MIN_SEMANTIC_TX_COVERAGE:-0.80}"
 ALLOW_LOW="${VEGETA_S1_ALLOW_LOW_COVERAGE:-0}"
 
 [[ -s "$CORPUS" ]] || { echo "missing Vegeta S1 corpus: $CORPUS" >&2; exit 2; }
@@ -45,6 +46,16 @@ python3 tools/vegeta/audit-vegeta-semantic-conflict-coverage.py \
   --output "$PLAN_DIR/semantic-conflict-coverage.json" \
   --text-output "$PLAN_DIR/semantic-conflict-coverage.txt"
 
+# Always emit the transaction-deficit diagnostic before enforcing the conflict gate. This keeps the
+# frozen all-transaction publication threshold intact while showing whether missing semantics are
+# concentrated in source state/conflict participants or in non-contention background traffic.
+python3 tools/vegeta/analyze-vegeta-s1-transaction-deficit.py \
+  --corpus "$CORPUS" \
+  --native-plan "$PLAN_DIR/native-plan.jsonl" \
+  --target-coverage "$MIN_SEM_TX" \
+  --output "$PLAN_DIR/transaction-deficit.json" \
+  --text-output "$PLAN_DIR/transaction-deficit.txt"
+
 python3 - "$PLAN_DIR/semantic-conflict-coverage.json" "$MIN_CONFLICT" "$MIN_MEDIAN_BLOCK" "$ALLOW_LOW" <<'PY'
 import json,sys
 p,min_conf,min_med,allow=sys.argv[1],float(sys.argv[2]),float(sys.argv[3]),sys.argv[4]=='1'
@@ -59,3 +70,4 @@ echo "PASS: Vegeta S1 reviewed state-semantics coverage gate passed"
 echo "owner-level coverage: $WORK_DIR/source-family-coverage.txt"
 echo "semantic coverage: $PLAN_DIR/semantic-conflict-coverage.txt"
 echo "translation coverage: $PLAN_DIR/translation-coverage.txt"
+echo "transaction deficit: $PLAN_DIR/transaction-deficit.txt"
