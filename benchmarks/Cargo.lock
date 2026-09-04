@@ -29,6 +29,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "acg-benchmark-native-s1-cw721-drop-exact"
+version = "0.1.0"
+dependencies = [
+ "cosmwasm-std",
+ "cw-storage-plus",
+ "schemars",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "acg-benchmark-native-s3-astroport-pair"
 version = "0.1.0"
 dependencies = [
@@ -41,17 +52,6 @@ dependencies = [
 
 [[package]]
 name = "acg-benchmark-native-s3-controlled-cw20"
-version = "0.1.0"
-dependencies = [
- "cosmwasm-std",
- "cw-storage-plus",
- "schemars",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "acg-benchmark-native-s1-cw721-drop-exact"
 version = "0.1.0"
 dependencies = [
  "cosmwasm-std",

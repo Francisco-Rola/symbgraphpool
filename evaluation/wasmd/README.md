@@ -19,9 +19,10 @@ commits a serialization admitted by Aria Rule 2 and its fallback DAG.
    repository's transitively reduced fallback DAG with hot-chain prioritization. Cosmos dynamic
    key/range changes retain an additional conservative safety replay. This is a mechanism port to
    Wasmd, not the upstream Ethereum execution engine.
-4. **Vegeta** — same-Wasmd port of `SpeculateMod` + `ParallelMod`: pre-consensus concrete access
-   discovery, hottest-key proposal reordering, `BuildDAGShowDependencies` dependency precedence,
-   Rule-2-compatible replay batches, and `checkR`/`checkW`-style known/new access handling. Cosmos
+4. **Vegeta** — same-Wasmd port of the paper's Algorithm 1 + replay path: pre-consensus concrete
+   access discovery, **all** point-key dependency chains sorted longest-to-shortest, pairwise DAG
+   classification with `RAW+WAR -> WAW`, Rule-2-compatible replay batches, and
+   `checkR`/`checkW`-style known/new access handling. Cosmos
    iterator ranges use a conservative extension because the Ethereum implementation has no direct
    range-query analogue.
 5. **Rust-ACG** — offline symbolic profile graph + online atomic transaction candidate graph,
@@ -29,16 +30,41 @@ commits a serialization admitted by Aria Rule 2 and its fallback DAG.
    canonical validation/replay.
 
 Every measured block must finish with the same full state digest as an independently executed serial
-reference for the ordering semantics of that strategy. Serial, BlockSTM, and Rust-ACG use the
-historical block order. Vegeta uses its derived proposal/serialization order, and AriaFB uses its
-derived Aria serialization. The record field `serial_reference_scope` makes this distinction explicit.
-`matched_serial_nanos` is the serial timing for that same reference scope, so `post-x` and `wall-x`
-remain apples-to-apples for reordered systems. `historical_serial_nanos` is also recorded on every row
-as the common historical-order timing control. Fixed-window throughput speedup is still computed from
-the explicit `cosmos-wasmd-direct-serial` row, so all systems share the same campaign-level throughput
-baseline.
+reference. Serial, BlockSTM, Rust-ACG, and the full-trace state gate use historical block order. Vegeta
+may derive a proposal/serialization order inside a block, but the fixed historical multi-block workload
+cannot safely carry a different post-block state into later source transactions. The harness therefore
+stages Vegeta's result and falls back to a measured historical-order replay when the derived execution
+is semantically invalid or produces different persistent state. `vegeta_canonical_fallback` records
+that choice per block. On normal blocks, `matched_serial_nanos` is the serial timing for Vegeta's
+derived serialization; on fallback blocks it is the historical replay timing actually committed. The
+record field `serial_reference_scope` identifies this mixed derived-serialization + historical-state-gate
+adaptation. `historical_serial_nanos` remains the common historical-order timing control.
 
 ## Primary timing model
+
+The primary single-node throughput metric now follows Vegeta NSDI'25 Figure 10. The paper amortizes
+pre-consensus speculation through pipelining and compares the replay phase against ordinary Serial
+execution. We apply that same consensus-visible definition to every system:
+
+```text
+replay-throughput = total_transactions / sum(post_consensus_nanos)
+replay-x          = replay-throughput / Serial replay-throughput
+```
+
+For Serial, `post_consensus_nanos` is ordinary serial execution. For BlockSTM and AriaFB it is their
+post-consensus parallel/fallback execution. For Vegeta and Rust-ACG it excludes pre-consensus
+speculation/planning. Vegeta's `post_consensus_nanos` contains the paper Algorithm-3 replay,
+validation and intrinsic re-execution, but deliberately excludes our additional historical-state gate;
+that adaptation is recorded separately as `vegeta_historical_fallback_nanos` and remains charged to
+`strategy_total_nanos`. This makes replay throughput match the paper definition while
+**active-work-x** (`historical Serial / strategy_total_nanos`) exposes the full cost of our fixed-trace
+state-equivalence adaptation.
+
+`post_x` remains a serialization-matched internal diagnostic. For reordered Vegeta it can differ from
+the paper-compatible common-Serial `replay-x`; use `historical_post_x` / `throughput_speedup` for the
+paper-style cross-system comparison.
+
+### Secondary consensus-overlap model
 
 Let `C` be one fixed consensus window for an entire campaign:
 
@@ -63,25 +89,42 @@ work during consensus, while Serial, BlockSTM, and AriaFB wait for consensus and
 afterwards. Charging the same `C` to every strategy makes throughput a full block-cycle metric rather
 than giving post-consensus-only baselines a zero-duration consensus phase.
 
-For a full sample:
+For a full sample this secondary model is:
 
 ```text
-throughput = total_transactions / sum(evaluation_service_time)
+consensus-model-throughput = total_transactions / sum(C + post_consensus)
 ```
 
 The campaign also reports:
 
-- **post-x** = matched serial execution / post-consensus time. This is the Vegeta-style
-  consensus-visible speedup and isolates validation/replay from serial execution.
-- **wall-x** = matched serial execution / actual measured strategy wall. This is bookkeeping for
-  total machine cost and must always be shown beside post-x.
+- **replay-x** / `throughput_speedup` = common historical Serial replay throughput / system replay throughput;
+- **matched-x** / `post_x` = serialization-matched Serial / post, retained for internal correctness diagnosis;
+- **work-x** / `historical_wall_x` = common historical Serial / actual measured active strategy work;
+- **model-x** / `consensus_model_speedup` = the secondary fixed-`C` consensus-overlap model;
 - pre-consensus p50/p95/p99/max and headroom relative to `C`;
 - validation time and replay-execution time where exposed by the runner;
 - reexecution/replay rate, AriaFB Rule-2 fallbacks, conservative Wasmd safety replays, and serialization equivalence.
 
-The fixed-window throughput metric is an evaluation model, not a claim that consensus itself is
-free. Final publication plots should include a sensitivity analysis with externally fixed consensus
-windows once the distributed consensus experiment exists.
+The fixed-window consensus model is not the primary throughput metric and is not a claim that
+consensus itself is free. Final publication plots should include a sensitivity analysis with externally
+fixed consensus windows once the distributed consensus experiment exists.
+
+### Faithful Vegeta vs Serial check
+
+After changing Vegeta semantics, run the dedicated two-worker check before launching the full matrix:
+
+```bash
+# Default: 300-block fidelity/performance gate.
+time bash scripts/eval-wasmd-s1-vegeta-paper-compare.sh
+
+# Full S1 paper-method comparison after the prefix passes:
+S1_VEGETA_COMPARE_BLOCKS=5000 time bash scripts/eval-wasmd-s1-vegeta-paper-compare.sh
+```
+
+The script builds/reuses one exact evaluator, generates a matched Serial oracle, executes Vegeta, then
+prints the Vegeta-paper replay throughput, total active-work cost, dependency-chain ratio, and four
+separate replay-cost buckets: point-key Algorithm-3 validation, Wasmd-only range validation,
+intrinsic Algorithm-3 re-execution, and the historical-state fallback used only by our fixed-trace gate.
 
 ## Ready-to-run evaluation stages
 

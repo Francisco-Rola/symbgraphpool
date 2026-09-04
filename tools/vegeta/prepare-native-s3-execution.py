@@ -718,7 +718,17 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         return contract_call('execute',family,iid,caller,{'burn':{'amount':str(max(n,1))}},a)
     if family == 'fiat-token-cw20' and ec.endswith('::mint'):
         recipient=args.get('recipient') or abi_addr(data,0); n=amount(args.get('amount',abi_uint(data,1)))
-        return contract_call('execute',family,iid,caller,{'mint':{'recipient':recipient,'amount':str(max(n,1))}},a)
+        # The Ethereum FiatToken mint is already known to have committed successfully in the
+        # source transaction.  The native analogue uses a synthetic single admin capability for
+        # controlled supply changes rather than reproducing Circle's historical minter-role
+        # registry.  Execute the proven mint effect through that native capability and retain the
+        # original source minter as provenance.  This leaves the Mint storage footprint unchanged
+        # (CONFIG + recipient balance + total supply) while avoiding an impossible comparison
+        # between an Ethereum minter address and the synthetic CosmWasm admin.
+        call=contract_call('execute',family,iid,'native-s3-admin',{'mint':{'recipient':recipient,'amount':str(max(n,1))}},a)
+        call['source_minter']=caller
+        call['source_authorization_adapter']='source-successful-fiat-token-mint-via-native-admin'
+        return call
     # Standard fungible interfaces.
     if family in {'cw20-base','controlled-cw20','fiat-token-cw20','fee-token-cw20','wrapped-native-token','stargate-cw20'}:
         if 'transferfrom' in ec:

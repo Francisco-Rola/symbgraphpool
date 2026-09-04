@@ -60,6 +60,7 @@ REUSE_SETUP_TEMPLATE="${EVAL_WASMD_REUSE_SETUP_TEMPLATE:-1}"
 ISOLATE_STRATEGIES="${EVAL_WASMD_ISOLATE_STRATEGIES:-0}"
 REUSE_ISOLATED_PARTS="${EVAL_WASMD_REUSE_ISOLATED_PARTS:-0}"
 REUSE_WEIGHTS="${EVAL_WASMD_REUSE_WEIGHTS:-0}"
+ONLY_STRATEGY="${EVAL_WASMD_ONLY_STRATEGY:-}"
 GO_TOOLCHAIN="${EVAL_WASMD_GO_TOOLCHAIN:-auto}"
 BASE_TOTAL_MS="${EVAL_WASMD_COMPUTE_BASE_TOTAL_MS:-1000}"
 COMPUTE_SCALE="${EVAL_WASMD_COMPUTE_SCALE:-4}"
@@ -74,18 +75,59 @@ NATIVE_ACCESSES="${EVAL_WASMD_EXACT_NATIVE_ACCESSES:-$EXEC_DIR/native-accesses.j
 SYMBOLIC_DIR="${EVAL_WASMD_SYMBOLIC_DIR:-benchmarks/symbolic/native-s3}"
 OUT_DIR="${EVAL_WASMD_OUTPUT_DIR:-benchmark-results/wasmd-${MODE}}"
 RUST_ACG_ONLY="${VEGETA_S3_RUST_ACG_ONLY:-0}"
+# Benchmark state-engine controls. EVAL_* is the stable script-facing interface;
+# fall back to the older binary-level VEGETA_WASMD_* names for compatibility
+# with existing S1 probe/debug wrappers.
+IAVL_CACHE_SIZE="${EVAL_WASMD_IAVL_CACHE_SIZE:-${VEGETA_WASMD_IAVL_CACHE_SIZE:-500000}}"
+IAVL_SYNC_PRUNING="${EVAL_WASMD_IAVL_SYNC_PRUNING:-${VEGETA_WASMD_IAVL_SYNC_PRUNING:-0}}"
+[[ "$IAVL_CACHE_SIZE" =~ ^[0-9]+$ ]] || { echo "EVAL_WASMD_IAVL_CACHE_SIZE must be a non-negative integer" >&2; exit 2; }
+case "${IAVL_SYNC_PRUNING,,}" in
+  1|true|yes|on) IAVL_SYNC_PRUNING=1 ;;
+  0|false|no|off) IAVL_SYNC_PRUNING=0 ;;
+  *) echo "EVAL_WASMD_IAVL_SYNC_PRUNING must be 0/1 (or true/false)" >&2; exit 2 ;;
+esac
+
+ONLY_STRATEGY="$(printf '%s' "$ONLY_STRATEGY" | tr '[:upper:]' '[:lower:]')"
+case "$ONLY_STRATEGY" in
+  ""|serial|blockstm|ariafb|symbgraph-rust|vegeta|exact-oracle) ;;
+  *) echo "EVAL_WASMD_ONLY_STRATEGY must be one of serial|blockstm|ariafb|symbgraph-rust|vegeta|exact-oracle" >&2; exit 2 ;;
+esac
+if [[ -n "$ONLY_STRATEGY" && "$ISOLATE_STRATEGIES" != "1" ]]; then
+  echo "EVAL_WASMD_ONLY_STRATEGY requires EVAL_WASMD_ISOLATE_STRATEGIES=1" >&2
+  exit 2
+fi
 
 MANIFEST="$EXEC_DIR/execution-manifest.json"
 PLAN="$EXEC_DIR/execution-plan.jsonl"
 for p in "$MANIFEST" "$PLAN"; do
   [[ -s "$p" ]] || { echo "missing evaluation input: $p" >&2; echo "prepare the frozen Wasmd translation before running this stage" >&2; exit 2; }
 done
-PLAN_BLOCKS="$(python3 - "$MANIFEST" <<'PYBLOCKS'
+PLAN_BLOCKS="$(python3 - "$MANIFEST" "$PLAN" <<'PYBLOCKS'
 import json, sys
-obj=json.load(open(sys.argv[1], encoding="utf-8"))
-blocks=int(obj.get("blocks", 0))
+manifest_path, plan_path = sys.argv[1:3]
+obj = json.load(open(manifest_path, encoding="utf-8"))
+try:
+    blocks = int(obj.get("blocks", 0) or 0)
+except (TypeError, ValueError):
+    blocks = 0
 if blocks <= 0:
-    raise SystemExit("execution manifest is missing a positive blocks count")
+    blocks = 0
+    with open(plan_path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"invalid execution plan JSON at line {lineno}: {exc}")
+            if "block_number" not in row:
+                raise SystemExit(f"execution plan row {lineno} is missing block_number")
+            if not isinstance(row.get("transactions", []), list):
+                raise SystemExit(f"execution plan row {lineno} has non-list transactions")
+            blocks += 1
+    if blocks <= 0:
+        raise SystemExit("execution manifest has no positive blocks count and execution plan is empty")
+    print(f"execution manifest has no positive blocks count; derived blocks={blocks} from execution plan", file=sys.stderr)
 print(blocks)
 PYBLOCKS
 )"
@@ -151,7 +193,10 @@ ENV_FILE="$OUT_DIR/environment.txt"
   echo "isolate_strategies=$ISOLATE_STRATEGIES"
   echo "reuse_isolated_parts=$REUSE_ISOLATED_PARTS"
   echo "reuse_compute_weights=$REUSE_WEIGHTS"
+  echo "only_strategy=${ONLY_STRATEGY:-all}"
   echo "max_blocks=$MAX_BLOCKS"
+  echo "iavl_cache_size=$IAVL_CACHE_SIZE"
+  echo "iavl_sync_pruning=$IAVL_SYNC_PRUNING"
   echo "uname=$(uname -a)"
   command -v lscpu >/dev/null 2>&1 && lscpu || true
   command -v rustc >/dev/null 2>&1 && rustc --version || true
@@ -211,10 +256,11 @@ else
   [[ -x "$BIN" ]] || { echo "EVAL_WASMD_BUILD=0 but binary is missing: $BIN" >&2; exit 3; }
 fi
 
+BINARY_SHA256="$(sha256sum "$BIN" | awk '{print $1}')"
 ITER_PER_NS="${EVAL_WASMD_GO_ITERATIONS_PER_NANO:-$($BIN --calibrate-only)}"
 echo "Wasmd evaluation: mode=$MODE workers=$WORKERS_LIST samples=$SAMPLES physical_cores=$PHYSICAL_CORES iter/ns=$ITER_PER_NS"
 if [[ "$SETUP_CHECK" == "1" ]]; then
-  "$BIN" --repo-root "$ROOT" --manifest "$MANIFEST" --plan "$PLAN" --dataset "$DATASET_LABEL" --exact-oracle="$EXACT_ORACLE" --stream-plan="$STREAM_PLAN" --max-blocks "$MAX_BLOCKS" --reuse-setup-template="$REUSE_SETUP_TEMPLATE" --setup-only
+  "$BIN" --repo-root "$ROOT" --manifest "$MANIFEST" --plan "$PLAN" --dataset "$DATASET_LABEL" --exact-oracle="$EXACT_ORACLE" --stream-plan="$STREAM_PLAN" --max-blocks "$MAX_BLOCKS" --reuse-setup-template="$REUSE_SETUP_TEMPLATE" --iavl-cache-size "$IAVL_CACHE_SIZE" --iavl-sync-pruning="$IAVL_SYNC_PRUNING" --setup-only
 else
   echo "skipping redundant standalone setup-only pass; campaign setup template will validate Wasmd initialization"
 fi
@@ -223,30 +269,40 @@ RECORDS="$OUT_DIR/records.jsonl"
 : > "$RECORDS"
 IFS=',' read -r -a WORKERS <<< "$WORKERS_LIST"
 run_campaign() {
-  local workers="$1" output="$2" strategy="$3"
-  "$BIN" \
-    --repo-root "$ROOT" \
-    --manifest "$MANIFEST" \
-    --dataset "$DATASET_LABEL" \
-    --exact-oracle="$EXACT_ORACLE" \
-    --stream-plan="$STREAM_PLAN" \
-    --max-blocks "$MAX_BLOCKS" \
-    --reuse-setup-template="$REUSE_SETUP_TEMPLATE" \
-    --campaign-strategy "$strategy" \
-    --plan "$PLAN" \
-    --compute-weights "$WEIGHTS" \
-    --symbolic-dir "$SYMBOLIC_DIR" \
-    --exact-trace-dir "$TRACE_DIR" \
-    --exact-native-accesses "$NATIVE_ACCESSES" \
-    --output "$output" \
-    --workers "$workers" \
-    --samples "$SAMPLES" \
-    --compute-scale "$COMPUTE_SCALE" \
-    --compute-base-total-ms "$BASE_TOTAL_MS" \
-    --go-iterations-per-nano "$ITER_PER_NS" \
-    --symbgraph-rust-visibility mvcc \
-    --symbgraph-rust-validation indexed \
+  local workers="$1" output="$2" strategy="$3" serial_oracle="${4:-}"
+  local args=(
+    --repo-root "$ROOT"
+    --manifest "$MANIFEST"
+    --dataset "$DATASET_LABEL"
+    --exact-oracle="$EXACT_ORACLE"
+    --stream-plan="$STREAM_PLAN"
+    --max-blocks "$MAX_BLOCKS"
+    --reuse-setup-template="$REUSE_SETUP_TEMPLATE"
+    --campaign-strategy "$strategy"
+    --plan "$PLAN"
+    --compute-weights "$WEIGHTS"
+    --symbolic-dir "$SYMBOLIC_DIR"
+    --exact-trace-dir "$TRACE_DIR"
+    --exact-native-accesses "$NATIVE_ACCESSES"
+    --output "$output"
+    --workers "$workers"
+    --samples "$SAMPLES"
+    --compute-scale "$COMPUTE_SCALE"
+    --compute-base-total-ms "$BASE_TOTAL_MS"
+    --go-iterations-per-nano "$ITER_PER_NS"
+    --iavl-cache-size "$IAVL_CACHE_SIZE"
+    --iavl-sync-pruning="$IAVL_SYNC_PRUNING"
+    --symbgraph-rust-visibility mvcc
+    --symbgraph-rust-validation indexed
     --symbgraph-rust-feedback profile
+  )
+  if [[ -n "$serial_oracle" ]]; then
+    args+=(--serial-oracle "$serial_oracle")
+  fi
+  if [[ -n "${EVAL_WASMD_CAMPAIGN_PROFILE_DIR:-}" ]]; then
+    args+=(--campaign-profile-dir "$EVAL_WASMD_CAMPAIGN_PROFILE_DIR")
+  fi
+  "$BIN" "${args[@]}"
 }
 
 isolated_part_complete() {
@@ -265,6 +321,15 @@ isolated_part_complete() {
   grep -Fxq "dataset=$DATASET_LABEL" "$meta" || return 1
   grep -Fxq "exact_oracle=$EXACT_ORACLE" "$meta" || return 1
   grep -Fxq "plan_stamp=$plan_stamp" "$meta" || return 1
+  grep -Fxq "binary_sha256=$BINARY_SHA256" "$meta" || return 1
+  grep -Fxq "iavl_cache_size=$IAVL_CACHE_SIZE" "$meta" || return 1
+  grep -Fxq "iavl_sync_pruning=$IAVL_SYNC_PRUNING" "$meta" || return 1
+  if [[ "$strategy" != "serial" ]]; then
+    local serial_part="$OUT_DIR/raw/records-w${workers}-serial.jsonl" serial_hash
+    [[ -s "$serial_part" ]] || return 1
+    serial_hash="$(sha256sum "$serial_part" | awk '{print $1}')"
+    grep -Fxq "serial_oracle_sha256=$serial_hash" "$meta" || return 1
+  fi
   python3 - "$part" "$strategy" "$workers" "$SAMPLES" "$EXPECTED_BLOCKS" <<'PYREC'
 import json, sys
 from collections import defaultdict
@@ -289,6 +354,9 @@ try:
             row = json.loads(line)
             if row.get("strategy") != expected or int(row.get("workers", -1)) != workers:
                 raise ValueError("strategy/workers mismatch")
+            if campaign == "serial":
+                if int(row.get("serial_commit_version", 0)) <= 0 or not row.get("serial_commit_hash"):
+                    raise ValueError("serial part lacks persisted CommitID oracle fields")
             sample = int(row.get("sample", -1))
             if not 0 <= sample < samples:
                 raise ValueError("sample out of range")
@@ -319,7 +387,15 @@ expected_blocks=$EXPECTED_BLOCKS
 dataset=$DATASET_LABEL
 exact_oracle=$EXACT_ORACLE
 plan_stamp=$plan_stamp
+binary_sha256=$BINARY_SHA256
+iavl_cache_size=$IAVL_CACHE_SIZE
+iavl_sync_pruning=$IAVL_SYNC_PRUNING
 EOF
+  if [[ "$strategy" != "serial" ]]; then
+    local serial_part="$OUT_DIR/raw/records-w${workers}-serial.jsonl" serial_hash
+    serial_hash="$(sha256sum "$serial_part" | awk '{print $1}')"
+    printf 'serial_oracle_sha256=%s\n' "$serial_hash" >> "$part.meta"
+  fi
 }
 
 for workers in "${WORKERS[@]}"; do
@@ -327,8 +403,12 @@ for workers in "${WORKERS[@]}"; do
   : > "$raw"
   echo "=== Wasmd scheduler campaign workers=$workers samples=$SAMPLES ==="
   if [[ "$ISOLATE_STRATEGIES" == "1" ]]; then
-    strategies=(serial blockstm ariafb symbgraph-rust vegeta)
-    if [[ "$EXACT_ORACLE" != "0" ]]; then strategies+=(exact-oracle); fi
+    if [[ -n "$ONLY_STRATEGY" ]]; then
+      strategies=("$ONLY_STRATEGY")
+    else
+      strategies=(serial blockstm ariafb symbgraph-rust vegeta)
+      if [[ "$EXACT_ORACLE" != "0" ]]; then strategies+=(exact-oracle); fi
+    fi
     echo "isolating scheduler strategies into separate processes to bound live Wasmd state"
     for strategy in "${strategies[@]}"; do
       part="$OUT_DIR/raw/records-w${workers}-${strategy}.jsonl"
@@ -338,7 +418,12 @@ for workers in "${WORKERS[@]}"; do
       else
         : > "$part"
         rm -f "$part.meta"
-        run_campaign "$workers" "$part" "$strategy"
+        serial_oracle=""
+        if [[ "$strategy" != "serial" ]]; then
+          serial_oracle="$OUT_DIR/raw/records-w${workers}-serial.jsonl"
+          [[ -s "$serial_oracle" ]] || { echo "missing completed serial oracle: $serial_oracle" >&2; exit 3; }
+        fi
+        run_campaign "$workers" "$part" "$strategy" "$serial_oracle"
         write_isolated_part_meta "$part" "$strategy" "$workers"
       fi
       cat "$part" >> "$raw"
@@ -348,6 +433,14 @@ for workers in "${WORKERS[@]}"; do
   fi
   cat "$raw" >> "$RECORDS"
 done
+
+if [[ -n "$ONLY_STRATEGY" ]]; then
+  sha256sum "$RECORDS" > "$OUT_DIR/records.sha256"
+  echo
+  echo "Evaluation strategy complete: strategy=$ONLY_STRATEGY output=$OUT_DIR"
+  echo "Raw strategy rows: $OUT_DIR/raw/records-w${WORKERS[0]}-${ONLY_STRATEGY}.jsonl"
+  exit 0
+fi
 
 SUMMARY_ARGS=(--records "$RECORDS" --output-dir "$OUT_DIR/summary")
 case "${RUST_ACG_ONLY,,}" in

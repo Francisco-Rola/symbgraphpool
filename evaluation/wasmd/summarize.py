@@ -154,10 +154,13 @@ def aggregate_samples(per_sample: list[dict[str, Any]]) -> list[dict[str, Any]]:
         grouped[(row["strategy"], row["workers"])].append(row)
 
     metrics = [
-        "throughput_tps", "throughput_speedup", "post_x", "wall_x", "wall_tps",
+        "throughput_tps", "throughput_speedup", "consensus_model_tps", "consensus_model_speedup",
+        "post_x", "historical_post_x", "wall_x", "historical_wall_x", "wall_tps",
         "post_ms", "post_p50_ms", "post_p95_ms", "post_p99_ms", "wall_ms", "pre_p95_ms", "pre_max_ms", "consensus_headroom_p95_ms",
         "consensus_window_utilization_p95_pct", "replay_pct",
         "validation_ms", "replay_execution_ms", "conflict_analysis_ms",
+        "vegeta_alg3_validation_ms", "vegeta_range_validation_ms",
+        "vegeta_intrinsic_reexecution_ms", "vegeta_historical_fallback_ms",
         "structural_parallelism", "source_trace_missing", "translation_compensation_edges",
     ]
     out: list[dict[str, Any]] = []
@@ -202,7 +205,8 @@ def build_per_sample(rows: list[dict[str, Any]], window_ns: int) -> list[dict[st
         rs.sort(key=lambda r: int(r["block_number"]))
         blocks = len(rs)
         txs = sum(int(r.get("transactions", 0)) for r in rs)
-        serial_ns = sum(int(r.get("matched_serial_nanos", 0)) for r in rs)
+        matched_serial_ns = sum(int(r.get("matched_serial_nanos", 0)) for r in rs)
+        historical_serial_ns = sum(int(r.get("historical_serial_nanos", 0) or r.get("matched_serial_nanos", 0)) for r in rs)
         wall_ns = sum(int(r.get("strategy_total_nanos", 0)) for r in rs)
         post_values = [int(r.get("post_consensus_nanos", 0) or r.get("strategy_total_nanos", 0)) for r in rs]
         post_ns = sum(post_values)
@@ -211,6 +215,10 @@ def build_per_sample(rows: list[dict[str, Any]], window_ns: int) -> list[dict[st
         validation_ns = sum(int(r.get("validation_nanos", 0)) for r in rs)
         replay_exec_ns = sum(int(r.get("replay_execution_nanos", 0)) for r in rs)
         conflict_ns = sum(int(r.get("conflict_analysis_nanos", 0)) for r in rs)
+        vegeta_alg3_ns = sum(int(r.get("vegeta_alg3_validation_nanos", 0)) for r in rs)
+        vegeta_range_ns = sum(int(r.get("vegeta_range_validation_nanos", 0)) for r in rs)
+        vegeta_intrinsic_ns = sum(int(r.get("vegeta_intrinsic_reexecution_nanos", 0)) for r in rs)
+        vegeta_historical_fallback_ns = sum(int(r.get("vegeta_historical_fallback_nanos", 0)) for r in rs)
         reexec = sum(int(r.get("reexecutions", 0)) for r in rs)
         forward = sum(int(r.get("forward_fallbacks", 0)) for r in rs)
         safety = sum(int(r.get("safety_replays", 0)) for r in rs)
@@ -236,14 +244,25 @@ def build_per_sample(rows: list[dict[str, Any]], window_ns: int) -> list[dict[st
             "transactions": txs,
             "consensus_window_ms": window_ns / 1e6,
             "effective_service_ms": effective_ns / 1e6,
-            "throughput_tps": (txs * 1e9 / effective_ns) if effective_ns else 0.0,
+            # Vegeta NSDI'25 Figure 10 single-node throughput measures the replay
+            # phase only; speculation is pre-consensus/pipelined. Use that same
+            # consensus-visible execution definition for every system so the
+            # primary throughput column is directly comparable: Serial's post is
+            # ordinary serial execution, while SOR systems' post is replay plus
+            # validation/re-execution actually required after ordering.
+            "throughput_tps": (txs * 1e9 / post_ns) if post_ns else 0.0,
+            # Keep the earlier fixed-consensus-window model as an explicitly
+            # secondary metric rather than silently calling it throughput.
+            "consensus_model_tps": (txs * 1e9 / effective_ns) if effective_ns else 0.0,
             "post_ms": post_ns / 1e6,
             "post_p50_ms": percentile([x / 1e6 for x in post_values], 0.50),
             "post_p95_ms": percentile([x / 1e6 for x in post_values], 0.95),
             "post_p99_ms": percentile([x / 1e6 for x in post_values], 0.99),
-            "post_x": (serial_ns / post_ns) if post_ns else 0.0,
+            "post_x": (matched_serial_ns / post_ns) if post_ns else 0.0,
+            "historical_post_x": (historical_serial_ns / post_ns) if post_ns else 0.0,
             "wall_ms": wall_ns / 1e6,
-            "wall_x": (serial_ns / wall_ns) if wall_ns else 0.0,
+            "wall_x": (matched_serial_ns / wall_ns) if wall_ns else 0.0,
+            "historical_wall_x": (historical_serial_ns / wall_ns) if wall_ns else 0.0,
             "wall_tps": (txs * 1e9 / wall_ns) if wall_ns else 0.0,
             "pre_p50_ms": percentile([x / 1e6 for x in pre_values], 0.50),
             "pre_p95_ms": percentile([x / 1e6 for x in pre_values], 0.95),
@@ -260,6 +279,10 @@ def build_per_sample(rows: list[dict[str, Any]], window_ns: int) -> list[dict[st
             "validation_ms": validation_ns / 1e6,
             "replay_execution_ms": replay_exec_ns / 1e6,
             "conflict_analysis_ms": conflict_ns / 1e6,
+            "vegeta_alg3_validation_ms": vegeta_alg3_ns / 1e6,
+            "vegeta_range_validation_ms": vegeta_range_ns / 1e6,
+            "vegeta_intrinsic_reexecution_ms": vegeta_intrinsic_ns / 1e6,
+            "vegeta_historical_fallback_ms": vegeta_historical_fallback_ns / 1e6,
             "structural_parallelism": structural_parallelism,
             "source_trace_missing": float(source_trace_missing),
             "translation_compensation_edges": float(translation_compensation_edges),
@@ -272,12 +295,15 @@ def build_per_sample(rows: list[dict[str, Any]], window_ns: int) -> list[dict[st
         })
 
     serial_by_sample = {
-        (r["workers"], r["sample"]): r["throughput_tps"]
+        (r["workers"], r["sample"]): r
         for r in out if r["strategy"] == "cosmos-wasmd-direct-serial"
     }
     for row in out:
-        serial_tps = serial_by_sample.get((row["workers"], row["sample"]), 0.0)
+        serial = serial_by_sample.get((row["workers"], row["sample"]))
+        serial_tps = float(serial["throughput_tps"]) if serial else 0.0
+        serial_model_tps = float(serial["consensus_model_tps"]) if serial else 0.0
         row["throughput_speedup"] = row["throughput_tps"] / serial_tps if serial_tps else 0.0
+        row["consensus_model_speedup"] = row["consensus_model_tps"] / serial_model_tps if serial_model_tps else 0.0
     order = {s: i for i, s in enumerate(STRATEGY_ORDER)}
     out.sort(key=lambda r: (r["workers"], r["sample"], order.get(r["strategy"], 999)))
     return out
@@ -307,24 +333,29 @@ def render(rows: list[dict[str, Any]], window_ns: int, rust_acg_only: bool = Fal
     lines = [
         "Wasmd controlled scheduler evaluation",
         "",
-        f"Campaign consensus window: {window_ns / 1e6:.3f} ms",
+        "Primary throughput follows Vegeta NSDI'25 single-node methodology:",
+        "  replay-tps = transactions / consensus-visible post phase.",
+        "  replay-x   = replay-tps / Serial replay-tps (common historical Serial baseline).",
+        "  Vegeta/Rust-ACG speculation is intentionally excluded from replay-tps; work-x reports total active work.",
+        "",
+        f"Secondary fixed-consensus model window: {window_ns / 1e6:.3f} ms",
         f"  C = maximum measured pre-consensus interval across {consensus_source}.",
-        ("  Throughput denominator: every strategy uses C + post; ACG-Oracle is evaluated under the same C but does not set it."
-         if exact_oracle else "  Throughput denominator: every strategy uses C + post; this campaign has no hindsight exact-access oracle."),
+        "  model-x charges every system C + post and is retained only as a consensus-overlap sensitivity metric.",
     ]
     if exact_oracle:
         lines.append("  ACG-Oracle is hindsight-only: exact source SLOAD/SSTORE accesses replace prediction; frozen native-translation RAW aliases compensate EVM->Wasmd semantic compression; the normal ACG MVCC+validation path is retained.")
     lines += [
-        "  post-x = matched serial execution / consensus-visible post phase. wall-x is bookkeeping only.",
+        "  matched-x = serialization-matched Serial / post; useful for internal correctness diagnostics.",
         "",
-        f"{'system':<12} {'w':>3} {'n':>3} {'tps':>10} {'tput-x':>7} {'post-ms':>10} {'post-x':>7} {'wall-x':>7} {'replay':>8} {'val-ms':>9} {'replay-ms':>10}",
+        f"{'system':<12} {'w':>3} {'n':>3} {'replay-tps':>11} {'replay-x':>8} {'post-ms':>10} {'matched-x':>9} {'work-x':>7} {'model-x':>7} {'replay':>8} {'val-ms':>9} {'replay-ms':>10}",
     ]
     for r in rows:
         lines.append(
             f"{r['label']:<12} {r['workers']:>3} {r['samples']:>3} "
-            f"{r['throughput_tps']:>10.1f} {r['throughput_speedup']:>7.2f} "
-            f"{r['post_ms']:>10.1f} {r['post_x']:>7.2f} {r['wall_x']:>7.2f} "
-            f"{r['replay_pct']:>7.2f}% {r['validation_ms']:>9.1f} {r['replay_execution_ms']:>10.1f}"
+            f"{r['throughput_tps']:>11.1f} {r['throughput_speedup']:>8.2f} "
+            f"{r['post_ms']:>10.1f} {r['post_x']:>9.2f} {r['historical_wall_x']:>7.2f} "
+            f"{r['consensus_model_speedup']:>7.2f} {r['replay_pct']:>7.2f}% "
+            f"{r['validation_ms']:>9.1f} {r['replay_execution_ms']:>10.1f}"
         )
     if exact_oracle:
         by_worker = defaultdict(dict)
@@ -351,14 +382,15 @@ def render(rows: list[dict[str, Any]], window_ns: int, rust_acg_only: bool = Fal
     lines += [
         "",
         "Reporting notes:",
-        "  * Use throughput_tps as the primary fixed-consensus-window throughput metric.",
-        "  * Report post-x beside throughput: it isolates consensus-visible validation/replay from serial execution.",
-        "  * Report wall-x and pre-consensus percentiles to show the real resource cost and whether speculation fits C.",
+        "  * throughput_tps / throughput_speedup are the primary Vegeta-paper replay-throughput metrics.",
+        "  * historical_post_x equals replay-x; post_x is the serialization-matched diagnostic and can differ for reordered Vegeta.",
+        "  * historical_wall_x exposes total active machine work relative to common historical Serial.",
+        "  * consensus_model_tps / consensus_model_speedup retain the old fixed-C model as a secondary sensitivity result.",
     ]
     if not rust_acg_only:
         lines += [
             "  * AriaFB ports the attached repository's exact Rule-2 abort condition and completion-driven hot-chain DAG fallback to Wasmd (successors launch as soon as their last predecessor completes).",
-            "  * Vegeta ports SpeculateMod/ParallelMod hot-key proposal reordering, Rule-2 replay batches, and access-change handling to Wasmd.",
+            "  * Vegeta ports Algorithm 1 full longest-to-shortest dependency-chain ordering, BuildDAG dependency classes, Rule-2 replay batches, and access-change handling to Wasmd.",
         ]
     if exact_oracle:
         lines += [
@@ -436,7 +468,9 @@ def main() -> None:
         ),
         "exact_oracle_enabled": not args.no_exact_oracle,
         "throughput_definition": {
-            "all_strategies": "transactions / (blocks * consensus_window + sum(post_consensus))",
+            "primary_all_strategies": "transactions / sum(post_consensus_nanos)",
+            "primary_reference": "Vegeta NSDI'25 single-node methodology: compare replay-phase throughput against Serial execution; pre-consensus speculation is excluded from the primary replay-throughput numerator/denominator.",
+            "secondary_consensus_model": "transactions / (blocks * consensus_window + sum(post_consensus_nanos))",
             "interpretation": (
                 "Rust-ACG determines the fixed consensus interval in rust-only diagnostics. ACG-Oracle is evaluated under that same C without changing it; Serial waits for the same fixed interval before post-consensus execution. ACG-Oracle uses exact source accesses plus frozen translation-only RAW compensation, but the same ACG execution/validation design."
                 if args.rust_acg_only

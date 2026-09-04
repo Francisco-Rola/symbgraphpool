@@ -510,6 +510,14 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         a={"ethereum_input":data,"arguments":{"owner":owner,"spender":spender,"amount":77},"native_instance_id":"fiat-token-cw20:0x"+"33"*20,"action_id":1}
         call=mod.translate("fiat-token-cw20","execute::permit",None,{},a,"0x"+"44"*20,mod.TokenIdRemapper())
         self.assertEqual(call["sender"],owner); self.assertEqual(call["msg"]["permit"]["amount"],str(mod.approval_amount(77)))
+        source_minter="0x"+"44"*20
+        mint_data="0x40c10f19"+(bytes.fromhex("00"*12+"55"*20)+w(9)).hex()
+        mint_action={"ethereum_input":mint_data,"arguments":{"recipient":"0x"+"55"*20,"amount":9},"native_instance_id":"fiat-token-cw20:0x"+"33"*20,"action_id":3}
+        mint_call=mod.translate("fiat-token-cw20","execute::mint",None,{},mint_action,source_minter,mod.TokenIdRemapper())
+        self.assertEqual(mint_call["sender"],"native-s3-admin")
+        self.assertEqual(mint_call["source_minter"],source_minter)
+        self.assertEqual(mint_call["source_authorization_adapter"],"source-successful-fiat-token-mint-via-native-admin")
+        self.assertEqual(mint_call["msg"]["mint"],{"recipient":"0x"+"55"*20,"amount":str(mod.amount(9))})
         mint="0xdb980f4f"+(w(3)+w(5)).hex(); a={"ethereum_input":mint,"arguments":{"phase_index":3,"quantity":5},"native_instance_id":"cw721-drop:0x"+"55"*20,"action_id":2}
         call=mod.translate("cw721-drop","execute::mint_phase_drop",None,{},a,"0x"+"66"*20,mod.TokenIdRemapper())
         self.assertEqual(call["msg"]["mint_drop"]["quantity"],5); self.assertEqual(call["msg"]["mint_drop"]["stage_key"],"phase:3")

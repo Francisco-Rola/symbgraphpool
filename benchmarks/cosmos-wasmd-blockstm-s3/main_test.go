@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"testing"
 
 	dbm "github.com/cosmos/cosmos-db"
@@ -36,14 +37,15 @@ func TestSetupDBSnapshotRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	entries, stateBytes, err := captureSetupDB(db)
+	snapshot, entries, stateBytes, err := captureSetupDB(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != len(want) || stateBytes == 0 {
-		t.Fatalf("snapshot entries=%d bytes=%d", len(entries), stateBytes)
+	defer os.Remove(snapshot)
+	if entries != uint64(len(want)) || stateBytes == 0 {
+		t.Fatalf("snapshot entries=%d bytes=%d", entries, stateBytes)
 	}
-	clone, err := restoreSetupDB(entries)
+	clone, err := restoreSetupDB(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}

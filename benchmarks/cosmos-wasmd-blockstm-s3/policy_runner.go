@@ -17,19 +17,69 @@ import (
 // policyRunStats records concrete strategy work. Attempts counts executions in the
 // measured phase; Reexecutions counts executions beyond each strategy's initial batch.
 type policyRunStats struct {
-	Attempts              uint64
-	Reexecutions          uint64
-	Speculated            uint64
-	Reused                uint64
-	Replayed              uint64
-	PreConsensusNanos     uint64
-	PostConsensusNanos    uint64
-	ValidationNanos       uint64
-	ReplayExecutionNanos  uint64
-	ConflictAnalysisNanos uint64
-	DiscoveredConflicts   uint64
-	ForwardFallbacks      uint64
-	SafetyReplays         uint64
+	Attempts                        uint64
+	Reexecutions                    uint64
+	Speculated                      uint64
+	Reused                          uint64
+	Replayed                        uint64
+	PreConsensusNanos               uint64
+	PostConsensusNanos              uint64
+	ValidationNanos                 uint64
+	ReplayExecutionNanos            uint64
+	ConflictAnalysisNanos           uint64
+	DiscoveredConflicts             uint64
+	ForwardFallbacks                uint64
+	SafetyReplays                   uint64
+	SnapshotBuildNanos              uint64
+	SnapshotPointHits               uint64
+	SnapshotPointMisses             uint64
+	SnapshotRangeHits               uint64
+	SnapshotRangeMisses             uint64
+	PostBatches                     uint64
+	PostSingletonBatches            uint64
+	PostMaxBatch                    uint64
+	ReadySelectionNanos             uint64
+	PreExecWorkNanos                uint64
+	PreExecSpanNanos                uint64
+	PostExecWorkNanos               uint64
+	PostExecSpanNanos               uint64
+	PostWideExecWorkNanos           uint64
+	PostWideExecSpanNanos           uint64
+	PostWideTransactions            uint64
+	VegetaLongestChain              uint64
+	VegetaChainCount                uint64
+	VegetaAlg3ValidationNanos       uint64
+	VegetaRangeValidationNanos      uint64
+	VegetaIntrinsicReexecutionNanos uint64
+}
+
+// ariaSemanticExecutionError marks a source-successful transaction that cannot
+// execute under Aria's speculative/derived serialization state. This is not an
+// internal scheduler failure: on a fixed historical blockchain stream it means
+// the alternative serialization is not safe to carry into subsequent blocks.
+// The caller may discard the staged Aria block and commit historical order.
+type ariaSemanticExecutionError struct {
+	phase string
+	index int
+	log   string
+}
+
+func (e *ariaSemanticExecutionError) Error() string {
+	return fmt.Sprintf("aria-fb %s tx %d failed: %s", e.phase, e.index, e.log)
+}
+
+// vegetaSemanticExecutionError marks a source-successful transaction that cannot
+// execute under Vegeta's speculative/derived serialization state. The caller
+// must discard the staged Vegeta branch and replay historical block order from
+// the unchanged block-start state. Historical replay remains fail-closed.
+type vegetaSemanticExecutionError struct {
+	phase string
+	index int
+	log   string
+}
+
+func (e *vegetaSemanticExecutionError) Error() string {
+	return fmt.Sprintf("vegeta %s tx %d failed: %s", e.phase, e.index, e.log)
 }
 
 type storeID uint64
@@ -108,6 +158,22 @@ func (r *storeIDRegistry) id(key storetypes.StoreKey) storeID {
 func (r *storeIDRegistry) key(id storeID) (storetypes.StoreKey, bool) {
 	key, ok := r.keys[id]
 	return key, ok
+}
+
+func (r *storeIDRegistry) merge(other *storeIDRegistry) {
+	if r == nil || other == nil {
+		return
+	}
+	for key, id := range other.ids {
+		if _, ok := r.ids[key]; !ok {
+			r.ids[key] = id
+		}
+	}
+	for id, key := range other.keys {
+		if _, ok := r.keys[id]; !ok {
+			r.keys[id] = key
+		}
+	}
 }
 
 func exactAccessID(store storeID, key []byte) accessID {
@@ -200,27 +266,37 @@ func (s *writeSet) merge(other writeSet) {
 // are stored only as 64-bit fingerprints. Unique writes retain their raw bytes
 // solely for exact iterator/range validation.
 type accessTracker struct {
-	reads  map[accessID]struct{}
-	ranges []storeRange
-	writes writeSet
-	parent *accessTracker
+	reads               map[accessID]struct{}
+	readLocations       writeSet
+	retainReadLocations bool
+	ranges              []storeRange
+	writes              writeSet
+	parent              *accessTracker
 }
 
 func newAccessTracker(parent *accessTracker) *accessTracker {
+	retain := parent != nil && parent.retainReadLocations
 	return &accessTracker{
-		reads:  make(map[accessID]struct{}, 64),
-		writes: newWriteSet(16),
-		parent: parent,
+		reads:               make(map[accessID]struct{}, 64),
+		readLocations:       newWriteSet(64),
+		retainReadLocations: retain,
+		writes:              newWriteSet(16),
+		parent:              parent,
 	}
 }
 
 func (t *accessTracker) read(store storeID, key []byte) {
 	id := exactAccessID(store, key)
 	t.reads[id] = struct{}{}
+	if t.retainReadLocations {
+		t.readLocations.addLocation(id, writeLocation{store: store, key: cloneBytes(key)})
+	}
 	// A discarded nested CacheContext can still influence control flow. Bubble
-	// reads up immediately; writes only bubble when that cache is committed.
+	// the concrete read location up immediately; writes only bubble when that
+	// cache is committed. Keeping the raw point-read key is block-local and lets
+	// Vegeta materialize a lock-free post-consensus read snapshot.
 	if t.parent != nil {
-		t.parent.readID(id)
+		t.parent.read(store, key)
 	}
 }
 
@@ -290,6 +366,169 @@ func mergeWrites(dst *writeSet, tracker *accessTracker) {
 	dst.merge(tracker.writes)
 }
 
+// vegetaReadSnapshot is an immutable, batch-start view of point/range reads
+// discovered during Vegeta pre-consensus execution. Ordinary Cosmos cachekv
+// stores intentionally serialize access through a mutex because their IAVL
+// parent is not concurrency-safe. Serving known post-consensus reads from this
+// block-local snapshot keeps parallel workers off that shared parent lock.
+//
+// A post-consensus access that was not seen during pre-execution simply misses
+// this snapshot and falls through to the ordinary SDK store. Vegeta's existing
+// access-change/new-key validation then decides whether that transaction can be
+// reused or must be replayed, so the optimization cannot hide a dynamic access.
+type vegetaRangeKey struct {
+	store    storetypes.StoreKey
+	start    string
+	end      string
+	startNil bool
+	endNil   bool
+}
+
+type vegetaReadSnapshot struct {
+	bytes       map[storetypes.StoreKey]map[string]rustBytesMutation
+	byteRanges  map[vegetaRangeKey]map[string]rustBytesMutation
+	pointHits   atomic.Uint64
+	pointMisses atomic.Uint64
+	rangeHits   atomic.Uint64
+	rangeMisses atomic.Uint64
+}
+
+func newVegetaReadSnapshot() *vegetaReadSnapshot {
+	return &vegetaReadSnapshot{
+		bytes:      make(map[storetypes.StoreKey]map[string]rustBytesMutation),
+		byteRanges: make(map[vegetaRangeKey]map[string]rustBytesMutation),
+	}
+}
+
+func vegetaSnapshotRangeKey(store storetypes.StoreKey, start, end []byte) vegetaRangeKey {
+	return vegetaRangeKey{store: store, start: string(start), end: string(end), startNil: start == nil, endNil: end == nil}
+}
+
+func (s *vegetaReadSnapshot) setBytes(store storetypes.StoreKey, key, value []byte) {
+	if s == nil {
+		return
+	}
+	entries := s.bytes[store]
+	if entries == nil {
+		entries = make(map[string]rustBytesMutation)
+		s.bytes[store] = entries
+	}
+	entries[string(key)] = rustBytesMutation{deleted: value == nil, value: cloneBytes(value)}
+}
+
+func (s *vegetaReadSnapshot) bytesValue(store storetypes.StoreKey, key []byte) ([]byte, bool, bool) {
+	if s == nil {
+		return nil, false, false
+	}
+	mutation, ok := s.bytes[store][string(key)]
+	if !ok {
+		s.pointMisses.Add(1)
+		return nil, false, false
+	}
+	s.pointHits.Add(1)
+	return mutation.value, mutation.deleted, true
+}
+
+func (s *vegetaReadSnapshot) setBytesRange(store storetypes.StoreKey, start, end []byte, values map[string]rustBytesMutation) {
+	if s == nil {
+		return
+	}
+	s.byteRanges[vegetaSnapshotRangeKey(store, start, end)] = values
+}
+
+func (s *vegetaReadSnapshot) bytesRange(store storetypes.StoreKey, start, end []byte) (map[string]rustBytesMutation, bool) {
+	if s == nil {
+		return nil, false
+	}
+	stored, ok := s.byteRanges[vegetaSnapshotRangeKey(store, start, end)]
+	if !ok {
+		s.rangeMisses.Add(1)
+		return nil, false
+	}
+	s.rangeHits.Add(1)
+	out := make(map[string]rustBytesMutation, len(stored))
+	for raw, mutation := range stored {
+		out[raw] = rustBytesMutation{deleted: mutation.deleted, value: cloneBytes(mutation.value)}
+	}
+	return out, true
+}
+
+type vegetaSnapshotStats struct {
+	PointHits   uint64
+	PointMisses uint64
+	RangeHits   uint64
+	RangeMisses uint64
+}
+
+func (s *vegetaReadSnapshot) stats() vegetaSnapshotStats {
+	if s == nil {
+		return vegetaSnapshotStats{}
+	}
+	return vegetaSnapshotStats{
+		PointHits: s.pointHits.Load(), PointMisses: s.pointMisses.Load(),
+		RangeHits: s.rangeHits.Load(), RangeMisses: s.rangeMisses.Load(),
+	}
+}
+
+func buildVegetaReadSnapshot(ms storetypes.MultiStore, indices []int, trackers []*accessTracker, stores *storeIDRegistry) (*vegetaReadSnapshot, error) {
+	snapshot := newVegetaReadSnapshot()
+	base := ms
+	if tracked, ok := ms.(*trackingMultiStore); ok {
+		base = tracked.cacheMultiStoreDelegate.CacheMultiStore
+	}
+	seenPoints := make(map[accessID]struct{})
+	seenRanges := make(map[vegetaRangeKey]struct{})
+	for _, idx := range indices {
+		if idx < 0 || idx >= len(trackers) || trackers[idx] == nil {
+			continue
+		}
+		tracker := trackers[idx]
+		forEachWrite(&tracker.readLocations, func(id accessID, loc writeLocation) {
+			if _, ok := seenPoints[id]; ok {
+				return
+			}
+			storeKey, ok := stores.key(loc.store)
+			if !ok {
+				return
+			}
+			store := base.GetStore(storeKey)
+			kv, ok := store.(storetypes.KVStore)
+			if !ok {
+				return
+			}
+			snapshot.setBytes(storeKey, loc.key, kv.Get(loc.key))
+			seenPoints[id] = struct{}{}
+		})
+		for _, readRange := range tracker.ranges {
+			storeKey, ok := stores.key(readRange.store)
+			if !ok {
+				continue
+			}
+			rangeKey := vegetaSnapshotRangeKey(storeKey, readRange.start, readRange.end)
+			if _, ok := seenRanges[rangeKey]; ok {
+				continue
+			}
+			store := base.GetStore(storeKey)
+			kv, ok := store.(storetypes.KVStore)
+			if !ok {
+				continue
+			}
+			it := kv.Iterator(readRange.start, readRange.end)
+			values, err := collectByteIterator(it)
+			if err != nil {
+				return nil, err
+			}
+			captured := make(map[string]rustBytesMutation, len(values))
+			for raw, value := range values {
+				captured[raw] = rustBytesMutation{value: cloneBytes(value)}
+			}
+			snapshot.setBytesRange(storeKey, readRange.start, readRange.end, captured)
+			seenRanges[rangeKey] = struct{}{}
+		}
+	}
+	return snapshot, nil
+}
+
 // trackingKVStore records actual Wasmd/Cosmos accesses while delegating storage
 // semantics to the SDK cache store itself.
 type trackingKVStore struct {
@@ -298,6 +537,7 @@ type trackingKVStore struct {
 	store    storeID
 	tracker  *accessTracker
 	readView *rustMvccReadView
+	snapshot *vegetaReadSnapshot
 	overlay  *rustLocalOverlay
 }
 
@@ -308,6 +548,12 @@ func (s trackingKVStore) Get(key []byte) []byte {
 			return nil
 		}
 		return cloneBytes(mutation.value)
+	}
+	if value, deleted, ok := s.snapshot.bytesValue(s.storeKey, key); ok {
+		if deleted {
+			return nil
+		}
+		return value
 	}
 	if value, deleted, ok := s.readView.bytesValue(s.storeKey, key); ok {
 		if deleted {
@@ -321,6 +567,9 @@ func (s trackingKVStore) Has(key []byte) bool {
 	s.tracker.read(s.store, key)
 	if mutation, ok := s.overlay.lookupBytes(s.storeKey, key); ok {
 		return !mutation.deleted
+	}
+	if _, deleted, ok := s.snapshot.bytesValue(s.storeKey, key); ok {
+		return !deleted
 	}
 	if _, deleted, ok := s.readView.bytesValue(s.storeKey, key); ok {
 		return !deleted
@@ -339,15 +588,26 @@ func (s trackingKVStore) Delete(key []byte) {
 }
 func (s trackingKVStore) iterator(start, end []byte, reverse bool) storetypes.Iterator {
 	s.tracker.readRange(s.store, start, end)
-	var underlying storetypes.Iterator
-	if reverse {
-		underlying = s.KVStore.ReverseIterator(start, end)
+	snapshotValues, covered := s.snapshot.bytesRange(s.storeKey, start, end)
+	values := make(map[string][]byte, len(snapshotValues))
+	if covered {
+		for raw, mutation := range snapshotValues {
+			if !mutation.deleted {
+				values[raw] = cloneBytes(mutation.value)
+			}
+		}
 	} else {
-		underlying = s.KVStore.Iterator(start, end)
-	}
-	values, err := collectByteIterator(underlying)
-	if err != nil {
-		return rustByteErrorIterator(start, end, err)
+		var underlying storetypes.Iterator
+		if reverse {
+			underlying = s.KVStore.ReverseIterator(start, end)
+		} else {
+			underlying = s.KVStore.Iterator(start, end)
+		}
+		var err error
+		values, err = collectByteIterator(underlying)
+		if err != nil {
+			return rustByteErrorIterator(start, end, err)
+		}
 	}
 	for raw, mutation := range s.readView.bytesRange(s.storeKey, start, end) {
 		if mutation.deleted {
@@ -476,19 +736,32 @@ type cacheMultiStoreDelegate struct {
 
 type trackingMultiStore struct {
 	cacheMultiStoreDelegate
-	tracker  *accessTracker
-	stores   *storeIDRegistry
-	readView *rustMvccReadView
-	overlay  *rustLocalOverlay
+	tracker              *accessTracker
+	stores               *storeIDRegistry
+	readView             *rustMvccReadView
+	snapshot             *vegetaReadSnapshot
+	overlay              *rustLocalOverlay
+	commitTracker        *accessTracker
+	commitStores         *storeIDRegistry
+	speculativeStoreKeys []storetypes.StoreKey
 }
 
 func wrapTrackingCacheMultiStore(store storetypes.CacheMultiStore, parent *accessTracker, stores *storeIDRegistry, readView *rustMvccReadView, parentOverlay *rustLocalOverlay) *trackingMultiStore {
+	// The local overlay is required only when an external Rust MVCC read view is
+	// active. Plain Cosmos CacheMultiStore branches already provide exact
+	// read-your-writes semantics, so maintaining a second overlay for Vegeta,
+	// Aria and safety-reference execution only duplicates every mutation (and
+	// clones byte values) on their hottest path.
+	var overlay *rustLocalOverlay
+	if readView != nil || parentOverlay != nil {
+		overlay = newRustLocalOverlay(parentOverlay)
+	}
 	return &trackingMultiStore{
 		cacheMultiStoreDelegate: cacheMultiStoreDelegate{CacheMultiStore: store},
 		tracker:                 newAccessTracker(parent),
 		stores:                  stores,
 		readView:                readView,
-		overlay:                 newRustLocalOverlay(parentOverlay),
+		overlay:                 overlay,
 	}
 }
 
@@ -496,15 +769,88 @@ func newTrackingMultiStore(parent storetypes.MultiStore) *trackingMultiStore {
 	return wrapTrackingCacheMultiStore(parent.CacheMultiStore(), nil, newStoreIDRegistry(), nil, nil)
 }
 
+func newTrackingMultiStoreForSpeculation(parent storetypes.MultiStore, storeKeys []storetypes.StoreKey) *trackingMultiStore {
+	tracked := newTrackingMultiStore(parent)
+	tracked.speculativeStoreKeys = append([]storetypes.StoreKey(nil), storeKeys...)
+	return tracked
+}
+
 func newTrackingMultiStoreWithMVCC(parent storetypes.MultiStore, readView *rustMvccReadView) *trackingMultiStore {
 	return wrapTrackingCacheMultiStore(parent.CacheMultiStore(), nil, newStoreIDRegistry(), readView, nil)
+}
+
+// newSpeculativeTrackingMultiStore creates a transaction-local branch without
+// stacking tracking wrappers when the parent is already a tracking store. Aria's
+// canonical block staging intentionally passes a *trackingMultiStore into the
+// scheduler. Calling parent.CacheMultiStore() through the public wrapper would
+// create an inner tracker whose reads bubble into the shared block tracker while
+// sibling speculative transactions are running concurrently. Besides racing on
+// the tracker's maps, that would pollute the staged block with accesses from
+// speculative transactions that may later be discarded.
+//
+// Instead branch directly from the parent's underlying CacheMultiStore. The
+// transaction gets private access/store registries; accepted writes are merged
+// into the staged block tracker only when Write() commits that transaction.
+func newSpeculativeTrackingMultiStore(parent storetypes.MultiStore) *trackingMultiStore {
+	tracked, ok := parent.(*trackingMultiStore)
+	if !ok {
+		return newTrackingMultiStore(parent)
+	}
+	child := tracked.cacheMultiStoreDelegate.CacheMultiStore.CacheMultiStore()
+	var overlay *rustLocalOverlay
+	if tracked.readView != nil || tracked.overlay != nil {
+		overlay = newRustLocalOverlay(tracked.overlay)
+	}
+	return &trackingMultiStore{
+		cacheMultiStoreDelegate: cacheMultiStoreDelegate{CacheMultiStore: child},
+		tracker:                 newAccessTracker(nil),
+		stores:                  newStoreIDRegistry(),
+		readView:                tracked.readView,
+		overlay:                 overlay,
+		commitTracker:           tracked.tracker,
+		commitStores:            tracked.stores,
+		speculativeStoreKeys:    tracked.speculativeStoreKeys,
+	}
+}
+
+func newSpeculativeTrackingMultiStoreWithSnapshot(parent storetypes.MultiStore, snapshot *vegetaReadSnapshot) *trackingMultiStore {
+	tracked := newSpeculativeTrackingMultiStore(parent)
+	tracked.snapshot = snapshot
+	// Snapshot reads bypass the delegate, so retain a transaction-local overlay
+	// to preserve read-your-writes before consulting the immutable batch view.
+	if tracked.overlay == nil {
+		tracked.overlay = newRustLocalOverlay(nil)
+	}
+	return tracked
+}
+
+// prewarmSpeculativeParent initializes the SDK cachemulti.Store wrappers for
+// every mounted store before any sibling speculative branch executes. store/v2
+// lazily inserts wrappers into an internal map from GetStore/GetKVStore; allowing
+// multiple transaction goroutines to trigger that initialization through a
+// shared staged parent causes concurrent map writes inside cachemulti.Store.
+//
+// Warm-up is deliberately outside the measured parallel execution and happens
+// once per speculative phase. After it returns, sibling child caches only read
+// the parent's wrapper map while maintaining their own private cache/tracker.
+func prewarmSpeculativeParent(ms storetypes.MultiStore) {
+	tracked, ok := ms.(*trackingMultiStore)
+	if !ok || len(tracked.speculativeStoreKeys) == 0 {
+		return
+	}
+	parent := tracked.cacheMultiStoreDelegate.CacheMultiStore
+	for _, key := range tracked.speculativeStoreKeys {
+		_ = parent.GetStore(key)
+	}
 }
 
 func (m *trackingMultiStore) CacheWrap() storetypes.CacheWrap { return m.CacheMultiStore() }
 
 func (m *trackingMultiStore) CacheMultiStore() storetypes.CacheMultiStore {
 	child := m.cacheMultiStoreDelegate.CacheMultiStore.CacheMultiStore()
-	return wrapTrackingCacheMultiStore(child, m.tracker, m.stores, m.readView, m.overlay)
+	wrapped := wrapTrackingCacheMultiStore(child, m.tracker, m.stores, m.readView, m.overlay)
+	wrapped.snapshot = m.snapshot
+	return wrapped
 }
 
 func (m *trackingMultiStore) CacheMultiStoreWithVersion(version int64) (storetypes.CacheMultiStore, error) {
@@ -512,13 +858,15 @@ func (m *trackingMultiStore) CacheMultiStoreWithVersion(version int64) (storetyp
 	if err != nil {
 		return nil, err
 	}
-	return wrapTrackingCacheMultiStore(child, m.tracker, m.stores, m.readView, m.overlay), nil
+	wrapped := wrapTrackingCacheMultiStore(child, m.tracker, m.stores, m.readView, m.overlay)
+	wrapped.snapshot = m.snapshot
+	return wrapped, nil
 }
 
 func (m *trackingMultiStore) GetStore(key storetypes.StoreKey) storetypes.Store {
 	store := m.cacheMultiStoreDelegate.CacheMultiStore.GetStore(key)
 	if kv, ok := store.(storetypes.KVStore); ok {
-		return trackingKVStore{KVStore: kv, storeKey: key, store: m.stores.id(key), tracker: m.tracker, readView: m.readView, overlay: m.overlay}
+		return trackingKVStore{KVStore: kv, storeKey: key, store: m.stores.id(key), tracker: m.tracker, readView: m.readView, snapshot: m.snapshot, overlay: m.overlay}
 	}
 	if obj, ok := store.(storetypes.ObjKVStore); ok {
 		return trackingObjKVStore{ObjKVStore: obj, storeKey: key, store: m.stores.id(key), tracker: m.tracker, readView: m.readView, overlay: m.overlay}
@@ -533,6 +881,7 @@ func (m *trackingMultiStore) GetKVStore(key storetypes.StoreKey) storetypes.KVSt
 		store:    m.stores.id(key),
 		tracker:  m.tracker,
 		readView: m.readView,
+		snapshot: m.snapshot,
 		overlay:  m.overlay,
 	}
 }
@@ -551,39 +900,128 @@ func (m *trackingMultiStore) GetObjKVStore(key storetypes.StoreKey) storetypes.O
 func (m *trackingMultiStore) Write() {
 	m.cacheMultiStoreDelegate.CacheMultiStore.Write()
 	m.tracker.mergeIntoParent()
+	if m.commitTracker != nil {
+		m.commitTracker.writes.merge(m.tracker.writes)
+	}
+	if m.commitStores != nil {
+		m.commitStores.merge(m.stores)
+	}
 	m.overlay.mergeIntoParent()
 }
 
-type speculativeResult struct {
-	index   int
-	store   *trackingMultiStore
-	result  *abci.ExecTxResult
-	attempt uint64
+// trackingBranchesFinalStateEqual compares the final values of every key
+// written by either staged block branch. Both branches have the same immutable
+// block-start parent, so equality on the union of writes is sufficient to prove
+// identical post-block KV state without committing either branch.
+func trackingBranchesFinalStateEqual(left, right *trackingMultiStore) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	equal := true
+	compare := func(source *trackingMultiStore, loc writeLocation) {
+		if !equal {
+			return
+		}
+		key, ok := source.stores.key(loc.store)
+		if !ok {
+			equal = false
+			return
+		}
+		lv := left.cacheMultiStoreDelegate.CacheMultiStore.GetKVStore(key).Get(loc.key)
+		rv := right.cacheMultiStoreDelegate.CacheMultiStore.GetKVStore(key).Get(loc.key)
+		if !bytes.Equal(lv, rv) {
+			equal = false
+		}
+	}
+	forEachWrite(&left.tracker.writes, func(_ accessID, loc writeLocation) { compare(left, loc) })
+	forEachWrite(&right.tracker.writes, func(_ accessID, loc writeLocation) { compare(right, loc) })
+	return equal
 }
 
-func prepareSpeculation(ms storetypes.MultiStore, indices []int) map[int]*trackingMultiStore {
+type speculativeResult struct {
+	index          int
+	store          *trackingMultiStore
+	result         *abci.ExecTxResult
+	attempt        uint64
+	execNanos      uint64
+	execStartNanos int64
+	execEndNanos   int64
+}
+
+// speculativeAccessResult is the pre-consensus form of speculativeResult.
+// Vegeta's proposal/dependency phase needs only the observed access tracker and
+// store-ID registry; retaining the transaction CacheMultiStore after execution
+// keeps a second copy of every speculative write alive for no semantic benefit.
+// Dropping the cache branch as soon as its tracker has been extracted reduces
+// allocation lifetime and GC pressure on large Wasmd blocks.
+type speculativeAccessResult struct {
+	index          int
+	tracker        *accessTracker
+	stores         *storeIDRegistry
+	result         *abci.ExecTxResult
+	execNanos      uint64
+	execStartNanos int64
+	execEndNanos   int64
+}
+
+func prepareSpeculationWithSnapshot(ms storetypes.MultiStore, indices []int, snapshot *vegetaReadSnapshot, captureReadLocations bool) map[int]*trackingMultiStore {
+	prewarmSpeculativeParent(ms)
 	out := make(map[int]*trackingMultiStore, len(indices))
 	// Branch creation is intentionally serialized. Execution on the independent
 	// branches is parallel; this avoids depending on CacheMultiStore branch
-	// construction itself being thread-safe.
+	// construction itself being thread-safe. If ms is already tracked (for example
+	// Aria's staged canonical block), fork below the tracking wrapper so sibling
+	// transactions never share a mutable accessTracker during speculation.
 	for _, idx := range indices {
-		out[idx] = newTrackingMultiStore(ms)
+		if snapshot != nil {
+			out[idx] = newSpeculativeTrackingMultiStoreWithSnapshot(ms, snapshot)
+		} else {
+			out[idx] = newSpeculativeTrackingMultiStore(ms)
+		}
+		out[idx].tracker.retainReadLocations = captureReadLocations
 	}
 	return out
 }
 
-func speculateIndices(
+func prepareSpeculation(ms storetypes.MultiStore, indices []int) map[int]*trackingMultiStore {
+	return prepareSpeculationWithSnapshot(ms, indices, nil, false)
+}
+
+func speculateIndicesWithSnapshot(
 	ctx context.Context,
 	workers int,
 	ms storetypes.MultiStore,
 	txs [][]byte,
 	indices []int,
 	deliverTx sdk.DeliverTxFunc,
+	snapshot *vegetaReadSnapshot,
+	captureReadLocations bool,
 ) map[int]speculativeResult {
 	if workers < 1 {
 		workers = 1
 	}
-	branches := prepareSpeculation(ms, indices)
+	if len(indices) == 0 {
+		return map[int]speculativeResult{}
+	}
+	// More than half of the observed Vegeta post-consensus ready waves are
+	// singletons. Avoid a channel, producer goroutine and worker goroutine when
+	// there is no parallel work to schedule.
+	if len(indices) == 1 {
+		prewarmSpeculativeParent(ms)
+		idx := indices[0]
+		var branch *trackingMultiStore
+		if snapshot != nil {
+			branch = newSpeculativeTrackingMultiStoreWithSnapshot(ms, snapshot)
+		} else {
+			branch = newSpeculativeTrackingMultiStore(ms)
+		}
+		branch.tracker.retainReadLocations = captureReadLocations
+		execStarted := time.Now()
+		res := deliverTx(txs[idx], nil, branch, idx, map[string]any{})
+		execEnded := time.Now()
+		return map[int]speculativeResult{idx: {index: idx, store: branch, result: res, attempt: 1, execNanos: uint64(execEnded.Sub(execStarted).Nanoseconds()), execStartNanos: execStarted.UnixNano(), execEndNanos: execEnded.UnixNano()}}
+	}
+	branches := prepareSpeculationWithSnapshot(ms, indices, snapshot, captureReadLocations)
 	jobs := make(chan int)
 	results := make(chan speculativeResult, len(indices))
 	var wg sync.WaitGroup
@@ -602,8 +1040,10 @@ func speculateIndices(
 				default:
 				}
 				branch := branches[idx]
+				execStarted := time.Now()
 				res := deliverTx(txs[idx], nil, branch, idx, map[string]any{})
-				results <- speculativeResult{index: idx, store: branch, result: res, attempt: 1}
+				execEnded := time.Now()
+				results <- speculativeResult{index: idx, store: branch, result: res, attempt: 1, execNanos: uint64(execEnded.Sub(execStarted).Nanoseconds()), execStartNanos: execStarted.UnixNano(), execEndNanos: execEnded.UnixNano()}
 			}
 		}()
 	}
@@ -622,10 +1062,101 @@ func speculateIndices(
 	return out
 }
 
+// speculateAccesses executes Vegeta's pre-consensus discovery pass without
+// retaining transaction cache branches after execution. Branch construction
+// stays serialized, matching the existing CacheMultiStore safety rule. Once all
+// branches exist, ownership is streamed to workers and removed from the branch
+// table as soon as it is dispatched, so completed pre-consensus cache branches
+// can be reclaimed before the whole block finishes.
+func speculateAccesses(
+	ctx context.Context,
+	workers int,
+	ms storetypes.MultiStore,
+	txs [][]byte,
+	indices []int,
+	deliverTx sdk.DeliverTxFunc,
+) map[int]speculativeAccessResult {
+	if workers < 1 {
+		workers = 1
+	}
+	out := make(map[int]speculativeAccessResult, len(indices))
+	if len(indices) == 0 {
+		return out
+	}
+	branches := prepareSpeculationWithSnapshot(ms, indices, nil, true)
+
+	type job struct {
+		index int
+		store *trackingMultiStore
+	}
+	jobs := make(chan job)
+	resultBuffer := workers * 2
+	if resultBuffer > len(indices) {
+		resultBuffer = len(indices)
+	}
+	results := make(chan speculativeAccessResult, resultBuffer)
+	var wg sync.WaitGroup
+	n := workers
+	if n > len(indices) {
+		n = len(indices)
+	}
+	for w := 0; w < n; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for work := range jobs {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				branch := work.store
+				execStarted := time.Now()
+				res := deliverTx(txs[work.index], nil, branch, work.index, map[string]any{})
+				execEnded := time.Now()
+				results <- speculativeAccessResult{index: work.index, tracker: branch.tracker, stores: branch.stores, result: res, execNanos: uint64(execEnded.Sub(execStarted).Nanoseconds()), execStartNanos: execStarted.UnixNano(), execEndNanos: execEnded.UnixNano()}
+			}
+		}()
+	}
+	go func() {
+		defer func() {
+			close(jobs)
+			wg.Wait()
+			close(results)
+		}()
+		for _, idx := range indices {
+			branch := branches[idx]
+			delete(branches, idx)
+			select {
+			case jobs <- job{index: idx, store: branch}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	for result := range results {
+		out[result.index] = result
+	}
+	return out
+}
+
+func speculateIndices(
+	ctx context.Context,
+	workers int,
+	ms storetypes.MultiStore,
+	txs [][]byte,
+	indices []int,
+	deliverTx sdk.DeliverTxFunc,
+) map[int]speculativeResult {
+	return speculateIndicesWithSnapshot(ctx, workers, ms, txs, indices, deliverTx, nil, false)
+}
+
 func replayOne(ms storetypes.MultiStore, tx []byte, idx int, deliverTx sdk.DeliverTxFunc) speculativeResult {
-	branch := newTrackingMultiStore(ms)
+	branch := newSpeculativeTrackingMultiStore(ms)
+	execStarted := time.Now()
 	res := deliverTx(tx, nil, branch, idx, map[string]any{})
-	return speculativeResult{index: idx, store: branch, result: res, attempt: 1}
+	execEnded := time.Now()
+	return speculativeResult{index: idx, store: branch, result: res, attempt: 1, execNanos: uint64(execEnded.Sub(execStarted).Nanoseconds()), execStartNanos: execStarted.UnixNano(), execEndNanos: execEnded.UnixNano()}
 }
 
 // commitSpeculation preserves block serial order. A speculative result can be
@@ -739,18 +1270,22 @@ func dependencyBetween(earlier, later *accessTracker) dependencyKinds {
 	return kinds
 }
 
-// vegetaDependencyBetween matches BuildDAGShowDependencies in the attached
-// Vegeta repository. That code assigns exactly one dependency class per pair
-// with WAW taking precedence over RAW, which takes precedence over WAR.
+// vegetaDependencyBetween ports Algorithm 1 BuildDAG exactly at the
+// dependency-class level. WAW takes precedence. If the same pair has both WAR
+// and RAW relations, Algorithm 1 promotes that pair to WAW (lines 30-36); this
+// stronger class is required because Rule 2 must not admit the pair in one
+// replay batch. A one-directional pair remains WAR or RAW respectively.
 func vegetaDependencyBetween(earlier, later *accessTracker) dependencyKinds {
 	kinds := dependencyBetween(earlier, later)
 	switch {
 	case kinds&dependencyWAW != 0:
 		return dependencyWAW
-	case kinds&dependencyRAW != 0:
-		return dependencyRAW
+	case kinds&dependencyRAW != 0 && kinds&dependencyWAR != 0:
+		return dependencyWAW
 	case kinds&dependencyWAR != 0:
 		return dependencyWAR
+	case kinds&dependencyRAW != 0:
+		return dependencyRAW
 	default:
 		return 0
 	}
@@ -909,26 +1444,91 @@ func hottestAccessChain(indices []int, trackers []*accessTracker) []int {
 	return chain
 }
 
-func vegetaProposalOrder(trackers []*accessTracker) []int {
+type vegetaAccessChain struct {
+	id  accessID
+	txs []int
+}
+
+// vegetaSortedDependencyChains ports Algorithm 1 SortDependencyChains from
+// Vegeta. Every exact key touched in speculation contributes one chain; chains
+// are sorted longest-first and transactions retain proposal-order position
+// inside each chain. A transaction can occur in multiple chains. Ties are
+// broken by access fingerprint solely to make the otherwise-unspecified tie
+// deterministic across Go map iteration and repeated benchmark runs.
+//
+// Iterator/range dependencies remain in conflict validation but are not turned
+// into point-key chains because the Vegeta paper defines chains over accessed
+// keys. This makes the heuristic conservative with respect to Wasmd ranges
+// without inventing an Ethereum-incompatible chain notion.
+func vegetaSortedDependencyChains(indices []int, trackers []*accessTracker) []vegetaAccessChain {
+	chains := make(map[accessID][]int)
+	for _, idx := range indices {
+		if idx < 0 || idx >= len(trackers) || trackers[idx] == nil {
+			continue
+		}
+		tracker := trackers[idx]
+		seen := make(map[accessID]struct{}, len(tracker.reads)+len(tracker.writes.exact)+len(tracker.writes.collisions))
+		for id := range tracker.reads {
+			seen[id] = struct{}{}
+		}
+		for id := range tracker.writes.exact {
+			seen[id] = struct{}{}
+		}
+		for id := range tracker.writes.collisions {
+			seen[id] = struct{}{}
+		}
+		for id := range seen {
+			chains[id] = append(chains[id], idx)
+		}
+	}
+	out := make([]vegetaAccessChain, 0, len(chains))
+	for id, txs := range chains {
+		out = append(out, vegetaAccessChain{id: id, txs: txs})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if len(out[i].txs) != len(out[j].txs) {
+			return len(out[i].txs) > len(out[j].txs)
+		}
+		return out[i].id < out[j].id
+	})
+	return out
+}
+
+func vegetaProposalOrderWithStats(trackers []*accessTracker) ([]int, int, int) {
 	indices := make([]int, len(trackers))
 	for i := range indices {
 		indices[i] = i
 	}
-	chain := hottestAccessChain(indices, trackers)
-	if len(chain) == 0 {
-		return indices
-	}
-	inChain := make(map[int]struct{}, len(chain))
+	chains := vegetaSortedDependencyChains(indices, trackers)
 	proposal := make([]int, 0, len(indices))
-	for _, idx := range chain {
-		inChain[idx] = struct{}{}
-		proposal = append(proposal, idx)
-	}
-	for _, idx := range indices {
-		if _, ok := inChain[idx]; !ok {
+	included := make(map[int]struct{}, len(indices))
+	for _, chain := range chains {
+		for _, idx := range chain.txs {
+			if _, ok := included[idx]; ok {
+				continue
+			}
+			included[idx] = struct{}{}
 			proposal = append(proposal, idx)
 		}
 	}
+	// Transactions with no tracked point-key accesses do not appear in any
+	// dependency chain. Algorithm 1 still needs them in the proposal, so retain
+	// their original deterministic position after all chain-prioritized txs.
+	for _, idx := range indices {
+		if _, ok := included[idx]; ok {
+			continue
+		}
+		proposal = append(proposal, idx)
+	}
+	longest := 0
+	if len(chains) > 0 {
+		longest = len(chains[0].txs)
+	}
+	return proposal, longest, len(chains)
+}
+
+func vegetaProposalOrder(trackers []*accessTracker) []int {
+	proposal, _, _ := vegetaProposalOrderWithStats(trackers)
 	return proposal
 }
 
@@ -951,6 +1551,97 @@ func buildDependencyMatrix(order []int, trackers []*accessTracker) ([][]dependen
 // nextVegetaBatch is the direct deterministic analogue of upstream
 // popNextBatch: a transaction is ready when it has no remaining WAW dependency
 // and does not simultaneously retain RAW and WAR dependencies.
+// vegetaReadyState preserves nextVegetaBatch's readiness rule while avoiding
+// a full lower-triangular matrix rescan after every completed batch. The old
+// implementation revisited every earlier/later pair once per batch, which made
+// post-consensus scheduling O(batch_count*n^2) on blocks containing many small
+// ready waves. These counters track only dependencies whose earlier endpoint has
+// not completed yet, so advancing a batch touches each matrix edge at most once.
+type vegetaReadyState struct {
+	matrix [][]dependencyKinds
+	deps   []int
+	raw    []int
+	war    []int
+	waw    []int
+}
+
+func newVegetaReadyState(matrix [][]dependencyKinds) *vegetaReadyState {
+	n := len(matrix)
+	s := &vegetaReadyState{
+		matrix: matrix,
+		deps:   make([]int, n),
+		raw:    make([]int, n),
+		war:    make([]int, n),
+		waw:    make([]int, n),
+	}
+	for laterPos := range matrix {
+		for earlierPos := 0; earlierPos < laterPos; earlierPos++ {
+			kinds := matrix[laterPos][earlierPos]
+			if kinds == 0 {
+				continue
+			}
+			s.deps[laterPos]++
+			if kinds&dependencyRAW != 0 {
+				s.raw[laterPos]++
+			}
+			if kinds&dependencyWAR != 0 {
+				s.war[laterPos]++
+			}
+			if kinds&dependencyWAW != 0 {
+				s.waw[laterPos]++
+			}
+		}
+	}
+	return s
+}
+
+func (s *vegetaReadyState) next(done []bool) []int {
+	batch := make([]int, 0)
+	for pos := range s.matrix {
+		if done[pos] {
+			continue
+		}
+		if s.deps[pos] == 0 || (s.waw[pos] == 0 && (s.raw[pos] == 0 || s.war[pos] == 0)) {
+			batch = append(batch, pos)
+		}
+	}
+	return batch
+}
+
+func (s *vegetaReadyState) markDone(batch []int, done []bool) int {
+	completed := 0
+	for _, earlierPos := range batch {
+		if done[earlierPos] {
+			continue
+		}
+		done[earlierPos] = true
+		completed++
+		for laterPos := earlierPos + 1; laterPos < len(s.matrix); laterPos++ {
+			if done[laterPos] {
+				continue
+			}
+			kinds := s.matrix[laterPos][earlierPos]
+			if kinds == 0 {
+				continue
+			}
+			s.deps[laterPos]--
+			if kinds&dependencyRAW != 0 {
+				s.raw[laterPos]--
+			}
+			if kinds&dependencyWAR != 0 {
+				s.war[laterPos]--
+			}
+			if kinds&dependencyWAW != 0 {
+				s.waw[laterPos]--
+			}
+		}
+	}
+	return completed
+}
+
+// nextVegetaBatch remains as a reference implementation for tests/debugging.
+// VegetaRunner.Run uses vegetaReadyState so production execution does not pay
+// the repeated matrix-rescan cost.
 func nextVegetaBatch(matrix [][]dependencyKinds, done []bool) []int {
 	batch := make([]int, 0)
 	for laterPos := range matrix {
@@ -1056,11 +1747,11 @@ func serializationOrderForSnapshot(nodes []int, positions map[int]int, trackers 
 
 type vegetaUniverse struct {
 	known  map[accessID]struct{}
-	writes writeSet
+	points writeSet
 }
 
 func buildVegetaUniverse(trackers []*accessTracker) vegetaUniverse {
-	universe := vegetaUniverse{known: make(map[accessID]struct{}), writes: newWriteSet(64)}
+	universe := vegetaUniverse{known: make(map[accessID]struct{}), points: newWriteSet(64)}
 	for _, tracker := range trackers {
 		if tracker == nil {
 			continue
@@ -1074,7 +1765,12 @@ func buildVegetaUniverse(trackers []*accessTracker) vegetaUniverse {
 		for id := range tracker.writes.collisions {
 			universe.known[id] = struct{}{}
 		}
-		universe.writes.merge(tracker.writes)
+		// Vegeta Algorithm 3 defines all_keys as every point key accessed during
+		// speculation, not just speculative writes. Pre-consensus Vegeta already
+		// retains raw point-read locations for the lock-free replay snapshot, so
+		// reuse those locations here for conservative Wasmd iterator validation.
+		universe.points.merge(tracker.readLocations)
+		universe.points.merge(tracker.writes)
 	}
 	return universe
 }
@@ -1099,7 +1795,11 @@ func trackerReadCoversLocation(tracker *accessTracker, id accessID, loc writeLoc
 	if tracker == nil {
 		return false
 	}
-	if _, ok := tracker.reads[id]; ok {
+	// Vegeta pre-consensus enables raw point-read retention specifically for
+	// replay snapshot/range validation. Use the raw location rather than the
+	// fingerprint-only read set so a theoretical 64-bit hash collision cannot
+	// hide a newly covered iterator key.
+	if writeSetContainsLocation(&tracker.readLocations, id, loc) {
 		return true
 	}
 	for _, r := range tracker.ranges {
@@ -1110,32 +1810,34 @@ func trackerReadCoversLocation(tracker *accessTracker, id accessID, loc writeLoc
 	return false
 }
 
-func rangeOverlapsWrites(target storeRange, writes *writeSet) bool {
-	overlaps := false
-	forEachWrite(writes, func(_ accessID, loc writeLocation) {
-		if loc.store == target.store && keyInRange(loc.key, target.start, target.end) {
-			overlaps = true
-		}
-	})
-	return overlaps
-}
-
-type vegetaAccessChange struct {
-	changed         bool
+type vegetaPointChange struct {
+	deferFinal      bool
 	newReadIDs      map[accessID]struct{}
-	newReadRanges   []storeRange
 	newWriteIDs     map[accessID]struct{}
 	newWriteEntries writeSet
 }
 
-func classifyVegetaAccessChange(pre, actual *accessTracker, universe vegetaUniverse) vegetaAccessChange {
-	change := vegetaAccessChange{
+type vegetaRangeChange struct {
+	deferFinal    bool
+	newReadRanges []storeRange
+}
+
+// classifyVegetaPointChange implements the three point-key cases in Vegeta
+// Algorithm 3 directly:
+//  1. a newly accessed key that is in all_keys => final serial re-execution;
+//  2. a newly read key outside all_keys => wait for the batch's new writes;
+//  3. a newly written key outside all_keys => record it, but do not replay the
+//     writer solely because the write set grew.
+//
+// Accesses that disappear during replay require no action.
+func classifyVegetaPointChange(pre, actual *accessTracker, universe vegetaUniverse) vegetaPointChange {
+	change := vegetaPointChange{
 		newReadIDs:      make(map[accessID]struct{}),
 		newWriteIDs:     make(map[accessID]struct{}),
 		newWriteEntries: newWriteSet(4),
 	}
 	if pre == nil || actual == nil {
-		change.changed = true
+		change.deferFinal = true
 		return change
 	}
 	for id := range actual.reads {
@@ -1143,38 +1845,17 @@ func classifyVegetaAccessChange(pre, actual *accessTracker, universe vegetaUnive
 			continue
 		}
 		if _, known := universe.known[id]; known {
-			if writeSetHasID(&universe.writes, id) {
-				change.changed = true
-			}
+			change.deferFinal = true
 			continue
 		}
 		change.newReadIDs[id] = struct{}{}
-	}
-	for _, actualRange := range actual.ranges {
-		if trackerContainsRange(pre, actualRange) {
-			continue
-		}
-		rangeChanged := false
-		forEachWrite(&universe.writes, func(id accessID, loc writeLocation) {
-			if rangeChanged || loc.store != actualRange.store || !keyInRange(loc.key, actualRange.start, actualRange.end) {
-				return
-			}
-			if !trackerReadCoversLocation(pre, id, loc) {
-				rangeChanged = true
-			}
-		})
-		if rangeChanged {
-			change.changed = true
-		} else {
-			change.newReadRanges = append(change.newReadRanges, actualRange)
-		}
 	}
 	forEachWrite(&actual.writes, func(id accessID, loc writeLocation) {
 		if writeSetContainsLocation(&pre.writes, id, loc) {
 			return
 		}
 		if _, known := universe.known[id]; known {
-			change.changed = true
+			change.deferFinal = true
 			return
 		}
 		change.newWriteIDs[id] = struct{}{}
@@ -1183,131 +1864,203 @@ func classifyVegetaAccessChange(pre, actual *accessTracker, universe vegetaUnive
 	return change
 }
 
+// classifyVegetaRangeChange is the Wasmd-specific conservative extension of
+// Algorithm 3. Ethereum's point-key model has no iterator/range read. A newly
+// introduced range is therefore treated as Case 1 if it covers any speculative
+// point key that the transaction did not already read during speculation.
+// Otherwise it behaves like a Case-2 new read and only needs replay if another
+// transaction in the same ready batch newly writes inside the range.
+func classifyVegetaRangeChange(pre, actual *accessTracker, universe vegetaUniverse) vegetaRangeChange {
+	change := vegetaRangeChange{}
+	if pre == nil || actual == nil {
+		change.deferFinal = true
+		return change
+	}
+	for _, actualRange := range actual.ranges {
+		if trackerContainsRange(pre, actualRange) {
+			continue
+		}
+		knownOverlap := false
+		forEachWrite(&universe.points, func(id accessID, loc writeLocation) {
+			if knownOverlap || loc.store != actualRange.store || !keyInRange(loc.key, actualRange.start, actualRange.end) {
+				return
+			}
+			if !trackerReadCoversLocation(pre, id, loc) {
+				knownOverlap = true
+			}
+		})
+		if knownOverlap {
+			change.deferFinal = true
+			continue
+		}
+		change.newReadRanges = append(change.newReadRanges, actualRange)
+	}
+	return change
+}
+
+type vegetaBatchValidation struct {
+	deferred             map[int]struct{}
+	immediate            map[int]struct{}
+	acceptedOrder        []int
+	alg3ValidationNanos  uint64
+	rangeValidationNanos uint64
+}
+
+// serializationOrderFromVegetaMatrix commits accepted replay results according
+// to the dependency information agreed during speculation. It intentionally
+// does not recompute a second all-pairs dependency graph from replay trackers:
+// Algorithm 3 handles newly introduced keys explicitly, while existing-key
+// ordering comes from the consensus-provided DAG.
+func serializationOrderFromVegetaMatrix(nodes []int, positions map[int]int, matrix [][]dependencyKinds) ([]int, error) {
+	edges := make(map[int]map[int]struct{})
+	for i := 0; i < len(nodes); i++ {
+		for j := i + 1; j < len(nodes); j++ {
+			left, right := nodes[i], nodes[j]
+			leftPos, lok := positions[left]
+			rightPos, rok := positions[right]
+			if !lok || !rok {
+				return nil, fmt.Errorf("vegeta serialization missing proposal position left=%d right=%d", left, right)
+			}
+			if leftPos > rightPos {
+				left, right = right, left
+				leftPos, rightPos = rightPos, leftPos
+			}
+			kinds := matrix[rightPos][leftPos]
+			switch {
+			case kinds&dependencyWAW != 0:
+				return nil, fmt.Errorf("vegeta ready batch unexpectedly contains WAW dependency earlier=%d later=%d", left, right)
+			case kinds&dependencyRAW != 0:
+				// Both transactions executed on the same batch-start snapshot. A RAW
+				// pair is therefore equivalent to serializing the reader before writer.
+				addOrderEdge(edges, right, left)
+			case kinds&dependencyWAR != 0:
+				addOrderEdge(edges, left, right)
+			}
+		}
+	}
+	return topologicalOrder(nodes, edges)
+}
+
 func vegetaValidateBatch(
 	batch []int,
 	positions map[int]int,
+	matrix [][]dependencyKinds,
 	preTrackers []*accessTracker,
 	actualTrackers []*accessTracker,
 	universe vegetaUniverse,
-) (map[int]struct{}, map[int]struct{}, []int, error) {
-	changes := make(map[int]vegetaAccessChange, len(batch))
+) (vegetaBatchValidation, error) {
+	out := vegetaBatchValidation{
+		deferred:  make(map[int]struct{}),
+		immediate: make(map[int]struct{}),
+	}
+	pointChanges := make(map[int]vegetaPointChange, len(batch))
+	rangeChanges := make(map[int]vegetaRangeChange, len(batch))
 	candidates := make(map[int]struct{}, len(batch))
-	deferred := make(map[int]struct{})
-	immediate := make(map[int]struct{})
+
+	alg3Started := time.Now()
 	for _, idx := range batch {
-		change := classifyVegetaAccessChange(preTrackers[idx], actualTrackers[idx], universe)
-		changes[idx] = change
-		if change.changed {
-			deferred[idx] = struct{}{}
+		change := classifyVegetaPointChange(preTrackers[idx], actualTrackers[idx], universe)
+		pointChanges[idx] = change
+		if change.deferFinal {
+			out.deferred[idx] = struct{}{}
 		} else {
 			candidates[idx] = struct{}{}
 		}
 	}
+	out.alg3ValidationNanos += uint64(time.Since(alg3Started).Nanoseconds())
 
-	// New keys were absent from the speculative global key dictionary. They are
-	// safe unless a transaction newly reads a key/range that another currently
-	// accepted transaction newly writes in the same batch. Iteratively removing
-	// such readers mirrors Vegeta's new-key check while giving deferred writers a
-	// deterministic final-serial position.
-	for {
-		newWrites := newWriteSet(8)
-		writers := make(map[accessID]map[int]struct{})
-		for idx := range candidates {
-			for id := range changes[idx].newWriteIDs {
-				if writers[id] == nil {
-					writers[id] = make(map[int]struct{})
-				}
-				writers[id][idx] = struct{}{}
-			}
-			newWrites.merge(changes[idx].newWriteEntries)
+	// Wasmd iterator/range reads have no direct equivalent in Vegeta's EVM
+	// point-key model. Keep them conservative, but isolate their cost from the
+	// paper-faithful point-key Algorithm-3 validation. Transactions deferred by
+	// this extension are removed before Algorithm-3 new_keys is constructed,
+	// because their first-pass writes will not be committed in this ready batch.
+	rangeStarted := time.Now()
+	for idx := range candidates {
+		change := classifyVegetaRangeChange(preTrackers[idx], actualTrackers[idx], universe)
+		rangeChanges[idx] = change
+		if change.deferFinal {
+			delete(candidates, idx)
+			out.deferred[idx] = struct{}{}
 		}
-		var remove []int
-		for idx := range candidates {
-			unsafe := false
-			for id := range changes[idx].newReadIDs {
-				for writer := range writers[id] {
-					if writer != idx {
-						unsafe = true
-						break
-					}
+	}
+	out.rangeValidationNanos += uint64(time.Since(rangeStarted).Nanoseconds())
+
+	// Algorithm 3 Case 2: a read of a key outside all_keys waits until the
+	// current ready batch has finished. It is replayed only when another
+	// non-deferred transaction newly wrote that same key. Case-3 writers are not
+	// replayed merely because they introduced a new write key.
+	alg3Started = time.Now()
+	writers := make(map[accessID]map[int]struct{})
+	for idx := range candidates {
+		for id := range pointChanges[idx].newWriteIDs {
+			if writers[id] == nil {
+				writers[id] = make(map[int]struct{})
+			}
+			writers[id][idx] = struct{}{}
+		}
+	}
+	for idx := range candidates {
+		for id := range pointChanges[idx].newReadIDs {
+			for writer := range writers[id] {
+				if writer != idx {
+					out.immediate[idx] = struct{}{}
+					break
 				}
+			}
+			if _, replay := out.immediate[idx]; replay {
+				break
+			}
+		}
+	}
+	out.alg3ValidationNanos += uint64(time.Since(alg3Started).Nanoseconds())
+
+	rangeStarted = time.Now()
+	for idx := range candidates {
+		if _, already := out.immediate[idx]; already {
+			continue
+		}
+		for _, readRange := range rangeChanges[idx].newReadRanges {
+			unsafe := false
+			for writer := range candidates {
+				if writer == idx {
+					continue
+				}
+				writerChange := pointChanges[writer]
+				forEachWrite(&writerChange.newWriteEntries, func(_ accessID, loc writeLocation) {
+					if !unsafe && loc.store == readRange.store && keyInRange(loc.key, readRange.start, readRange.end) {
+						unsafe = true
+					}
+				})
 				if unsafe {
 					break
 				}
 			}
-			if !unsafe {
-				for _, readRange := range changes[idx].newReadRanges {
-					forEachWrite(&newWrites, func(_ accessID, loc writeLocation) {
-						if !unsafe && loc.store == readRange.store && keyInRange(loc.key, readRange.start, readRange.end) {
-							// Self-only writes are allowed, as in upstream Vegeta.
-							for writer := range candidates {
-								if writer == idx {
-									continue
-								}
-								writerChange := changes[writer]
-								if writeSetContainsLocation(&writerChange.newWriteEntries, exactAccessID(loc.store, loc.key), loc) {
-									unsafe = true
-									break
-								}
-							}
-						}
-					})
-					if unsafe {
-						break
-					}
-				}
-			}
 			if unsafe {
-				remove = append(remove, idx)
+				out.immediate[idx] = struct{}{}
+				break
 			}
 		}
-		if len(remove) == 0 {
-			break
-		}
-		for _, idx := range remove {
-			delete(candidates, idx)
-			immediate[idx] = struct{}{}
-		}
 	}
+	out.rangeValidationNanos += uint64(time.Since(rangeStarted).Nanoseconds())
 
-	// A new mixed dependency can appear only because the replay accessed keys
-	// absent from speculation. Preserve correctness by deferring the later
-	// proposal transaction instead of pretending the original DAG covered it.
-	for {
-		var remove = -1
-		candidateList := make([]int, 0, len(candidates))
-		for idx := range candidates {
-			candidateList = append(candidateList, idx)
-		}
-		sort.Slice(candidateList, func(i, j int) bool { return positions[candidateList[i]] < positions[candidateList[j]] })
-		for i := 0; i < len(candidateList) && remove < 0; i++ {
-			for j := i + 1; j < len(candidateList); j++ {
-				earlier, later := candidateList[i], candidateList[j]
-				kinds := dependencyBetween(actualTrackers[earlier], actualTrackers[later])
-				if kinds&dependencyRAW != 0 && (kinds&dependencyWAR != 0 || kinds&dependencyWAW != 0) {
-					remove = later
-					break
-				}
-			}
-		}
-		if remove < 0 {
-			break
-		}
-		delete(candidates, remove)
-		deferred[remove] = struct{}{}
-	}
-
+	alg3Started = time.Now()
 	accepted := make([]int, 0, len(candidates))
 	for _, idx := range batch {
-		if _, ok := candidates[idx]; ok {
-			accepted = append(accepted, idx)
+		if _, ok := candidates[idx]; !ok {
+			continue
 		}
+		if _, replay := out.immediate[idx]; replay {
+			continue
+		}
+		accepted = append(accepted, idx)
 	}
-	order, err := serializationOrderForSnapshot(accepted, positions, actualTrackers)
+	order, err := serializationOrderFromVegetaMatrix(accepted, positions, matrix)
+	out.alg3ValidationNanos += uint64(time.Since(alg3Started).Nanoseconds())
 	if err != nil {
-		return nil, nil, nil, err
+		return vegetaBatchValidation{}, err
 	}
-	return deferred, immediate, order, nil
+	out.acceptedOrder = order
+	return out, nil
 }
 
 // ariaRule2ForwardFallbacks implements Aria's Rule 2 exactly at the access-set
@@ -1512,6 +2265,11 @@ func executeAriaFallbackReadyDAG(
 		workers = len(nodes)
 	}
 
+	// Fallback branches also share the staged block parent. Initialize every
+	// cache wrapper before workers start so dispatch can safely create private
+	// children while predecessor transactions are executing.
+	prewarmSpeculativeParent(ms)
+
 	inSet := make(map[int]struct{}, len(nodes))
 	indegree := make(map[int]int, len(nodes))
 	preds := make(map[int][]int, len(nodes))
@@ -1615,7 +2373,7 @@ func executeAriaFallbackReadyDAG(
 		for !unstable && active < workers && len(ready) > 0 {
 			idx := ready[0]
 			ready = ready[1:]
-			branch := newTrackingMultiStore(ms)
+			branch := newSpeculativeTrackingMultiStore(ms)
 			for _, ancestor := range ancestors[idx] {
 				delta, ok := deltas[ancestor]
 				if !ok {
@@ -1646,7 +2404,7 @@ func executeAriaFallbackReadyDAG(
 		attempts++
 		if result.result != nil && result.result.Code != 0 {
 			drainAndClose()
-			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb fallback tx %d failed: %s", result.index, result.result.Log)
+			return nil, nil, attempts, validationNanos, false, &ariaSemanticExecutionError{phase: "fallback", index: result.index, log: result.result.Log}
 		}
 		if result.store == nil || result.index < 0 || result.index >= len(expected) {
 			drainAndClose()
@@ -1702,6 +2460,13 @@ func (r *AriaFBRunner) LastSerializationOrder() []int {
 	return append([]int(nil), r.serializationOrder...)
 }
 
+func (r *AriaFBRunner) MarkCanonicalFallback(txCount int) {
+	r.serializationOrder = r.serializationOrder[:0]
+	for i := 0; i < txCount; i++ {
+		r.serializationOrder = append(r.serializationOrder, i)
+	}
+}
+
 func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs [][]byte, deliverTx sdk.DeliverTxFunc) ([]*abci.ExecTxResult, error) {
 	indices := make([]int, len(txs))
 	for i := range indices {
@@ -1723,7 +2488,10 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 			return nil, fmt.Errorf("aria-fb missing initial execution tx=%d", idx)
 		}
 		if result.result != nil && result.result.Code != 0 {
-			return nil, fmt.Errorf("aria-fb initial tx %d failed: %s", idx, result.result.Log)
+			stats.Attempts = uint64(len(indices))
+			stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
+			r.last = stats
+			return nil, &ariaSemanticExecutionError{phase: "initial", index: idx, log: result.result.Log}
 		}
 		trackers[idx] = result.store.tracker
 	}
@@ -1759,11 +2527,15 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 		fallbackSpec, fallbackOrder, attempts, validationNanos, unstable, err := executeAriaFallbackReadyDAG(
 			ctx, r.workers, ms, txs, fallback, edges, hotChain, trackers, deliverTx,
 		)
-		if err != nil {
-			return nil, err
-		}
 		stats.Attempts += attempts
 		stats.ValidationNanos += validationNanos
+		if err != nil {
+			stats.ReplayExecutionNanos = uint64(time.Since(replayStarted).Nanoseconds())
+			stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
+			stats.Reexecutions = stats.Attempts - uint64(len(txs))
+			r.last = stats
+			return nil, err
+		}
 		if unstable {
 			// The released Ethereum implementation assumes replay accesses match
 			// the initial Aria batch. Wasmd translations can change key/range sets;
@@ -1774,7 +2546,11 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 				stats.Attempts++
 				stats.SafetyReplays++
 				if final.result != nil && final.result.Code != 0 {
-					return nil, fmt.Errorf("aria-fb safety replay tx %d failed: %s", idx, final.result.Log)
+					stats.ReplayExecutionNanos = uint64(time.Since(replayStarted).Nanoseconds())
+					stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
+					stats.Reexecutions = stats.Attempts - uint64(len(txs))
+					r.last = stats
+					return nil, &ariaSemanticExecutionError{phase: "safety replay", index: idx, log: final.result.Log}
 				}
 				final.store.Write()
 				results[idx] = final.result
@@ -1799,8 +2575,8 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 
 // VegetaRunner ports the attached repository's SpeculateMod + ParallelMod
 // semantics to the same Wasmd/Cosmos substrate. Pre-consensus execution is used
-// only to discover actual accesses, choose the hot-key proposal reorder, and
-// build the dependency matrix. After consensus every transaction is replayed in
+// only to discover actual accesses, sort all point-key dependency chains from
+// longest to shortest (Algorithm 1), and build the dependency matrix. After consensus every transaction is replayed in
 // Rule-2-compatible DAG batches; only access-set changes that cannot be safely
 // committed under Vegeta's new-key rules are executed again at the end.
 type VegetaRunner struct {
@@ -1819,6 +2595,13 @@ func (r *VegetaRunner) LastSerializationOrder() []int {
 	return append([]int(nil), r.serializationOrder...)
 }
 
+func (r *VegetaRunner) MarkCanonicalFallback(txCount int) {
+	r.serializationOrder = r.serializationOrder[:0]
+	for i := 0; i < txCount; i++ {
+		r.serializationOrder = append(r.serializationOrder, i)
+	}
+}
+
 func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs [][]byte, deliverTx sdk.DeliverTxFunc) ([]*abci.ExecTxResult, error) {
 	indices := make([]int, len(txs))
 	for i := range indices {
@@ -1834,19 +2617,37 @@ func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 
 	stats := policyRunStats{Speculated: uint64(len(indices))}
 	preStarted := time.Now()
-	preSpec := speculateIndices(ctx, r.workers, ms, txs, indices, deliverTx)
+	preSpec := speculateAccesses(ctx, r.workers, ms, txs, indices, deliverTx)
 	preTrackers := make([]*accessTracker, len(txs))
+	preStores := newStoreIDRegistry()
+	var preFirstStart, preLastEnd int64
 	for idx, result := range preSpec {
-		if result.store == nil {
+		if result.tracker == nil || result.stores == nil {
 			return nil, fmt.Errorf("vegeta missing speculative execution tx=%d", idx)
 		}
 		if result.result != nil && result.result.Code != 0 {
-			return nil, fmt.Errorf("vegeta speculative tx %d failed: %s", idx, result.result.Log)
+			stats.PreConsensusNanos = uint64(time.Since(preStarted).Nanoseconds())
+			r.last = stats
+			return nil, &vegetaSemanticExecutionError{phase: "pre-speculation", index: idx, log: result.result.Log}
 		}
-		preTrackers[idx] = result.store.tracker
+		preTrackers[idx] = result.tracker
+		preStores.merge(result.stores)
+		stats.PreExecWorkNanos += result.execNanos
+		if result.execStartNanos > 0 && (preFirstStart == 0 || result.execStartNanos < preFirstStart) {
+			preFirstStart = result.execStartNanos
+		}
+		if result.execEndNanos > preLastEnd {
+			preLastEnd = result.execEndNanos
+		}
+	}
+	if preFirstStart > 0 && preLastEnd >= preFirstStart {
+		stats.PreExecSpanNanos = uint64(preLastEnd - preFirstStart)
 	}
 	analysisStarted := time.Now()
-	r.proposalOrder = vegetaProposalOrder(preTrackers)
+	var longestChain, chainCount int
+	r.proposalOrder, longestChain, chainCount = vegetaProposalOrderWithStats(preTrackers)
+	stats.VegetaLongestChain = uint64(longestChain)
+	stats.VegetaChainCount = uint64(chainCount)
 	matrix, discovered := buildDependencyMatrix(r.proposalOrder, preTrackers)
 	universe := buildVegetaUniverse(preTrackers)
 	stats.ConflictAnalysisNanos = uint64(time.Since(analysisStarted).Nanoseconds())
@@ -1858,10 +2659,13 @@ func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 		positions[idx] = pos
 	}
 	done := make([]bool, len(r.proposalOrder))
+	ready := newVegetaReadyState(matrix)
 	deferred := make(map[int]struct{})
 	postStarted := time.Now()
 	for completed := 0; completed < len(r.proposalOrder); {
-		batchPositions := nextVegetaBatch(matrix, done)
+		readyStarted := time.Now()
+		batchPositions := ready.next(done)
+		stats.ReadySelectionNanos += uint64(time.Since(readyStarted).Nanoseconds())
 		if len(batchPositions) == 0 {
 			return nil, fmt.Errorf("vegeta replay DAG stalled completed=%d total=%d", completed, len(r.proposalOrder))
 		}
@@ -1869,7 +2673,26 @@ func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 		for _, pos := range batchPositions {
 			batch = append(batch, r.proposalOrder[pos])
 		}
-		postSpec := speculateIndices(ctx, r.workers, ms, txs, batch, deliverTx)
+		snapshotStarted := time.Now()
+		readSnapshot, err := buildVegetaReadSnapshot(ms, batch, preTrackers, preStores)
+		if err != nil {
+			return nil, fmt.Errorf("vegeta build post-consensus read snapshot: %w", err)
+		}
+		stats.SnapshotBuildNanos += uint64(time.Since(snapshotStarted).Nanoseconds())
+		stats.PostBatches++
+		if len(batch) == 1 {
+			stats.PostSingletonBatches++
+		}
+		if uint64(len(batch)) > stats.PostMaxBatch {
+			stats.PostMaxBatch = uint64(len(batch))
+		}
+		postSpec := speculateIndicesWithSnapshot(ctx, r.workers, ms, txs, batch, deliverTx, readSnapshot, false)
+		var batchFirstStart, batchLastEnd int64
+		snapshotStats := readSnapshot.stats()
+		stats.SnapshotPointHits += snapshotStats.PointHits
+		stats.SnapshotPointMisses += snapshotStats.PointMisses
+		stats.SnapshotRangeHits += snapshotStats.RangeHits
+		stats.SnapshotRangeMisses += snapshotStats.RangeMisses
 		stats.Attempts += uint64(len(batch))
 		actualTrackers := make([]*accessTracker, len(txs))
 		for _, idx := range batch {
@@ -1878,49 +2701,75 @@ func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 				return nil, fmt.Errorf("vegeta missing replay execution tx=%d", idx)
 			}
 			if result.result != nil && result.result.Code != 0 {
-				return nil, fmt.Errorf("vegeta replay tx %d failed: %s", idx, result.result.Log)
+				stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
+				stats.Reexecutions = uint64(len(deferred))
+				r.last = stats
+				return nil, &vegetaSemanticExecutionError{phase: "post-consensus replay", index: idx, log: result.result.Log}
 			}
 			actualTrackers[idx] = result.store.tracker
+			stats.PostExecWorkNanos += result.execNanos
+			if len(batch) > 1 {
+				stats.PostWideExecWorkNanos += result.execNanos
+			}
+			if result.execStartNanos > 0 && (batchFirstStart == 0 || result.execStartNanos < batchFirstStart) {
+				batchFirstStart = result.execStartNanos
+			}
+			if result.execEndNanos > batchLastEnd {
+				batchLastEnd = result.execEndNanos
+			}
+		}
+		if batchFirstStart > 0 && batchLastEnd >= batchFirstStart {
+			span := uint64(batchLastEnd - batchFirstStart)
+			stats.PostExecSpanNanos += span
+			if len(batch) > 1 {
+				stats.PostWideExecSpanNanos += span
+				stats.PostWideTransactions += uint64(len(batch))
+			}
 		}
 		validationStarted := time.Now()
-		batchDeferred, immediateReplay, acceptedOrder, err := vegetaValidateBatch(batch, positions, preTrackers, actualTrackers, universe)
+		validation, err := vegetaValidateBatch(batch, positions, matrix, preTrackers, actualTrackers, universe)
 		stats.ValidationNanos += uint64(time.Since(validationStarted).Nanoseconds())
+		stats.VegetaAlg3ValidationNanos += validation.alg3ValidationNanos
+		stats.VegetaRangeValidationNanos += validation.rangeValidationNanos
 		if err != nil {
 			return nil, err
 		}
-		for idx := range batchDeferred {
+		for idx := range validation.deferred {
 			deferred[idx] = struct{}{}
 		}
-		for _, idx := range acceptedOrder {
+		for _, idx := range validation.acceptedOrder {
 			postSpec[idx].store.Write()
 			results[idx] = postSpec[idx].result
 			stats.Reused++
 			r.serializationOrder = append(r.serializationOrder, idx)
 		}
-		if len(immediateReplay) > 0 {
+		if len(validation.immediate) > 0 {
 			replayStarted := time.Now()
 			for _, idx := range r.proposalOrder {
-				if _, ok := immediateReplay[idx]; !ok {
+				if _, ok := validation.immediate[idx]; !ok {
 					continue
 				}
 				final := replayOne(ms, txs[idx], idx, deliverTx)
 				stats.Attempts++
 				stats.SafetyReplays++
 				if final.result != nil && final.result.Code != 0 {
-					return nil, fmt.Errorf("vegeta new-key replay tx %d failed: %s", idx, final.result.Log)
+					stats.ReplayExecutionNanos += uint64(time.Since(replayStarted).Nanoseconds())
+					stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
+					stats.Reexecutions = uint64(len(deferred))
+					r.last = stats
+					return nil, &vegetaSemanticExecutionError{phase: "new-key safety replay", index: idx, log: final.result.Log}
 				}
 				final.store.Write()
 				results[idx] = final.result
 				r.serializationOrder = append(r.serializationOrder, idx)
 			}
-			stats.ReplayExecutionNanos += uint64(time.Since(replayStarted).Nanoseconds())
+			replayNanos := uint64(time.Since(replayStarted).Nanoseconds())
+			stats.ReplayExecutionNanos += replayNanos
+			stats.VegetaIntrinsicReexecutionNanos += replayNanos
 		}
-		for _, pos := range batchPositions {
-			if !done[pos] {
-				done[pos] = true
-				completed++
-			}
-		}
+		readyStarted = time.Now()
+		completed += ready.markDone(batchPositions, done)
+		stats.ReadySelectionNanos += uint64(time.Since(readyStarted).Nanoseconds())
 	}
 
 	if len(deferred) > 0 {
@@ -1933,19 +2782,25 @@ func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 			stats.Attempts++
 			stats.Replayed++
 			if final.result != nil && final.result.Code != 0 {
-				return nil, fmt.Errorf("vegeta final re-execution tx %d failed: %s", idx, final.result.Log)
+				stats.ReplayExecutionNanos += uint64(time.Since(replayStarted).Nanoseconds())
+				stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
+				stats.Reexecutions = uint64(len(deferred))
+				r.last = stats
+				return nil, &vegetaSemanticExecutionError{phase: "final re-execution", index: idx, log: final.result.Log}
 			}
 			final.store.Write()
 			results[idx] = final.result
 			r.serializationOrder = append(r.serializationOrder, idx)
 		}
-		stats.ReplayExecutionNanos += uint64(time.Since(replayStarted).Nanoseconds())
+		replayNanos := uint64(time.Since(replayStarted).Nanoseconds())
+		stats.ReplayExecutionNanos += replayNanos
+		stats.VegetaIntrinsicReexecutionNanos += replayNanos
 	}
 	stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
-	// Upstream ParallelMod reports needReexecute (known access-set changes) as
-	// its re-execution count; immediate new-key safety replays are reported
-	// separately here as SafetyReplays.
-	stats.Reexecutions = uint64(len(deferred))
+	// Vegeta's paper re-execution rate includes both TxsRe (known-key access
+	// changes) and Case-2 readers replayed immediately after their ready batch.
+	// SafetyReplays remains the immediate-reader subset for diagnostics.
+	stats.Reexecutions = uint64(len(deferred)) + stats.SafetyReplays
 	r.last = stats
 	return results, ctx.Err()
 }

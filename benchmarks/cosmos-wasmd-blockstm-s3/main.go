@@ -6,7 +6,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -34,6 +37,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	"github.com/cosmos/cosmos-sdk/baseapp/txnrunner"
 	"github.com/cosmos/cosmos-sdk/client/flags"
+	pruningtypes "github.com/cosmos/cosmos-sdk/store/v2/pruning/types"
 	storetypes "github.com/cosmos/cosmos-sdk/store/v2/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
@@ -47,11 +51,28 @@ const (
 	directSerialScope    = "actual-wasmd-wasmvm-cosmos-sdk-direct-keeper-serial-prepared-payloads-no-ante-abci"
 	symbGraphStaticScope = "actual-wasmd-wasmvm-cosmos-sdk-symbgraph-static-diagnostic-symbolic-predict-single-cache-fingerprint-validate-replay-no-ante-abci"
 	vegetaScope          = "actual-wasmd-wasmvm-cosmos-sdk-vegeta-upstream-hotkey-reorder-rule2-dag-accesschange-reexecute-no-ante-abci"
-	ariaFBScope          = "actual-wasmd-wasmvm-cosmos-sdk-ariafb-upstream-rule2-hotchain-conflict-complete-ready-dag-fallback-no-ante-abci"
+	ariaFBScope          = "actual-wasmd-wasmvm-cosmos-sdk-ariafb-rule2-hotchain-staged-canonical-state-safety-fallback-no-ante-abci"
 	exactACGOracleScope  = "evaluation-only-rust-acg-perfect-source-sload-sstore-hard-dependencies-same-mvcc-validation-zero-replay"
 	profileBaselineScope = "actual-wasmd-wasmvm-cosmos-sdk-txnrunner-blockstm-w4-pprof-unmeasured"
 	chainID              = "vegeta-s3-wasmd-blockstm"
 )
+
+var (
+	benchmarkIAVLCacheSize   = 500_000
+	benchmarkIAVLSyncPruning = false
+)
+
+func intEnvDefault(name string, fallback int) int {
+	value, ok := os.LookupEnv(name)
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
 
 type mapAppOptions map[string]any
 
@@ -129,44 +150,75 @@ type Calibration struct {
 }
 
 type Record struct {
-	SchemaVersion                      int     `json:"schema_version"`
-	Dataset                            string  `json:"dataset"`
-	Sample                             int     `json:"sample"`
-	BlockNumber                        uint64  `json:"block_number"`
-	Strategy                           string  `json:"strategy"`
-	Workers                            int     `json:"workers"`
-	MatchedSerialNanos                 uint64  `json:"matched_serial_nanos"`
-	HistoricalSerialNanos              uint64  `json:"historical_serial_nanos"`
-	StrategyTotalNanos                 uint64  `json:"strategy_total_nanos"`
-	PreConsensusNanos                  uint64  `json:"pre_consensus_nanos,omitempty"`
-	PostConsensusNanos                 uint64  `json:"post_consensus_nanos,omitempty"`
-	MatchedSerialSpeedup               float64 `json:"matched_serial_speedup"`
-	Transactions                       int     `json:"transactions"`
-	ExecutionAttempts                  uint64  `json:"execution_attempts"`
-	Reexecutions                       uint64  `json:"reexecutions"`
-	SerialEquivalent                   bool    `json:"serial_equivalent"`
-	SerialReferenceScope               string  `json:"serial_reference_scope"`
-	ComputeMetric                      string  `json:"compute_calibration_metric"`
-	ComputeScale                       float64 `json:"compute_scale"`
-	GoIterationsPerNano                float64 `json:"go_iterations_per_nano"`
-	CosmosSDKVersion                   string  `json:"cosmos_sdk_version"`
-	WasmdVersion                       string  `json:"wasmd_version"`
-	BaselineScope                      string  `json:"baseline_scope"`
-	BlockSTMPreEstimate                bool    `json:"block_stm_pre_estimate"`
-	SpeculatedTransactions             uint64  `json:"speculated_transactions,omitempty"`
-	ReusedTransactions                 uint64  `json:"reused_transactions,omitempty"`
-	ValidationNanos                    uint64  `json:"validation_nanos,omitempty"`
-	ReplayExecutionNanos               uint64  `json:"replay_execution_nanos,omitempty"`
-	ConflictAnalysisNanos              uint64  `json:"conflict_analysis_nanos,omitempty"`
-	DiscoveredConflicts                uint64  `json:"discovered_conflicts,omitempty"`
-	ForwardFallbacks                   uint64  `json:"forward_fallbacks,omitempty"`
-	SafetyReplays                      uint64  `json:"safety_replays,omitempty"`
-	OracleSourceReads                  uint64  `json:"oracle_source_reads,omitempty"`
-	OracleSourceWrites                 uint64  `json:"oracle_source_writes,omitempty"`
-	OracleSourceTraceMissing           int     `json:"oracle_source_trace_missing,omitempty"`
-	OracleAdapterHardEdges             int     `json:"oracle_adapter_hard_edges,omitempty"`
-	OracleTranslationCompensationEdges int     `json:"oracle_translation_compensation_edges,omitempty"`
-	OracleMissingBarrierEdges          int     `json:"oracle_missing_barrier_edges,omitempty"`
+	SchemaVersion                        int     `json:"schema_version"`
+	Dataset                              string  `json:"dataset"`
+	Sample                               int     `json:"sample"`
+	BlockNumber                          uint64  `json:"block_number"`
+	Strategy                             string  `json:"strategy"`
+	Workers                              int     `json:"workers"`
+	MatchedSerialNanos                   uint64  `json:"matched_serial_nanos"`
+	HistoricalSerialNanos                uint64  `json:"historical_serial_nanos"`
+	StrategyTotalNanos                   uint64  `json:"strategy_total_nanos"`
+	PreConsensusNanos                    uint64  `json:"pre_consensus_nanos,omitempty"`
+	PostConsensusNanos                   uint64  `json:"post_consensus_nanos,omitempty"`
+	MatchedSerialSpeedup                 float64 `json:"matched_serial_speedup"`
+	Transactions                         int     `json:"transactions"`
+	ExecutionAttempts                    uint64  `json:"execution_attempts"`
+	Reexecutions                         uint64  `json:"reexecutions"`
+	SerialEquivalent                     bool    `json:"serial_equivalent"`
+	SerialReferenceScope                 string  `json:"serial_reference_scope"`
+	SerialCommitVersion                  int64   `json:"serial_commit_version,omitempty"`
+	SerialCommitHash                     string  `json:"serial_commit_hash,omitempty"`
+	ComputeMetric                        string  `json:"compute_calibration_metric"`
+	ComputeScale                         float64 `json:"compute_scale"`
+	GoIterationsPerNano                  float64 `json:"go_iterations_per_nano"`
+	CosmosSDKVersion                     string  `json:"cosmos_sdk_version"`
+	WasmdVersion                         string  `json:"wasmd_version"`
+	IAVLCacheSize                        int     `json:"iavl_cache_size"`
+	IAVLSyncPruning                      bool    `json:"iavl_sync_pruning"`
+	EvaluatorSHA256                      string  `json:"evaluator_sha256"`
+	BaselineScope                        string  `json:"baseline_scope"`
+	BlockSTMPreEstimate                  bool    `json:"block_stm_pre_estimate"`
+	SpeculatedTransactions               uint64  `json:"speculated_transactions,omitempty"`
+	ReusedTransactions                   uint64  `json:"reused_transactions,omitempty"`
+	ValidationNanos                      uint64  `json:"validation_nanos,omitempty"`
+	ReplayExecutionNanos                 uint64  `json:"replay_execution_nanos,omitempty"`
+	ConflictAnalysisNanos                uint64  `json:"conflict_analysis_nanos,omitempty"`
+	DiscoveredConflicts                  uint64  `json:"discovered_conflicts,omitempty"`
+	ForwardFallbacks                     uint64  `json:"forward_fallbacks,omitempty"`
+	SafetyReplays                        uint64  `json:"safety_replays,omitempty"`
+	VegetaSnapshotBuildNanos             uint64  `json:"vegeta_snapshot_build_nanos,omitempty"`
+	VegetaSnapshotPointHits              uint64  `json:"vegeta_snapshot_point_hits,omitempty"`
+	VegetaSnapshotPointMisses            uint64  `json:"vegeta_snapshot_point_misses,omitempty"`
+	VegetaSnapshotRangeHits              uint64  `json:"vegeta_snapshot_range_hits,omitempty"`
+	VegetaSnapshotRangeMisses            uint64  `json:"vegeta_snapshot_range_misses,omitempty"`
+	VegetaPostBatches                    uint64  `json:"vegeta_post_batches,omitempty"`
+	VegetaPostSingletonBatches           uint64  `json:"vegeta_post_singleton_batches,omitempty"`
+	VegetaPostMaxBatch                   uint64  `json:"vegeta_post_max_batch,omitempty"`
+	VegetaReadySelectionNanos            uint64  `json:"vegeta_ready_selection_nanos,omitempty"`
+	VegetaPreExecWorkNanos               uint64  `json:"vegeta_pre_exec_work_nanos,omitempty"`
+	VegetaPreExecSpanNanos               uint64  `json:"vegeta_pre_exec_span_nanos,omitempty"`
+	VegetaPostExecWorkNanos              uint64  `json:"vegeta_post_exec_work_nanos,omitempty"`
+	VegetaPostExecSpanNanos              uint64  `json:"vegeta_post_exec_span_nanos,omitempty"`
+	VegetaPostWideExecWorkNanos          uint64  `json:"vegeta_post_wide_exec_work_nanos,omitempty"`
+	VegetaPostWideExecSpanNanos          uint64  `json:"vegeta_post_wide_exec_span_nanos,omitempty"`
+	VegetaPostWideTransactions           uint64  `json:"vegeta_post_wide_transactions,omitempty"`
+	VegetaLongestChain                   uint64  `json:"vegeta_longest_chain,omitempty"`
+	VegetaChainCount                     uint64  `json:"vegeta_chain_count,omitempty"`
+	VegetaAlg3ValidationNanos            uint64  `json:"vegeta_alg3_validation_nanos,omitempty"`
+	VegetaRangeValidationNanos           uint64  `json:"vegeta_range_validation_nanos,omitempty"`
+	VegetaIntrinsicReexecutionNanos      uint64  `json:"vegeta_intrinsic_reexecution_nanos,omitempty"`
+	VegetaHistoricalFallbackNanos        uint64  `json:"vegeta_historical_fallback_nanos,omitempty"`
+	VegetaHistoricalFallbackTransactions uint64  `json:"vegeta_historical_fallback_transactions,omitempty"`
+	VegetaCanonicalFallback              bool    `json:"vegeta_canonical_fallback,omitempty"`
+	VegetaCanonicalFallbackNanos         uint64  `json:"vegeta_canonical_fallback_nanos,omitempty"`
+	VegetaCanonicalFallbackReason        string  `json:"vegeta_canonical_fallback_reason,omitempty"`
+	OracleSourceReads                    uint64  `json:"oracle_source_reads,omitempty"`
+	OracleSourceWrites                   uint64  `json:"oracle_source_writes,omitempty"`
+	OracleSourceTraceMissing             int     `json:"oracle_source_trace_missing,omitempty"`
+	OracleAdapterHardEdges               int     `json:"oracle_adapter_hard_edges,omitempty"`
+	OracleTranslationCompensationEdges   int     `json:"oracle_translation_compensation_edges,omitempty"`
+	OracleMissingBarrierEdges            int     `json:"oracle_missing_barrier_edges,omitempty"`
 
 	SymbGraphVariant                      string                `json:"symbgraph_variant,omitempty"`
 	SymbPlanNanos                         uint64                `json:"symb_plan_nanos,omitempty"`
@@ -268,13 +320,10 @@ type benchApp struct {
 	home         string
 }
 
-type setupDBEntry struct {
-	key   []byte
-	value []byte
-}
-
 type benchAppTemplate struct {
-	dbEntries   []setupDBEntry
+	dbSnapshot  string
+	dbEntries   uint64
+	prepared    map[preparedCallKey]preparedCall
 	contracts   map[string]sdk.AccAddress
 	addresses   map[string]sdk.AccAddress
 	repl        map[string]string
@@ -299,51 +348,127 @@ func cloneStringMap(src map[string]string) map[string]string {
 	return out
 }
 
-func cloneSetupDBBytes(src []byte) []byte {
-	// Cosmos DB distinguishes an empty value from a nil value: Set rejects
-	// nil, while zero-length non-nil values are valid. append(nil, src...)
-	// collapses an empty slice to nil, so allocate explicitly here.
-	dst := make([]byte, len(src))
-	copy(dst, src)
-	return dst
-}
+const setupDBRestoreBatchEntries = 16 * 1024
 
-func captureSetupDB(db dbm.DB) ([]setupDBEntry, uint64, error) {
+func captureSetupDB(db dbm.DB) (string, uint64, uint64, error) {
+	f, err := os.CreateTemp("", "symbgraph-wasmd-setup-db-*.snapshot")
+	if err != nil {
+		return "", 0, 0, err
+	}
+	path := f.Name()
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(path)
+		}
+	}()
+
+	w := bufio.NewWriterSize(f, 1<<20)
 	it, err := db.Iterator(nil, nil)
 	if err != nil {
-		return nil, 0, err
+		return "", 0, 0, err
 	}
 	defer it.Close()
-	entries := make([]setupDBEntry, 0, 4096)
+
+	var entries uint64
 	var bytes uint64
+	var header [8]byte
 	for ; it.Valid(); it.Next() {
-		k := cloneSetupDBBytes(it.Key())
-		v := cloneSetupDBBytes(it.Value())
-		entries = append(entries, setupDBEntry{key: k, value: v})
-		bytes += uint64(len(k) + len(v))
+		key := it.Key()
+		value := it.Value()
+		if len(key) > math.MaxUint32 || len(value) > math.MaxUint32 {
+			return "", 0, 0, fmt.Errorf("setup database entry too large: key=%d value=%d", len(key), len(value))
+		}
+		binary.LittleEndian.PutUint32(header[:4], uint32(len(key)))
+		binary.LittleEndian.PutUint32(header[4:], uint32(len(value)))
+		if _, err := w.Write(header[:]); err != nil {
+			return "", 0, 0, err
+		}
+		if _, err := w.Write(key); err != nil {
+			return "", 0, 0, err
+		}
+		if _, err := w.Write(value); err != nil {
+			return "", 0, 0, err
+		}
+		entries++
+		bytes += uint64(len(key) + len(value))
 	}
 	if err := it.Error(); err != nil {
-		return nil, 0, err
+		return "", 0, 0, err
 	}
-	return entries, bytes, nil
+	if err := w.Flush(); err != nil {
+		return "", 0, 0, err
+	}
+	if err := f.Close(); err != nil {
+		return "", 0, 0, err
+	}
+	ok = true
+	return path, entries, bytes, nil
 }
 
-func restoreSetupDB(entries []setupDBEntry) (dbm.DB, error) {
+func restoreSetupDB(snapshot string) (dbm.DB, error) {
+	f, err := os.Open(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
 	db := dbm.NewMemDB()
-	batch := db.NewBatchWithSize(len(entries))
-	for _, entry := range entries {
-		if err := batch.Set(entry.key, entry.value); err != nil {
-			_ = batch.Close()
+	r := bufio.NewReaderSize(f, 1<<20)
+	var header [8]byte
+	batch := db.NewBatchWithSize(setupDBRestoreBatchEntries)
+	batchEntries := 0
+	flush := func() error {
+		if batchEntries == 0 {
+			return nil
+		}
+		if err := batch.Write(); err != nil {
+			return err
+		}
+		if err := batch.Close(); err != nil {
+			return err
+		}
+		batch = db.NewBatchWithSize(setupDBRestoreBatchEntries)
+		batchEntries = 0
+		return nil
+	}
+	defer func() { _ = batch.Close() }()
+
+	for {
+		_, err := io.ReadFull(r, header[:])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("read setup snapshot header: %w", err)
+		}
+		keyLen := binary.LittleEndian.Uint32(header[:4])
+		valueLen := binary.LittleEndian.Uint32(header[4:])
+		key := make([]byte, int(keyLen))
+		value := make([]byte, int(valueLen))
+		if _, err := io.ReadFull(r, key); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("read setup snapshot key: %w", err)
+		}
+		if _, err := io.ReadFull(r, value); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("read setup snapshot value: %w", err)
+		}
+		if err := batch.Set(key, value); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
+		batchEntries++
+		if batchEntries >= setupDBRestoreBatchEntries {
+			if err := flush(); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+		}
 	}
-	if err := batch.Write(); err != nil {
-		_ = batch.Close()
-		_ = db.Close()
-		return nil, err
-	}
-	if err := batch.Close(); err != nil {
+	if err := flush(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -398,20 +523,24 @@ func copySetupHome(src, dst string) error {
 }
 
 func captureBenchAppTemplate(b *benchApp) (*benchAppTemplate, error) {
-	entries, stateBytes, err := captureSetupDB(b.db)
+	snapshot, entries, stateBytes, err := captureSetupDB(b.db)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot setup database: %w", err)
 	}
 	home, err := os.MkdirTemp("", "symbgraph-wasmd-blockstm-template-")
 	if err != nil {
+		_ = os.Remove(snapshot)
 		return nil, err
 	}
 	if err := copySetupHome(b.home, home); err != nil {
+		_ = os.Remove(snapshot)
 		_ = os.RemoveAll(home)
 		return nil, fmt.Errorf("snapshot wasm setup home: %w", err)
 	}
 	return &benchAppTemplate{
+		dbSnapshot:  snapshot,
 		dbEntries:   entries,
+		prepared:    b.prepared,
 		contracts:   cloneAddrMap(b.contracts),
 		addresses:   cloneAddrMap(b.addresses),
 		repl:        cloneStringMap(b.repl),
@@ -422,7 +551,13 @@ func captureBenchAppTemplate(b *benchApp) (*benchAppTemplate, error) {
 }
 
 func (t *benchAppTemplate) close() {
-	if t != nil && t.home != "" {
+	if t == nil {
+		return
+	}
+	if t.dbSnapshot != "" {
+		_ = os.Remove(t.dbSnapshot)
+	}
+	if t.home != "" {
 		_ = os.RemoveAll(t.home)
 	}
 }
@@ -437,13 +572,19 @@ func newBenchAppFromTemplate(t *benchAppTemplate, blocks []ExecutionBlock, verif
 		cleanup()
 		return nil, fmt.Errorf("clone wasm setup home: %w", err)
 	}
-	db, err := restoreSetupDB(t.dbEntries)
+	db, err := restoreSetupDB(t.dbSnapshot)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("clone setup database: %w", err)
 	}
 	opts := mapAppOptions{flags.FlagHome: home, "wasm": map[string]any{}}
-	a := wasmapp.NewWasmApp(log.NewNopLogger(), db, true, opts, nil, baseapp.SetChainID(chainID))
+	a := wasmapp.NewWasmApp(
+		log.NewNopLogger(), db, true, opts, nil,
+		baseapp.SetChainID(chainID),
+		baseapp.SetPruning(pruningtypes.NewPruningOptions(pruningtypes.PruningEverything)),
+		baseapp.SetIAVLCacheSize(benchmarkIAVLCacheSize),
+		baseapp.SetIAVLSyncPruning(benchmarkIAVLSyncPruning),
+	)
 	pk := wasmkeeper.NewDefaultPermissionKeeper(&a.WasmKeeper)
 	b := &benchApp{
 		app:          a,
@@ -452,11 +593,14 @@ func newBenchAppFromTemplate(t *benchAppTemplate, blocks []ExecutionBlock, verif
 		contracts:    cloneAddrMap(t.contracts),
 		addresses:    cloneAddrMap(t.addresses),
 		repl:         cloneStringMap(t.repl),
+		prepared:     t.prepared,
 		home:         home,
 	}
-	if err := b.prepareWorkloadCalls(blocks); err != nil {
-		b.close()
-		return nil, fmt.Errorf("prepare cloned workload calls: %w", err)
+	if b.prepared == nil {
+		if err := b.prepareWorkloadCalls(blocks); err != nil {
+			b.close()
+			return nil, fmt.Errorf("prepare cloned workload calls: %w", err)
+		}
 	}
 	if verify && digestApp(a) != t.stateDigest {
 		b.close()
@@ -793,31 +937,63 @@ func commitFinalizeState(a *wasmapp.WasmApp) error {
 	return err
 }
 
-func executeSerialOrderReference(b *benchApp, header tmproto.Header, block ExecutionBlock, cal Calibration, order []int) (uint64, error) {
+// executeOrderedBlockBranch replays one block in the supplied transaction order
+// on a disposable block-level cache. It is used as a short-lived safety oracle
+// for scheduler-derived serializations without keeping a second full Wasmd app
+// alive for the entire campaign.
+func executeOrderedBlockBranch(b *benchApp, blockCtx sdk.Context, block ExecutionBlock, cal Calibration, order []int) (*trackingMultiStore, uint64, error) {
 	if len(order) != len(block.Transactions) {
-		return 0, fmt.Errorf("serial reference order length mismatch block=%d order=%d txs=%d", block.BlockNumber, len(order), len(block.Transactions))
+		return nil, 0, fmt.Errorf("serial reference order length mismatch block=%d order=%d txs=%d", block.BlockNumber, len(order), len(block.Transactions))
 	}
 	seen := make([]bool, len(block.Transactions))
-	ctx := b.app.NewNextBlockContext(header)
+	branch := newTrackingMultiStore(blockCtx.MultiStore())
 	started := time.Now()
 	for _, idx := range order {
 		if idx < 0 || idx >= len(block.Transactions) {
-			return 0, fmt.Errorf("serial reference order index out of range block=%d idx=%d", block.BlockNumber, idx)
+			return nil, 0, fmt.Errorf("serial reference order index out of range block=%d idx=%d", block.BlockNumber, idx)
 		}
 		if seen[idx] {
-			return 0, fmt.Errorf("serial reference order duplicates block=%d idx=%d", block.BlockNumber, idx)
+			return nil, 0, fmt.Errorf("serial reference order duplicates block=%d idx=%d", block.BlockNumber, idx)
 		}
 		seen[idx] = true
+		txStore := branch.CacheMultiStore()
+		ctx := blockCtx.WithMultiStore(txStore).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
 		tx := block.Transactions[idx]
-		if err := b.executeTx(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); err != nil {
-			return 0, err
+		if err := b.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); err != nil {
+			return nil, 0, err
+		}
+		txStore.Write()
+	}
+	return branch, uint64(time.Since(started).Nanoseconds()), nil
+}
+
+func historicalOrder(txCount int) []int {
+	order := make([]int, txCount)
+	for i := range order {
+		order[i] = i
+	}
+	return order
+}
+
+func isHistoricalOrder(order []int, txCount int) bool {
+	if len(order) != txCount {
+		return false
+	}
+	for i, idx := range order {
+		if idx != i {
+			return false
 		}
 	}
-	wall := uint64(time.Since(started).Nanoseconds())
-	if err := commitFinalizeState(b.app); err != nil {
-		return 0, err
-	}
-	return wall, nil
+	return true
+}
+
+// executeHistoricalBlockBranch replays one block in canonical transaction order
+// on a disposable block-level CacheMultiStore. Each transaction still receives
+// its own child cache, so transaction atomicity matches the direct serial path.
+// The returned branch is not committed; callers can compare it with a staged
+// scheduler result and choose which one to write into the app block context.
+func executeHistoricalBlockBranch(b *benchApp, blockCtx sdk.Context, block ExecutionBlock, cal Calibration) (*trackingMultiStore, uint64, error) {
+	return executeOrderedBlockBranch(b, blockCtx, block, cal, historicalOrder(len(block.Transactions)))
 }
 
 func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchApp, error) {
@@ -831,7 +1007,13 @@ func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchAp
 	// fresh MemDB this loads version 0; without it InitChain can enter module
 	// genesis with an empty cache-multistore and panic on stores such as x/upgrade.
 	db := dbm.NewMemDB()
-	a := wasmapp.NewWasmApp(log.NewNopLogger(), db, true, opts, nil, baseapp.SetChainID(chainID))
+	a := wasmapp.NewWasmApp(
+		log.NewNopLogger(), db, true, opts, nil,
+		baseapp.SetChainID(chainID),
+		baseapp.SetPruning(pruningtypes.NewPruningOptions(pruningtypes.PruningEverything)),
+		baseapp.SetIAVLCacheSize(benchmarkIAVLCacheSize),
+		baseapp.SetIAVLSyncPruning(benchmarkIAVLSyncPruning),
+	)
 	genesisState, e := benchmarkGenesisWithValidator(a)
 	if e != nil {
 		return nil, fmt.Errorf("build benchmark genesis validator set: %w", e)
@@ -959,7 +1141,13 @@ func newBenchApp(repoRoot string, m Manifest, blocks []ExecutionBlock) (*benchAp
 	}
 	return b, nil
 }
-func (b *benchApp) close()                          { _ = b.app.Close(); _ = os.RemoveAll(b.home) }
+func (b *benchApp) close() {
+	if b == nil {
+		return
+	}
+	_ = b.app.Close()
+	_ = os.RemoveAll(b.home)
+}
 func (b *benchApp) replacements() map[string]string { return b.repl }
 
 func (b *benchApp) executeCall(ctx sdk.Context, c CallSpec, repl map[string]string) error {
@@ -1129,9 +1317,9 @@ func (b *benchApp) executeTx(ctx sdk.Context, block ExecutionBlock, tx Execution
 }
 
 // executeTxIsolated executes directly on a caller-owned private transaction
-// branch. SymbGraph/Vegeta already allocate a disposable CacheMultiStore for
-// each attempt, so another top-level CacheContext would make every Wasmd store
-// access traverse two transaction cache layers.
+// branch. BlockSTM/SymbGraph/AriaFB/Vegeta already allocate a disposable
+// transaction MultiStore for each attempt, so another top-level CacheContext
+// would make every Wasmd store access traverse two transaction cache layers.
 //
 // The caller either writes this branch after validation or discards it. That
 // branch is therefore the transaction atomicity boundary. Expected-failure
@@ -1147,6 +1335,92 @@ func (b *benchApp) executeTxIsolated(ctx sdk.Context, block ExecutionBlock, tx E
 		runtime.KeepAlive(sink)
 	}
 	return b.executeTxCalls(ctx, block, tx)
+}
+
+func sha256FileHex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+type serialOracleKey struct {
+	sample      int
+	blockNumber uint64
+}
+
+type serialOracleEntry struct {
+	nanos        uint64
+	transactions int
+	commitID     storetypes.CommitID
+}
+
+func loadSerialOracle(path string, dataset string, workers, samples, expectedBlocks int, computeScale, iterPerNs float64, iavlCacheSize int, iavlSyncPruning bool, evaluatorSHA256 string) (map[serialOracleKey]serialOracleEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	out := make(map[serialOracleKey]serialOracleEntry, samples*expectedBlocks)
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	line := 0
+	for sc.Scan() {
+		line++
+		if strings.TrimSpace(sc.Text()) == "" {
+			continue
+		}
+		var rec Record
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			return nil, fmt.Errorf("decode serial oracle %s line %d: %w", path, line, err)
+		}
+		if rec.Strategy != "cosmos-wasmd-direct-serial" {
+			return nil, fmt.Errorf("serial oracle %s line %d has strategy %q", path, line, rec.Strategy)
+		}
+		if rec.Dataset != dataset || rec.Workers != workers || rec.Sample < 0 || rec.Sample >= samples {
+			return nil, fmt.Errorf("serial oracle metadata mismatch line %d: dataset=%q workers=%d sample=%d", line, rec.Dataset, rec.Workers, rec.Sample)
+		}
+		if rec.ComputeScale != computeScale || rec.GoIterationsPerNano != iterPerNs {
+			return nil, fmt.Errorf("serial oracle calibration mismatch line %d: scale=%g iter/ns=%.9g", line, rec.ComputeScale, rec.GoIterationsPerNano)
+		}
+		if rec.IAVLCacheSize != iavlCacheSize || rec.IAVLSyncPruning != iavlSyncPruning {
+			return nil, fmt.Errorf("serial oracle IAVL mismatch line %d: cache=%d sync_pruning=%v; want cache=%d sync_pruning=%v", line, rec.IAVLCacheSize, rec.IAVLSyncPruning, iavlCacheSize, iavlSyncPruning)
+		}
+		if rec.EvaluatorSHA256 == "" || rec.EvaluatorSHA256 != evaluatorSHA256 {
+			return nil, fmt.Errorf("serial oracle evaluator mismatch line %d: got=%q want=%q; regenerate serial with the current evaluator", line, rec.EvaluatorSHA256, evaluatorSHA256)
+		}
+		if rec.SerialCommitVersion <= 0 || rec.SerialCommitHash == "" {
+			return nil, fmt.Errorf("serial oracle %s line %d lacks canonical CommitID fields; rerun isolated serial with the current harness", path, line)
+		}
+		hash, err := hex.DecodeString(rec.SerialCommitHash)
+		if err != nil || len(hash) == 0 {
+			return nil, fmt.Errorf("serial oracle %s line %d has invalid commit hash %q", path, line, rec.SerialCommitHash)
+		}
+		key := serialOracleKey{sample: rec.Sample, blockNumber: rec.BlockNumber}
+		if _, exists := out[key]; exists {
+			return nil, fmt.Errorf("serial oracle %s duplicates sample=%d block=%d", path, rec.Sample, rec.BlockNumber)
+		}
+		out[key] = serialOracleEntry{
+			nanos:        rec.StrategyTotalNanos,
+			transactions: rec.Transactions,
+			commitID:     storetypes.CommitID{Version: rec.SerialCommitVersion, Hash: hash},
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	expected := samples * expectedBlocks
+	if len(out) != expected {
+		return nil, fmt.Errorf("serial oracle %s incomplete: rows=%d expected=%d", path, len(out), expected)
+	}
+	return out, nil
 }
 
 func commitIDsEqual(a, b storetypes.CommitID) bool {
@@ -1262,7 +1536,7 @@ func profileWasmdBlockSTM4(repoRoot string, m Manifest, blocks []ExecutionBlock,
 						WithEventManager(sdk.NewEventManager()).
 						WithGasMeter(storetypes.NewInfiniteGasMeter())
 					tx := block.Transactions[idx]
-					if err := b.executeTx(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); err != nil {
+					if err := b.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); err != nil {
 						return &abci.ExecTxResult{Code: 1, Log: err.Error()}
 					}
 					return &abci.ExecTxResult{}
@@ -1335,10 +1609,26 @@ func main() {
 	setupOnly := flag.Bool("setup-only", false, "initialize Wasmd + upload/instantiate/prime contracts, then exit")
 	reuseSetupTemplate := flag.Bool("reuse-setup-template", boolEnvDefault("VEGETA_WASMD_REUSE_SETUP_TEMPLATE", true), "initialize/prime Wasmd once, snapshot the committed setup state, and clone that snapshot for every strategy/sample")
 	campaignStrategy := flag.String("campaign-strategy", "all", "run one scheduler strategy per process to bound live Wasmd state: all|serial|blockstm|ariafb|symbgraph-rust|vegeta|exact-oracle")
+	serialOraclePath := flag.String("serial-oracle", "", "serial strategy JSONL with per-block CommitID/timing oracle; avoids a second live Wasmd app in isolated non-serial campaigns")
 	profileDir := flag.String(
 		"profile-dir",
 		os.Getenv("VEGETA_S3_WASMD_PPROF_DIR"),
 		"write an additional unmeasured 4-worker Wasmd TxRunner CPU/mutex/block profile to this directory",
+	)
+	campaignProfileDir := flag.String(
+		"campaign-profile-dir",
+		os.Getenv("VEGETA_WASMD_CAMPAIGN_PROFILE_DIR"),
+		"write CPU + post-GC live-heap profiles for the measured campaign loop to this directory",
+	)
+	iavlCacheSize := flag.Int(
+		"iavl-cache-size",
+		intEnvDefault("VEGETA_WASMD_IAVL_CACHE_SIZE", 500_000),
+		"IAVL node-cache size per mounted store; 0 disables the node cache (useful with MemDB to avoid duplicating state in Go heap)",
+	)
+	iavlSyncPruning := flag.Bool(
+		"iavl-sync-pruning",
+		boolEnvDefault("VEGETA_WASMD_IAVL_SYNC_PRUNING", false),
+		"finish IAVL pruning inside Commit instead of allowing asynchronous pruning to overlap the next measured block",
 	)
 	symbProfileDir := flag.String(
 		"symbgraph-profile-dir",
@@ -1427,6 +1717,20 @@ func main() {
 		"write Wasmd overhead diagnostics JSON (default: <output>.overhead.json)",
 	)
 	flag.Parse()
+	if *iavlCacheSize < 0 {
+		panic("--iavl-cache-size must be >= 0")
+	}
+	benchmarkIAVLCacheSize = *iavlCacheSize
+	benchmarkIAVLSyncPruning = *iavlSyncPruning
+	fmt.Fprintf(os.Stderr, "Wasmd IAVL config: cache_size=%d sync_pruning=%v pruning=everything\n", benchmarkIAVLCacheSize, benchmarkIAVLSyncPruning)
+	executablePath, executableErr := os.Executable()
+	if executableErr != nil {
+		panic(fmt.Errorf("resolve evaluator executable: %w", executableErr))
+	}
+	evaluatorSHA256, evaluatorHashErr := sha256FileHex(executablePath)
+	if evaluatorHashErr != nil {
+		panic(fmt.Errorf("hash evaluator executable: %w", evaluatorHashErr))
+	}
 	rustRunnerOptions, rustOptionsErr := (RustSymbGraphRunnerOptions{
 		Visibility: *rustVisibility,
 		Validation: *rustValidation,
@@ -1596,6 +1900,18 @@ func main() {
 	runSymbGraph := runAllStrategies || *campaignStrategy == "symbgraph-rust"
 	runVegeta := runAllStrategies || *campaignStrategy == "vegeta"
 	runExactOracle := *exactOracle && (runAllStrategies || *campaignStrategy == "exact-oracle")
+	useSerialOracle := !runAllStrategies && !runSerialRecord && strings.TrimSpace(*serialOraclePath) != ""
+	var serialOracle map[serialOracleKey]serialOracleEntry
+	if useSerialOracle {
+		serialOracle, e = loadSerialOracle(*serialOraclePath, *datasetLabel, *workers, *samples, planBlockCount, *scale, *iterPerNs, benchmarkIAVLCacheSize, benchmarkIAVLSyncPruning, evaluatorSHA256)
+		if e != nil {
+			panic(fmt.Errorf("load serial CommitID oracle: %w", e))
+		}
+		fmt.Fprintf(os.Stderr, "Wasmd serial oracle: loaded rows=%d source=%s live_serial_app=false\n", len(serialOracle), *serialOraclePath)
+	}
+	if *investigateOverhead && useSerialOracle {
+		panic("--investigate-overhead requires a live serial app; omit --serial-oracle")
+	}
 	if runAllStrategies {
 		fmt.Fprintln(os.Stderr, "Wasmd campaign strategy=all live_state_mode=legacy-matrix")
 	} else {
@@ -1615,11 +1931,15 @@ func main() {
 		}
 		setupTemplate, err = captureBenchAppTemplate(seed)
 		seed.close()
+		// The setup seed can hold hundreds of megabytes of MemDB/IAVL state.
+		// Reclaim it before creating strategy clones so its dead heap does not
+		// overlap the live benchmark apps and trigger late stop-the-world GC.
+		runtime.GC()
 		if err != nil {
 			panic(err)
 		}
 		defer setupTemplate.close()
-		fmt.Fprintf(os.Stderr, "Wasmd setup template: ready db_entries=%d state_bytes=%d elapsed=%s\n", len(setupTemplate.dbEntries), setupTemplate.stateBytes, time.Since(started).Round(time.Second))
+		fmt.Fprintf(os.Stderr, "Wasmd setup template: ready db_entries=%d state_bytes=%d storage=disk-snapshot elapsed=%s\n", setupTemplate.dbEntries, setupTemplate.stateBytes, time.Since(started).Round(time.Second))
 	}
 	newSampleApp := func(sample int, role string, verify bool) (*benchApp, error) {
 		started := time.Now()
@@ -1640,12 +1960,15 @@ func main() {
 		if e != nil {
 			panic(e)
 		}
-		serial, e := newSampleApp(sample, "serial", true)
-		if e != nil {
-			rustBridge.Close()
-			panic(e)
+		var serial *benchApp
+		if !useSerialOracle {
+			serial, e = newSampleApp(sample, "serial", true)
+			if e != nil {
+				rustBridge.Close()
+				panic(e)
+			}
 		}
-		var stm, aria, symb, vegeta, acgOracle, ariaReference, vegetaReference *benchApp
+		var stm, aria, symb, vegeta, acgOracle *benchApp
 		if runBlockSTM {
 			stm, e = newSampleApp(sample, "blockstm", false)
 			if e != nil {
@@ -1664,16 +1987,6 @@ func main() {
 				rustBridge.Close()
 				panic(e)
 			}
-			ariaReference, e = newSampleApp(sample, "aria-reference", false)
-			if e != nil {
-				serial.close()
-				if stm != nil {
-					stm.close()
-				}
-				aria.close()
-				rustBridge.Close()
-				panic(e)
-			}
 		}
 		if runSymbGraph {
 			symb, e = newSampleApp(sample, "symbgraph-rust", false)
@@ -1684,9 +1997,6 @@ func main() {
 				}
 				if aria != nil {
 					aria.close()
-				}
-				if ariaReference != nil {
-					ariaReference.close()
 				}
 				rustBridge.Close()
 				panic(e)
@@ -1702,31 +2012,9 @@ func main() {
 				if aria != nil {
 					aria.close()
 				}
-				if ariaReference != nil {
-					ariaReference.close()
-				}
 				if symb != nil {
 					symb.close()
 				}
-				rustBridge.Close()
-				panic(e)
-			}
-			vegetaReference, e = newSampleApp(sample, "vegeta-reference", false)
-			if e != nil {
-				serial.close()
-				if stm != nil {
-					stm.close()
-				}
-				if aria != nil {
-					aria.close()
-				}
-				if ariaReference != nil {
-					ariaReference.close()
-				}
-				if symb != nil {
-					symb.close()
-				}
-				vegeta.close()
 				rustBridge.Close()
 				panic(e)
 			}
@@ -1741,17 +2029,11 @@ func main() {
 				if aria != nil {
 					aria.close()
 				}
-				if ariaReference != nil {
-					ariaReference.close()
-				}
 				if symb != nil {
 					symb.close()
 				}
 				if vegeta != nil {
 					vegeta.close()
-				}
-				if vegetaReference != nil {
-					vegetaReference.close()
 				}
 				rustBridge.Close()
 				panic(e)
@@ -1776,92 +2058,179 @@ func main() {
 			if acgOracle != nil {
 				defer acgOracle.close()
 			}
-			if ariaReference != nil {
-				defer ariaReference.close()
-			}
-			if vegetaReference != nil {
-				defer vegetaReference.close()
-			}
 
 			const preEstimate = false
-			// Store keys are app-local identity objects. The Block-STM runner must be
-			// constructed with the keys mounted by the same Wasmd app whose
-			// MultiStore it will execute against; using serial.app keys with stm.app
-			// causes cachemulti to reject otherwise-identically named stores. Keep a
-			// serial fallback only for isolated campaigns where Block-STM is absent
-			// (the runner is then never used).
-			blockSTMStoreKeys := serial.app.GetStoreKeys()
-			if stm != nil {
-				blockSTMStoreKeys = stm.app.GetStoreKeys()
+			// Store keys are app-local identity objects. Prefer the Block-STM app;
+			// isolated campaigns backed by the persisted serial oracle intentionally
+			// keep no serial Wasmd app alive. Other strategies still construct this
+			// unused runner from one of their existing apps to keep setup uniform.
+			runnerStoreApp := serial
+			for _, candidate := range []*benchApp{stm, aria, symb, vegeta, acgOracle} {
+				if candidate != nil {
+					runnerStoreApp = candidate
+					break
+				}
+			}
+			if runnerStoreApp == nil {
+				panic("no live Wasmd app available for scheduler store keys")
 			}
 			blockSTMRunner := txnrunner.NewSTMRunner(
 				sdk.TxDecoder(func([]byte) (sdk.Tx, error) { return nil, nil }),
-				blockSTMStoreKeys,
+				runnerStoreApp.app.GetStoreKeys(),
 				*workers,
 				preEstimate,
 				func(storetypes.MultiStore) string { return sdk.DefaultBondDenom },
 			)
 			ariaRunner := NewAriaFBRunner(*workers)
 			vegetaRunner := NewVegetaRunner(*workers)
+
+			// Optional campaign-only profiling starts after setup restoration and app
+			// cloning so profiles describe scheduler/execution work rather than the
+			// multi-million-entry setup snapshot. The heap profile is captured after
+			// CPU profiling stops and a forced GC while the live strategy app is still
+			// reachable, making retained state and branch costs visible.
+			if *campaignProfileDir != "" {
+				if e := os.MkdirAll(*campaignProfileDir, 0o755); e != nil {
+					panic(e)
+				}
+				profilePrefix := fmt.Sprintf("%s-sample%d", *campaignStrategy, sample)
+				cpuPath := filepath.Join(*campaignProfileDir, profilePrefix+".cpu.pprof")
+				cpuFile, e := os.Create(cpuPath)
+				if e != nil {
+					panic(e)
+				}
+				if e := pprof.StartCPUProfile(cpuFile); e != nil {
+					_ = cpuFile.Close()
+					panic(e)
+				}
+				fmt.Fprintf(os.Stderr, "Wasmd campaign profiling: cpu=%s\n", cpuPath)
+				defer func() {
+					pprof.StopCPUProfile()
+					if e := cpuFile.Close(); e != nil {
+						fmt.Fprintf(os.Stderr, "warning: close campaign CPU profile: %v\n", e)
+					}
+					runtime.GC()
+					heapPath := filepath.Join(*campaignProfileDir, profilePrefix+".heap.pprof")
+					if e := writeRuntimeProfile("heap", heapPath); e != nil {
+						fmt.Fprintf(os.Stderr, "warning: write campaign heap profile: %v\n", e)
+					} else {
+						fmt.Fprintf(os.Stderr, "Wasmd campaign profiling: heap=%s\n", heapPath)
+					}
+				}()
+			}
+
 			campaignStarted := time.Now()
 			fmt.Fprintln(os.Stderr, "Wasmd state equivalence: canonical committed-state CommitID checks")
+			var cumulativeSerialNanos uint64
+			var cumulativeBlockSTMNanos uint64
+			var cumulativeBlockSTMTx uint64
+			var cumulativeBlockSTMAttempts uint64
+			var cumulativeVegetaNanos uint64
+			var cumulativeVegetaPreNanos uint64
+			var cumulativeVegetaPostNanos uint64
+			var cumulativeVegetaReferenceNanos uint64
+			var cumulativeVegetaReexecutions uint64
+			var cumulativeVegetaSafetyReplays uint64
+			var cumulativeVegetaCanonicalFallbackBlocks uint64
+			var cumulativeVegetaSnapshotBuildNanos uint64
+			var cumulativeVegetaSnapshotPointHits uint64
+			var cumulativeVegetaSnapshotPointMisses uint64
+			var cumulativeVegetaPostBatches uint64
+			var cumulativeVegetaPostSingletonBatches uint64
+			var cumulativeVegetaPostMaxBatch uint64
+			var cumulativeVegetaReadySelectionNanos uint64
+			var cumulativeVegetaAlg3ValidationNanos uint64
+			var cumulativeVegetaRangeValidationNanos uint64
+			var cumulativeVegetaIntrinsicReexecutionNanos uint64
+			var cumulativeVegetaHistoricalFallbackNanos uint64
+			var cumulativeVegetaPreExecWorkNanos uint64
+			var cumulativeVegetaPreExecSpanNanos uint64
+			var cumulativeVegetaPostExecWorkNanos uint64
+			var cumulativeVegetaPostExecSpanNanos uint64
+			var cumulativeVegetaPostWideExecWorkNanos uint64
+			var cumulativeVegetaPostWideExecSpanNanos uint64
+			var cumulativeVegetaPostWideTransactions uint64
+			var cumulativeVegetaLongestChainSum uint64
+			var cumulativeVegetaTransactions uint64
 
 			processBlock := func(blockOffset int, block ExecutionBlock) {
 				header := tmproto.Header{ChainID: chainID, Height: int64(blockOffset + 2), Time: time.Unix(int64(block.Timestamp), 0)}
 
 				// Historical-order direct Wasmd serial is the common throughput control.
-				// Serial, BlockSTM, Rust-ACG, and ACG-Oracle also use it as their correctness oracle.
-				// Vegeta and AriaFB time and verify independent serial references for
-				// their own legal derived serialization orders below.
-				serialCtx := serial.app.NewNextBlockContext(header)
-				serialStart := time.Now()
-				for _, tx := range block.Transactions {
-					if e := serial.executeTx(serialCtx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
+				// Isolated non-serial campaigns consume its persisted per-block timing and
+				// canonical CommitID instead of keeping a second mutable Wasmd app alive.
+				// Vegeta and AriaFB stage their scheduler result plus short-lived serial
+				// safety branches on one live app. Neither keeps a second full Wasmd
+				// reference app alive across the campaign.
+				var serialNanos uint64
+				var serialCommitID storetypes.CommitID
+				if useSerialOracle {
+					oracle, ok := serialOracle[serialOracleKey{sample: sample, blockNumber: block.BlockNumber}]
+					if !ok {
+						panic(fmt.Sprintf("serial oracle missing sample=%d block=%d", sample, block.BlockNumber))
+					}
+					if oracle.transactions != len(block.Transactions) {
+						panic(fmt.Sprintf("serial oracle transaction-count mismatch sample=%d block=%d oracle=%d plan=%d", sample, block.BlockNumber, oracle.transactions, len(block.Transactions)))
+					}
+					serialNanos = oracle.nanos
+					serialCommitID = oracle.commitID
+				} else {
+					serialCtx := serial.app.NewNextBlockContext(header)
+					serialStart := time.Now()
+					for _, tx := range block.Transactions {
+						if e := serial.executeTx(serialCtx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
+							panic(e)
+						}
+					}
+					serialWall := time.Since(serialStart)
+					if e := commitFinalizeState(serial.app); e != nil {
 						panic(e)
 					}
-				}
-				serialWall := time.Since(serialStart)
-				if e := commitFinalizeState(serial.app); e != nil {
-					panic(e)
-				}
-				serialNanos := uint64(serialWall.Nanoseconds())
-				serialCommitID := serial.app.LastCommitID()
-				if *investigateOverhead && sample == 0 {
-					diagnosticDirectNanos += serialNanos
-					// The overhead diagnostic intentionally retains the historical full
-					// state digest. Normal publication/smoke runs use CommitID below.
-					diagnosticSerialDigests[blockOffset] = digestApp(serial.app)
-				}
-				serialRec := Record{
-					SchemaVersion:         1,
-					Dataset:               *datasetLabel,
-					Sample:                sample,
-					BlockNumber:           block.BlockNumber,
-					Strategy:              "cosmos-wasmd-direct-serial",
-					Workers:               *workers,
-					MatchedSerialNanos:    serialNanos,
-					HistoricalSerialNanos: serialNanos,
-					StrategyTotalNanos:    serialNanos,
-					PostConsensusNanos:    serialNanos,
-					MatchedSerialSpeedup:  1,
-					Transactions:          len(block.Transactions),
-					ExecutionAttempts:     uint64(len(block.Transactions)),
-					Reexecutions:          0,
-					SerialEquivalent:      true,
-					SerialReferenceScope:  "historical-block-order",
-					ComputeMetric:         cal.Metric,
-					ComputeScale:          *scale,
-					GoIterationsPerNano:   *iterPerNs,
-					CosmosSDKVersion:      cosmosSDKVersion,
-					WasmdVersion:          wasmdVersion,
-					BaselineScope:         directSerialScope,
-					BlockSTMPreEstimate:   false,
-				}
-				if runSerialRecord {
-					if e := json.NewEncoder(w).Encode(&serialRec); e != nil {
-						panic(e)
+					serialNanos = uint64(serialWall.Nanoseconds())
+					serialCommitID = serial.app.LastCommitID()
+					if *investigateOverhead && sample == 0 {
+						diagnosticDirectNanos += serialNanos
+						// The overhead diagnostic intentionally retains the historical full
+						// state digest. Normal publication/smoke runs use CommitID below.
+						diagnosticSerialDigests[blockOffset] = digestApp(serial.app)
+					}
+					serialRec := Record{
+						SchemaVersion:         1,
+						Dataset:               *datasetLabel,
+						Sample:                sample,
+						BlockNumber:           block.BlockNumber,
+						Strategy:              "cosmos-wasmd-direct-serial",
+						Workers:               *workers,
+						MatchedSerialNanos:    serialNanos,
+						HistoricalSerialNanos: serialNanos,
+						StrategyTotalNanos:    serialNanos,
+						PostConsensusNanos:    serialNanos,
+						MatchedSerialSpeedup:  1,
+						Transactions:          len(block.Transactions),
+						ExecutionAttempts:     uint64(len(block.Transactions)),
+						Reexecutions:          0,
+						SerialEquivalent:      true,
+						SerialReferenceScope:  "historical-block-order",
+						SerialCommitVersion:   serialCommitID.Version,
+						SerialCommitHash:      hex.EncodeToString(serialCommitID.Hash),
+						ComputeMetric:         cal.Metric,
+						ComputeScale:          *scale,
+						GoIterationsPerNano:   *iterPerNs,
+						CosmosSDKVersion:      cosmosSDKVersion,
+						WasmdVersion:          wasmdVersion,
+						IAVLCacheSize:         benchmarkIAVLCacheSize,
+						IAVLSyncPruning:       benchmarkIAVLSyncPruning,
+						EvaluatorSHA256:       evaluatorSHA256,
+						BaselineScope:         directSerialScope,
+						BlockSTMPreEstimate:   false,
+					}
+					if runSerialRecord {
+						if e := json.NewEncoder(w).Encode(&serialRec); e != nil {
+							panic(e)
+						}
 					}
 				}
+				cumulativeSerialNanos += serialNanos
 
 				estimatedCosts := make([]uint32, len(block.Transactions))
 				for i, tx := range block.Transactions {
@@ -1913,7 +2282,7 @@ func main() {
 						SchemaVersion: 1, Dataset: *datasetLabel, Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-symbgraph-rust-exact-trace-oracle", Workers: *workers,
 						MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: oracleWall, PreConsensusNanos: oracleStats.PreConsensusNanos, PostConsensusNanos: oracleStats.PostConsensusNanos, Transactions: len(block.Transactions),
 						ExecutionAttempts: oracleStats.Attempts, Reexecutions: oracleStats.Reexecutions, SerialEquivalent: oracleEq, SerialReferenceScope: "historical-block-order", ComputeMetric: cal.Metric, ComputeScale: *scale,
-						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: exactACGOracleScope, BlockSTMPreEstimate: false,
+						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, IAVLCacheSize: benchmarkIAVLCacheSize, IAVLSyncPruning: benchmarkIAVLSyncPruning, EvaluatorSHA256: evaluatorSHA256, BaselineScope: exactACGOracleScope, BlockSTMPreEstimate: false,
 						SpeculatedTransactions: oracleStats.Speculated, ReusedTransactions: oracleStats.Reused, ValidationNanos: oracleDiag.ValidationNanos, ReplayExecutionNanos: oracleDiag.ReplayExecutionNanos,
 						DiscoveredConflicts: uint64(oracleTraceDiag.DependencyEdges), OracleSourceReads: oracleTraceDiag.SourceReads, OracleSourceWrites: oracleTraceDiag.SourceWrites,
 						OracleSourceTraceMissing: oracleTraceDiag.MissingTraces, OracleAdapterHardEdges: oracleTraceDiag.AdapterHardEdges, OracleTranslationCompensationEdges: oracleTraceDiag.TranslationCompensationEdges, OracleMissingBarrierEdges: oracleTraceDiag.MissingBarrierEdges,
@@ -1945,7 +2314,7 @@ func main() {
 						stmAttempts.Add(1)
 						ctx := stmBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
 						tx := block.Transactions[idx]
-						if e := stm.executeTx(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
+						if e := stm.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
 							return &abci.ExecTxResult{Code: 1, Log: e.Error()}
 						}
 						return &abci.ExecTxResult{}
@@ -1962,7 +2331,10 @@ func main() {
 						panic(fmt.Sprintf("block-stm state mismatch sample=%d block=%d", sample, block.BlockNumber))
 					}
 					stmA := stmAttempts.Load()
-					stmRec := Record{SchemaVersion: 1, Dataset: *datasetLabel, Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-block-stm", Workers: *workers, MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: uint64(stmWall.Nanoseconds()), PostConsensusNanos: uint64(stmWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: stmA, Reexecutions: stmA - uint64(len(block.Transactions)), SerialEquivalent: stmEq, SerialReferenceScope: "historical-block-order", ComputeMetric: cal.Metric, ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: baselineScope, BlockSTMPreEstimate: preEstimate}
+					cumulativeBlockSTMNanos += uint64(stmWall.Nanoseconds())
+					cumulativeBlockSTMTx += uint64(len(block.Transactions))
+					cumulativeBlockSTMAttempts += stmA
+					stmRec := Record{SchemaVersion: 1, Dataset: *datasetLabel, Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-block-stm", Workers: *workers, MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: uint64(stmWall.Nanoseconds()), PostConsensusNanos: uint64(stmWall.Nanoseconds()), Transactions: len(block.Transactions), ExecutionAttempts: stmA, Reexecutions: stmA - uint64(len(block.Transactions)), SerialEquivalent: stmEq, SerialReferenceScope: "historical-block-order", ComputeMetric: cal.Metric, ComputeScale: *scale, GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, IAVLCacheSize: benchmarkIAVLCacheSize, IAVLSyncPruning: benchmarkIAVLSyncPruning, EvaluatorSHA256: evaluatorSHA256, BaselineScope: baselineScope, BlockSTMPreEstimate: preEstimate}
 					if stmRec.StrategyTotalNanos > 0 {
 						stmRec.MatchedSerialSpeedup = float64(stmRec.MatchedSerialNanos) / float64(stmRec.StrategyTotalNanos)
 					}
@@ -1973,13 +2345,18 @@ func main() {
 				}
 
 				if runAriaFB && !*rustACGOnly {
-					// AriaFB on the same Wasmd/WasmVM state machine. The initial Aria
-					// batch executes after consensus from one block-start snapshot. Rule-2
-					// survivors commit in a valid Aria serialization order; aborts use the
-					// attached Vegeta repository's hot-chain dependency-DAG fallback.
+					// AriaFB is allowed to speculate and derive an alternative serialization,
+					// but this benchmark consumes a fixed historical Ethereum block stream. A
+					// different post-block state can make source-successful transactions in later
+					// blocks invalid (allowance/ownership/nonces). Stage the Aria block, build a
+					// disposable historical-order branch from the same block-start state, and
+					// commit Aria only when both branches have identical final writes. Semantic
+					// execution failures under the derived order trigger the same canonical
+					// fallback instead of poisoning persistent state or panicking.
 					ariaBlockCtx := aria.app.NewNextBlockContext(header)
+					ariaBranch := newTrackingMultiStoreForSpeculation(ariaBlockCtx.MultiStore(), aria.app.GetStoreKeys())
 					ariaStart := time.Now()
-					_, e = ariaRunner.Run(context.Background(), ariaBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+					_, ariaErr := ariaRunner.Run(context.Background(), ariaBranch, txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
 						ctx := ariaBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
 						tx := block.Transactions[idx]
 						if e := aria.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
@@ -1987,27 +2364,50 @@ func main() {
 						}
 						return &abci.ExecTxResult{}
 					})
-					ariaWall := time.Since(ariaStart)
+					ariaWall := uint64(time.Since(ariaStart).Nanoseconds())
+					var semanticErr *ariaSemanticExecutionError
+					semanticFallback := errors.As(ariaErr, &semanticErr)
+					if ariaErr != nil && !semanticFallback {
+						panic(ariaErr)
+					}
+
+					canonicalBranch, canonicalReplayNanos, e := executeHistoricalBlockBranch(aria, ariaBlockCtx, block, cal)
 					if e != nil {
-						panic(e)
+						panic(fmt.Sprintf("aria-fb canonical safety replay failed after derived-order issue=%v: %v", ariaErr, e))
+					}
+					canonicalMismatch := !semanticFallback && !trackingBranchesFinalStateEqual(ariaBranch, canonicalBranch)
+					canonicalFallback := semanticFallback || canonicalMismatch
+					ariaStats := ariaRunner.LastStats()
+					strategyNanos := ariaWall
+					if canonicalFallback {
+						reason := "post-block state differs from historical order"
+						if semanticFallback {
+							reason = semanticErr.Error()
+						}
+						fmt.Fprintf(os.Stderr, "Wasmd Aria canonical fallback: sample=%d block=%d txs=%d reason=%s\n", sample, block.BlockNumber, len(block.Transactions), reason)
+						canonicalBranch.Write()
+						ariaRunner.MarkCanonicalFallback(len(block.Transactions))
+						strategyNanos += canonicalReplayNanos
+						ariaStats.Attempts += uint64(len(block.Transactions))
+						ariaStats.Reexecutions += uint64(len(block.Transactions))
+						ariaStats.SafetyReplays += uint64(len(block.Transactions))
+						ariaStats.ReplayExecutionNanos += canonicalReplayNanos
+						ariaStats.PostConsensusNanos += canonicalReplayNanos
+					} else {
+						ariaBranch.Write()
 					}
 					if e := commitFinalizeState(aria.app); e != nil {
 						panic(e)
 					}
-					ariaSerialNanos, e := executeSerialOrderReference(ariaReference, header, block, cal, ariaRunner.LastSerializationOrder())
-					if e != nil {
-						panic(e)
-					}
-					ariaEq := commitIDsEqual(ariaReference.app.LastCommitID(), aria.app.LastCommitID())
+					ariaEq := commitIDsEqual(serialCommitID, aria.app.LastCommitID())
 					if !ariaEq {
-						panic(fmt.Sprintf("aria-fb serialization mismatch sample=%d block=%d order=%v", sample, block.BlockNumber, ariaRunner.LastSerializationOrder()))
+						panic(fmt.Sprintf("aria-fb canonical state mismatch sample=%d block=%d fallback=%v semantic=%v order=%v", sample, block.BlockNumber, canonicalFallback, semanticFallback, ariaRunner.LastSerializationOrder()))
 					}
-					ariaStats := ariaRunner.LastStats()
 					ariaRec := Record{
 						SchemaVersion: 1, Dataset: *datasetLabel, Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-aria-fb", Workers: *workers,
-						MatchedSerialNanos: ariaSerialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: uint64(ariaWall.Nanoseconds()), PostConsensusNanos: ariaStats.PostConsensusNanos, Transactions: len(block.Transactions),
-						ExecutionAttempts: ariaStats.Attempts, Reexecutions: ariaStats.Reexecutions, SerialEquivalent: ariaEq, SerialReferenceScope: "aria-derived-serialization", ComputeMetric: cal.Metric, ComputeScale: *scale,
-						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: ariaFBScope, BlockSTMPreEstimate: false,
+						MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: strategyNanos, PostConsensusNanos: ariaStats.PostConsensusNanos, Transactions: len(block.Transactions),
+						ExecutionAttempts: ariaStats.Attempts, Reexecutions: ariaStats.Reexecutions, SerialEquivalent: ariaEq, SerialReferenceScope: "historical-block-order", ComputeMetric: cal.Metric, ComputeScale: *scale,
+						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, IAVLCacheSize: benchmarkIAVLCacheSize, IAVLSyncPruning: benchmarkIAVLSyncPruning, EvaluatorSHA256: evaluatorSHA256, BaselineScope: ariaFBScope, BlockSTMPreEstimate: false,
 						SpeculatedTransactions: ariaStats.Speculated, ReusedTransactions: ariaStats.Reused, ValidationNanos: ariaStats.ValidationNanos, ReplayExecutionNanos: ariaStats.ReplayExecutionNanos,
 						ConflictAnalysisNanos: ariaStats.ConflictAnalysisNanos, DiscoveredConflicts: ariaStats.DiscoveredConflicts, ForwardFallbacks: ariaStats.ForwardFallbacks, SafetyReplays: ariaStats.SafetyReplays,
 					}
@@ -2056,6 +2456,7 @@ func main() {
 						StrategyTotalNanos: uint64(symbWall.Nanoseconds()), PreConsensusNanos: symbStats.PreConsensusNanos, PostConsensusNanos: symbStats.PostConsensusNanos, Transactions: len(block.Transactions), ExecutionAttempts: symbStats.Attempts,
 						Reexecutions: symbStats.Reexecutions, SerialEquivalent: symbEq, SerialReferenceScope: "historical-block-order", ComputeMetric: cal.Metric, ComputeScale: *scale,
 						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion,
+						IAVLCacheSize: benchmarkIAVLCacheSize, IAVLSyncPruning: benchmarkIAVLSyncPruning, EvaluatorSHA256: evaluatorSHA256,
 						BaselineScope: rustRunnerOptions.Scope(), BlockSTMPreEstimate: false, SpeculatedTransactions: symbStats.Speculated,
 						ReusedTransactions: symbStats.Reused, ValidationNanos: symbDiag.ValidationNanos, ReplayExecutionNanos: symbDiag.ReplayExecutionNanos,
 						SymbGraphVariant: symbDiag.Variant, SymbPlanNanos: symbDiag.PlanNanos, SymbPreexecutionNanos: symbDiag.PreexecutionNanos,
@@ -2101,13 +2502,17 @@ func main() {
 				}
 
 				if runVegeta && !*rustACGOnly {
-					// Vegeta SpeculateMod + ParallelMod adaptation: pre-consensus
-					// execution discovers actual accesses and a hot-key proposal reorder;
-					// after consensus every transaction executes in Rule-2-compatible DAG
-					// batches and only unsafe access-set changes are executed again.
+					// Vegeta speculation is staged at block scope so its derived-order safety
+					// reference can be short-lived. The previous implementation kept a full
+					// vegeta-reference Wasmd app alive for all 5,000 blocks, roughly doubling
+					// mutable state and causing severe late-run GC pauses. Here both the
+					// scheduler result and serial safety replay branch from the same block-start
+					// state on one app. A historical-order branch gates the committed state so
+					// scheduler reordering cannot poison later source-successful transactions.
 					vegetaBlockCtx := vegeta.app.NewNextBlockContext(header)
+					vegetaBranch := newTrackingMultiStoreForSpeculation(vegetaBlockCtx.MultiStore(), vegeta.app.GetStoreKeys())
 					vegetaStart := time.Now()
-					_, e = vegetaRunner.Run(context.Background(), vegetaBlockCtx.MultiStore(), txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
+					_, vegetaErr := vegetaRunner.Run(context.Background(), vegetaBranch, txBytes(block), func(_ []byte, _ sdk.Tx, ms storetypes.MultiStore, idx int, _ map[string]any) *abci.ExecTxResult {
 						ctx := vegetaBlockCtx.WithMultiStore(ms).WithEventManager(sdk.NewEventManager()).WithGasMeter(storetypes.NewInfiniteGasMeter())
 						tx := block.Transactions[idx]
 						if e := vegeta.executeTxIsolated(ctx, block, tx, cal.iterations(block.BlockNumber, tx.TxIndex, tx.TxHash)); e != nil {
@@ -2115,29 +2520,125 @@ func main() {
 						}
 						return &abci.ExecTxResult{}
 					})
-					vegetaWall := time.Since(vegetaStart)
-					if e != nil {
-						panic(e)
+					vegetaWall := uint64(time.Since(vegetaStart).Nanoseconds())
+					var semanticErr *vegetaSemanticExecutionError
+					semanticFallback := errors.As(vegetaErr, &semanticErr)
+					if vegetaErr != nil && !semanticFallback {
+						panic(vegetaErr)
+					}
+
+					serializationOrder := vegetaRunner.LastSerializationOrder()
+					var derivedBranch *trackingMultiStore
+					var vegetaSerialNanos uint64
+					semanticReason := ""
+					if semanticFallback {
+						semanticReason = semanticErr.Error()
+					} else {
+						derivedBranch, vegetaSerialNanos, e = executeOrderedBlockBranch(vegeta, vegetaBlockCtx, block, cal, serializationOrder)
+						if e != nil {
+							// The scheduler completed, but its derived serialization is not
+							// semantically executable on this fixed historical workload. Discard
+							// the staged branch and require historical order to succeed below.
+							semanticFallback = true
+							semanticReason = fmt.Sprintf("derived-order safety replay failed: %v", e)
+						} else if !trackingBranchesFinalStateEqual(vegetaBranch, derivedBranch) {
+							panic(fmt.Sprintf("vegeta serialization mismatch sample=%d block=%d proposal=%v serialization=%v", sample, block.BlockNumber, vegetaRunner.LastProposalOrder(), serializationOrder))
+						}
+					}
+
+					canonicalBranch := derivedBranch
+					canonicalReplayNanos := vegetaSerialNanos
+					if semanticFallback || !isHistoricalOrder(serializationOrder, len(block.Transactions)) {
+						canonicalBranch, canonicalReplayNanos, e = executeHistoricalBlockBranch(vegeta, vegetaBlockCtx, block, cal)
+						if e != nil {
+							panic(fmt.Sprintf("vegeta canonical historical replay failed sample=%d block=%d derived_issue=%q: %v", sample, block.BlockNumber, semanticReason, e))
+						}
+					}
+					canonicalMismatch := !semanticFallback && !trackingBranchesFinalStateEqual(vegetaBranch, canonicalBranch)
+					canonicalFallback := semanticFallback || canonicalMismatch
+					canonicalFallbackReason := ""
+					var canonicalFallbackNanos uint64
+					var historicalFallbackTransactions uint64
+					vegetaStats := vegetaRunner.LastStats()
+					strategyNanos := vegetaWall
+					if canonicalFallback {
+						reason := "post-block state differs from historical order"
+						if semanticFallback {
+							reason = semanticReason
+						}
+						canonicalFallbackReason = reason
+						canonicalFallbackNanos = canonicalReplayNanos
+						historicalFallbackTransactions = uint64(len(block.Transactions))
+						fmt.Fprintf(os.Stderr, "Wasmd Vegeta canonical fallback: sample=%d block=%d txs=%d proposal=%v serialization=%v reason=%s\n", sample, block.BlockNumber, len(block.Transactions), vegetaRunner.LastProposalOrder(), serializationOrder, reason)
+						canonicalBranch.Write()
+						vegetaRunner.MarkCanonicalFallback(len(block.Transactions))
+						strategyNanos += canonicalReplayNanos
+						vegetaStats.Attempts += uint64(len(block.Transactions))
+						// Historical-state gating is our fixed-trace adaptation, not part of
+						// Vegeta Algorithm 3 replay. Keep it in StrategyTotalNanos and the
+						// dedicated historical-fallback metric, but do not contaminate the
+						// paper replay throughput or intrinsic re-execution counters.
+						// The matched serial baseline must follow the state actually committed.
+						// Normal Vegeta blocks use the derived serialization reference; canonical
+						// fallback blocks commit historical order, so compare them to the measured
+						// historical replay instead of retaining an unrelated derived-order timing.
+						vegetaSerialNanos = canonicalReplayNanos
+						cumulativeVegetaCanonicalFallbackBlocks++
+					} else {
+						vegetaBranch.Write()
 					}
 					if e := commitFinalizeState(vegeta.app); e != nil {
 						panic(e)
 					}
-					vegetaSerialNanos, e := executeSerialOrderReference(vegetaReference, header, block, cal, vegetaRunner.LastSerializationOrder())
-					if e != nil {
-						panic(e)
-					}
-					vegetaEq := commitIDsEqual(vegetaReference.app.LastCommitID(), vegeta.app.LastCommitID())
+					vegetaEq := commitIDsEqual(serialCommitID, vegeta.app.LastCommitID())
 					if !vegetaEq {
-						panic(fmt.Sprintf("vegeta serialization mismatch sample=%d block=%d proposal=%v serialization=%v", sample, block.BlockNumber, vegetaRunner.LastProposalOrder(), vegetaRunner.LastSerializationOrder()))
+						panic(fmt.Sprintf("vegeta canonical state mismatch sample=%d block=%d fallback=%v proposal=%v serialization=%v", sample, block.BlockNumber, canonicalFallback, vegetaRunner.LastProposalOrder(), serializationOrder))
 					}
-					vegetaStats := vegetaRunner.LastStats()
+					cumulativeVegetaNanos += strategyNanos
+					cumulativeVegetaPreNanos += vegetaStats.PreConsensusNanos
+					cumulativeVegetaPostNanos += vegetaStats.PostConsensusNanos
+					cumulativeVegetaReferenceNanos += vegetaSerialNanos
+					cumulativeVegetaReexecutions += vegetaStats.Reexecutions
+					cumulativeVegetaSafetyReplays += vegetaStats.SafetyReplays
+					cumulativeVegetaSnapshotBuildNanos += vegetaStats.SnapshotBuildNanos
+					cumulativeVegetaSnapshotPointHits += vegetaStats.SnapshotPointHits
+					cumulativeVegetaSnapshotPointMisses += vegetaStats.SnapshotPointMisses
+					cumulativeVegetaPostBatches += vegetaStats.PostBatches
+					cumulativeVegetaPostSingletonBatches += vegetaStats.PostSingletonBatches
+					cumulativeVegetaReadySelectionNanos += vegetaStats.ReadySelectionNanos
+					cumulativeVegetaAlg3ValidationNanos += vegetaStats.VegetaAlg3ValidationNanos
+					cumulativeVegetaRangeValidationNanos += vegetaStats.VegetaRangeValidationNanos
+					cumulativeVegetaIntrinsicReexecutionNanos += vegetaStats.VegetaIntrinsicReexecutionNanos
+					cumulativeVegetaHistoricalFallbackNanos += canonicalFallbackNanos
+					cumulativeVegetaPreExecWorkNanos += vegetaStats.PreExecWorkNanos
+					cumulativeVegetaPreExecSpanNanos += vegetaStats.PreExecSpanNanos
+					cumulativeVegetaPostExecWorkNanos += vegetaStats.PostExecWorkNanos
+					cumulativeVegetaPostExecSpanNanos += vegetaStats.PostExecSpanNanos
+					cumulativeVegetaPostWideExecWorkNanos += vegetaStats.PostWideExecWorkNanos
+					cumulativeVegetaPostWideExecSpanNanos += vegetaStats.PostWideExecSpanNanos
+					cumulativeVegetaPostWideTransactions += vegetaStats.PostWideTransactions
+					cumulativeVegetaLongestChainSum += vegetaStats.VegetaLongestChain
+					cumulativeVegetaTransactions += uint64(len(block.Transactions))
+					if vegetaStats.PostMaxBatch > cumulativeVegetaPostMaxBatch {
+						cumulativeVegetaPostMaxBatch = vegetaStats.PostMaxBatch
+					}
 					vegetaRec := Record{
 						SchemaVersion: 1, Dataset: *datasetLabel, Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-vegeta", Workers: *workers,
-						MatchedSerialNanos: vegetaSerialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: uint64(vegetaWall.Nanoseconds()), PreConsensusNanos: vegetaStats.PreConsensusNanos, PostConsensusNanos: vegetaStats.PostConsensusNanos, Transactions: len(block.Transactions),
-						ExecutionAttempts: vegetaStats.Attempts, Reexecutions: vegetaStats.Reexecutions, SerialEquivalent: vegetaEq, SerialReferenceScope: "vegeta-derived-serialization", ComputeMetric: cal.Metric, ComputeScale: *scale,
-						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, BaselineScope: vegetaScope, BlockSTMPreEstimate: false,
+						MatchedSerialNanos: vegetaSerialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: strategyNanos, PreConsensusNanos: vegetaStats.PreConsensusNanos, PostConsensusNanos: vegetaStats.PostConsensusNanos, Transactions: len(block.Transactions),
+						ExecutionAttempts: vegetaStats.Attempts, Reexecutions: vegetaStats.Reexecutions, SerialEquivalent: vegetaEq, SerialReferenceScope: "vegeta-derived-serialization+historical-state-gate", ComputeMetric: cal.Metric, ComputeScale: *scale,
+						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, IAVLCacheSize: benchmarkIAVLCacheSize, IAVLSyncPruning: benchmarkIAVLSyncPruning, EvaluatorSHA256: evaluatorSHA256, BaselineScope: vegetaScope, BlockSTMPreEstimate: false,
 						SpeculatedTransactions: vegetaStats.Speculated, ReusedTransactions: vegetaStats.Reused, ValidationNanos: vegetaStats.ValidationNanos, ReplayExecutionNanos: vegetaStats.ReplayExecutionNanos,
 						ConflictAnalysisNanos: vegetaStats.ConflictAnalysisNanos, DiscoveredConflicts: vegetaStats.DiscoveredConflicts, ForwardFallbacks: vegetaStats.ForwardFallbacks, SafetyReplays: vegetaStats.SafetyReplays,
+						VegetaSnapshotBuildNanos: vegetaStats.SnapshotBuildNanos, VegetaSnapshotPointHits: vegetaStats.SnapshotPointHits, VegetaSnapshotPointMisses: vegetaStats.SnapshotPointMisses,
+						VegetaSnapshotRangeHits: vegetaStats.SnapshotRangeHits, VegetaSnapshotRangeMisses: vegetaStats.SnapshotRangeMisses, VegetaPostBatches: vegetaStats.PostBatches,
+						VegetaPostSingletonBatches: vegetaStats.PostSingletonBatches, VegetaPostMaxBatch: vegetaStats.PostMaxBatch, VegetaReadySelectionNanos: vegetaStats.ReadySelectionNanos,
+						VegetaPreExecWorkNanos: vegetaStats.PreExecWorkNanos, VegetaPreExecSpanNanos: vegetaStats.PreExecSpanNanos, VegetaPostExecWorkNanos: vegetaStats.PostExecWorkNanos, VegetaPostExecSpanNanos: vegetaStats.PostExecSpanNanos,
+						VegetaPostWideExecWorkNanos: vegetaStats.PostWideExecWorkNanos, VegetaPostWideExecSpanNanos: vegetaStats.PostWideExecSpanNanos, VegetaPostWideTransactions: vegetaStats.PostWideTransactions,
+						VegetaLongestChain: vegetaStats.VegetaLongestChain, VegetaChainCount: vegetaStats.VegetaChainCount,
+						VegetaAlg3ValidationNanos: vegetaStats.VegetaAlg3ValidationNanos, VegetaRangeValidationNanos: vegetaStats.VegetaRangeValidationNanos,
+						VegetaIntrinsicReexecutionNanos: vegetaStats.VegetaIntrinsicReexecutionNanos, VegetaHistoricalFallbackNanos: canonicalFallbackNanos,
+						VegetaHistoricalFallbackTransactions: historicalFallbackTransactions,
+						VegetaCanonicalFallback:              canonicalFallback, VegetaCanonicalFallbackNanos: canonicalFallbackNanos, VegetaCanonicalFallbackReason: canonicalFallbackReason,
 					}
 					if vegetaRec.StrategyTotalNanos > 0 {
 						vegetaRec.MatchedSerialSpeedup = float64(vegetaRec.MatchedSerialNanos) / float64(vegetaRec.StrategyTotalNanos)
@@ -2149,15 +2650,65 @@ func main() {
 
 				completed := blockOffset + 1
 				if planBlockCount >= 20 && (completed%10 == 0 || completed == planBlockCount) {
-					fmt.Fprintf(os.Stderr, "Wasmd campaign progress: sample=%d blocks=%d/%d source_block=%d elapsed=%s\n", sample, completed, planBlockCount, block.BlockNumber, time.Since(campaignStarted).Round(time.Second))
+					if runBlockSTM && !runAllStrategies {
+						reexec := cumulativeBlockSTMAttempts - cumulativeBlockSTMTx
+						reexecPct := 0.0
+						if cumulativeBlockSTMTx > 0 {
+							reexecPct = 100 * float64(reexec) / float64(cumulativeBlockSTMTx)
+						}
+						serialLabel := "serial_ref"
+						if useSerialOracle {
+							serialLabel = "serial_oracle"
+						}
+						fmt.Fprintf(os.Stderr, "Wasmd campaign progress: sample=%d blocks=%d/%d source_block=%d elapsed=%s %s=%s blockstm=%s attempts=%d reexec=%d reexec_pct=%.2f%% live_serial_app=%v\n", sample, completed, planBlockCount, block.BlockNumber, time.Since(campaignStarted).Round(time.Second), serialLabel, time.Duration(cumulativeSerialNanos).Round(time.Millisecond), time.Duration(cumulativeBlockSTMNanos).Round(time.Millisecond), cumulativeBlockSTMAttempts, reexec, reexecPct, !useSerialOracle)
+					} else if runVegeta && !runAllStrategies {
+						serialLabel := "serial_ref"
+						if useSerialOracle {
+							serialLabel = "serial_oracle"
+						}
+						postX := 0.0
+						historicalNetX := 0.0
+						historicalPostX := 0.0
+						if cumulativeVegetaNanos > 0 {
+							historicalNetX = float64(cumulativeSerialNanos) / float64(cumulativeVegetaNanos)
+						}
+						if cumulativeVegetaPostNanos > 0 {
+							postX = float64(cumulativeVegetaReferenceNanos) / float64(cumulativeVegetaPostNanos)
+							historicalPostX = float64(cumulativeSerialNanos) / float64(cumulativeVegetaPostNanos)
+						}
+						snapshotLookups := cumulativeVegetaSnapshotPointHits + cumulativeVegetaSnapshotPointMisses
+						snapshotHitPct := 0.0
+						if snapshotLookups > 0 {
+							snapshotHitPct = 100 * float64(cumulativeVegetaSnapshotPointHits) / float64(snapshotLookups)
+						}
+						singletonPct := 0.0
+						if cumulativeVegetaPostBatches > 0 {
+							singletonPct = 100 * float64(cumulativeVegetaPostSingletonBatches) / float64(cumulativeVegetaPostBatches)
+						}
+						preConcurrency := 0.0
+						if cumulativeVegetaPreExecSpanNanos > 0 {
+							preConcurrency = float64(cumulativeVegetaPreExecWorkNanos) / float64(cumulativeVegetaPreExecSpanNanos)
+						}
+						wideConcurrency := 0.0
+						if cumulativeVegetaPostWideExecSpanNanos > 0 {
+							wideConcurrency = float64(cumulativeVegetaPostWideExecWorkNanos) / float64(cumulativeVegetaPostWideExecSpanNanos)
+						}
+						chainRatio := 0.0
+						if cumulativeVegetaLongestChainSum > 0 {
+							chainRatio = float64(cumulativeVegetaTransactions) / float64(cumulativeVegetaLongestChainSum)
+						}
+						fmt.Fprintf(os.Stderr, "Wasmd campaign progress: sample=%d blocks=%d/%d source_block=%d elapsed=%s %s=%s vegeta=%s pre=%s post=%s work_x=%.2fx matched_post_x=%.2fx replay_x=%.2fx pre_cf=%.2fx wide_cf=%.2fx wide_txs=%d matched_ref=%s chain_ratio=%.2fx reexec=%d safety=%d canonical_fallback_blocks=%d alg3_val=%s range_val=%s intrinsic_reexec=%s historical_fallback=%s snapshot_build=%s snapshot_hit=%.1f%% ready=%s post_batches=%d singleton_batches=%.1f%% max_batch=%d live_vegeta_reference=false overlay=post-snapshot ready_state=incremental\n", sample, completed, planBlockCount, block.BlockNumber, time.Since(campaignStarted).Round(time.Second), serialLabel, time.Duration(cumulativeSerialNanos).Round(time.Millisecond), time.Duration(cumulativeVegetaNanos).Round(time.Millisecond), time.Duration(cumulativeVegetaPreNanos).Round(time.Millisecond), time.Duration(cumulativeVegetaPostNanos).Round(time.Millisecond), historicalNetX, postX, historicalPostX, preConcurrency, wideConcurrency, cumulativeVegetaPostWideTransactions, time.Duration(cumulativeVegetaReferenceNanos).Round(time.Millisecond), chainRatio, cumulativeVegetaReexecutions, cumulativeVegetaSafetyReplays, cumulativeVegetaCanonicalFallbackBlocks, time.Duration(cumulativeVegetaAlg3ValidationNanos).Round(time.Millisecond), time.Duration(cumulativeVegetaRangeValidationNanos).Round(time.Millisecond), time.Duration(cumulativeVegetaIntrinsicReexecutionNanos).Round(time.Millisecond), time.Duration(cumulativeVegetaHistoricalFallbackNanos).Round(time.Millisecond), time.Duration(cumulativeVegetaSnapshotBuildNanos).Round(time.Millisecond), snapshotHitPct, time.Duration(cumulativeVegetaReadySelectionNanos).Round(time.Millisecond), cumulativeVegetaPostBatches, singletonPct, cumulativeVegetaPostMaxBatch)
+					} else {
+						fmt.Fprintf(os.Stderr, "Wasmd campaign progress: sample=%d blocks=%d/%d source_block=%d elapsed=%s\n", sample, completed, planBlockCount, block.BlockNumber, time.Since(campaignStarted).Round(time.Second))
+					}
 				}
 			}
 			prepareStreamBlock := func(block ExecutionBlock) {
 				if !*streamPlan {
 					return
 				}
-				apps := []*benchApp{serial}
-				for _, app := range []*benchApp{stm, aria, symb, vegeta, ariaReference, vegetaReference, acgOracle} {
+				apps := make([]*benchApp, 0, 8)
+				for _, app := range []*benchApp{serial, stm, aria, symb, vegeta, acgOracle} {
 					if app != nil {
 						apps = append(apps, app)
 					}
@@ -2200,6 +2751,10 @@ func main() {
 			}
 
 		}()
+		// All sample apps are closed by the isolated sample scope above. Reclaim
+		// their MemDB/IAVL heaps before the next sample so multi-sample paper runs
+		// do not inherit stale heap pressure from previous samples.
+		runtime.GC()
 	}
 
 	if *investigateOverhead {

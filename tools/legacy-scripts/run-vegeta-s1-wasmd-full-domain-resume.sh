@@ -25,6 +25,29 @@ done
   exit 2
 }
 
+FIAT_MINT_TOOL="tools/vegeta/repair-s1-fiat-token-mint-senders.py"
+FIAT_MINT_REPORT="$EXEC_DIR/fiat-token-mint-sender-repair.json"
+fiat_mint_cache_ok() {
+  [[ -s "$FIAT_MINT_REPORT" ]] || return 1
+  [[ ! "$EXEC_DIR/execution-plan.jsonl" -nt "$FIAT_MINT_REPORT" ]] || return 1
+  [[ ! "$FIAT_MINT_TOOL" -nt "$FIAT_MINT_REPORT" ]] || return 1
+  python3 - "$FIAT_MINT_REPORT" <<'PY' >/dev/null
+import json, sys
+d=json.load(open(sys.argv[1], encoding='utf-8'))
+assert d.get('status') in {'already-complete','repaired-and-validated'}
+assert int(d.get('mismatched_mints', -1)) == 0
+PY
+}
+
+if fiat_mint_cache_ok; then
+  echo "reusing cached S1 FiatToken mint authorization repair: PASS"
+else
+  echo "preflighting committed S1 FiatToken mint authorization before Wasmd"
+  python3 "$FIAT_MINT_TOOL" \
+    --execution-plan "$EXEC_DIR/execution-plan.jsonl" \
+    --report "$FIAT_MINT_REPORT"
+fi
+
 LIFECYCLE_TOOL="tools/vegeta/repair-s1-cw721-lifecycle-from-mint-logs.py"
 LIFECYCLE_REPORT="$EXEC_DIR/cw721-lifecycle-repair.json"
 lifecycle_cache_ok() {
@@ -46,6 +69,40 @@ if lifecycle_cache_ok; then
   echo "reusing cached full-domain NFT lifecycle validation: PASS"
 else
   echo "preflighting full-domain committed NFT lifecycle before Wasmd"
+  python3 "$LIFECYCLE_TOOL" \
+    --execution-plan "$EXEC_DIR/execution-plan.jsonl" \
+    --manifest "$EXEC_DIR/execution-manifest.json" \
+    --report "$LIFECYCLE_REPORT"
+fi
+
+CW721_OWNER_TOOL="tools/vegeta/repair-s1-cw721-ownership-from-transfer-logs.py"
+CW721_OWNER_REPORT="$EXEC_DIR/cw721-ownership-repair.json"
+cw721_owner_cache_ok() {
+  [[ -s "$CW721_OWNER_REPORT" ]] || return 1
+  [[ ! "$EXEC_DIR/execution-plan.jsonl" -nt "$CW721_OWNER_REPORT" ]] || return 1
+  [[ ! "$EXEC_DIR/execution-manifest.json" -nt "$CW721_OWNER_REPORT" ]] || return 1
+  [[ ! "$CW721_OWNER_TOOL" -nt "$CW721_OWNER_REPORT" ]] || return 1
+  python3 - "$CW721_OWNER_REPORT" <<'PY' >/dev/null
+import json, sys
+d=json.load(open(sys.argv[1], encoding='utf-8'))
+assert d.get('status') in {'already-complete','repaired-and-validated'}
+assert int(d.get('blocks',-1)) == 5000
+assert int(d.get('transactions',-1)) == 739863
+assert int(d.get('remaining_owner_gaps',-1)) == 0
+PY
+}
+
+if cw721_owner_cache_ok; then
+  echo "reusing cached full-domain CW721 ownership validation: PASS"
+else
+  echo "preflighting full-domain committed CW721 ownership before Wasmd"
+  python3 "$CW721_OWNER_TOOL" \
+    --execution-plan "$EXEC_DIR/execution-plan.jsonl" \
+    --manifest "$EXEC_DIR/execution-manifest.json" \
+    --report "$CW721_OWNER_REPORT"
+  # Ownership recovery only adds ordinary transfers of already-existing tokens. Refresh the
+  # lifecycle report against the final plan so future resumes do not treat it as stale; this is
+  # an offline scan because ownership recovery cannot create a token-existence gap.
   python3 "$LIFECYCLE_TOOL" \
     --execution-plan "$EXEC_DIR/execution-plan.jsonl" \
     --manifest "$EXEC_DIR/execution-manifest.json" \
@@ -81,11 +138,14 @@ share=float(profiles[4.0]['fitted_supplement_share'])
 print(f"calibration accepted: gas_used scale=4 fitted supplemental share={share:.1%}; top strategy stable across 2x/4x/8x")
 PY
 
-GO_MAIN="benchmarks/cosmos-wasmd-blockstm-s3/main.go"
+GO_BENCH_DIR="benchmarks/cosmos-wasmd-blockstm-s3"
 NATIVE_CONTRACT_ROOTS=("benchmarks/contracts/native-s3" "benchmarks/contracts/native-s1")
 binary_and_wasm_sources_fresh() {
   local candidate="$1"
-  [[ -x "$candidate" && ! "$GO_MAIN" -nt "$candidate" ]] || return 1
+  [[ -x "$candidate" ]] || return 1
+  if find "$GO_BENCH_DIR" -type f -name '*.go' -newer "$candidate" -print -quit | grep -q .; then
+    return 1
+  fi
   if find "${NATIVE_CONTRACT_ROOTS[@]}" -type f \
       \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$candidate" -print -quit | grep -q .; then
     return 1

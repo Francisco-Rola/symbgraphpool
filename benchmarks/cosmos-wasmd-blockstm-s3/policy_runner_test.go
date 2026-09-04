@@ -1,8 +1,10 @@
 package main
 
 import (
+	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -335,26 +337,58 @@ func TestAriaRule2ForwardFallbacksMatchesRustHarnessConditions(t *testing.T) {
 	}
 }
 
-func TestVegetaProposalOrderMovesHottestChainFirst(t *testing.T) {
+func TestVegetaProposalOrderSortsAllDependencyChains(t *testing.T) {
 	store := storeIDFromName("wasm")
-	trackers := make([]*accessTracker, 4)
+	trackers := make([]*accessTracker, 5)
 	for i := range trackers {
 		trackers[i] = newAccessTracker(nil)
 	}
+	// Long chain hot=[0,2,4], then second chain warm=[1,3], then the
+	// transaction unique to no additional chain. The old port only moved the
+	// single hottest chain and would have returned [0,2,4,1,3] by accident for
+	// this simple shape; the Figure-5 test below exercises overlapping chains.
 	trackers[0].read(store, []byte("hot"))
-	trackers[1].read(store, []byte("cold"))
+	trackers[1].read(store, []byte("warm"))
 	trackers[2].write(store, []byte("hot"))
-	trackers[3].read(store, []byte("hot"))
+	trackers[3].write(store, []byte("warm"))
+	trackers[4].read(store, []byte("hot"))
 
-	got := vegetaProposalOrder(trackers)
-	want := []int{0, 2, 3, 1}
-	if len(got) != len(want) {
+	got, longest, chains := vegetaProposalOrderWithStats(trackers)
+	want := []int{0, 2, 4, 1, 3}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("proposal=%v want=%v", got, want)
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("proposal=%v want=%v", got, want)
-		}
+	if longest != 3 || chains != 2 {
+		t.Fatalf("longest=%d chains=%d want 3,2", longest, chains)
+	}
+}
+
+func TestVegetaProposalOrderMatchesPaperFigure5(t *testing.T) {
+	store := storeIDFromName("wasm")
+	trackers := make([]*accessTracker, 6)
+	for i := range trackers {
+		trackers[i] = newAccessTracker(nil)
+	}
+	// Figure 5 / Algorithm 1 access sets (0-based tx numbering here):
+	// tx1 W(a),W(b); tx2 W(d); tx3 W(a); tx4 W(c);
+	// tx5 R(a),W(b),R(c); tx6 W(c).
+	trackers[0].write(store, []byte("a"))
+	trackers[0].write(store, []byte("b"))
+	trackers[1].write(store, []byte("d"))
+	trackers[2].write(store, []byte("a"))
+	trackers[3].write(store, []byte("c"))
+	trackers[4].read(store, []byte("a"))
+	trackers[4].write(store, []byte("b"))
+	trackers[4].read(store, []byte("c"))
+	trackers[5].write(store, []byte("c"))
+
+	got, longest, chains := vegetaProposalOrderWithStats(trackers)
+	want := []int{0, 2, 4, 3, 5, 1} // tx1,tx3,tx5,tx4,tx6,tx2
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Figure-5 proposal=%v want=%v", got, want)
+	}
+	if longest != 3 || chains != 4 {
+		t.Fatalf("Figure-5 longest=%d chains=%d want 3,4", longest, chains)
 	}
 }
 
@@ -399,6 +433,24 @@ func TestNextVegetaBatchMatchesUpstreamRule2(t *testing.T) {
 		}
 	})
 
+	t.Run("same-pair raw plus war promotes to waw", func(t *testing.T) {
+		trackers := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+		// Earlier writes a and reads b; later reads a and writes b. There is no
+		// ordinary WAW, but Algorithm 1 promotes simultaneous RAW+WAR to WAW.
+		trackers[0].write(store, []byte("a"))
+		trackers[0].read(store, []byte("b"))
+		trackers[1].read(store, []byte("a"))
+		trackers[1].write(store, []byte("b"))
+		matrix, _ := buildDependencyMatrix([]int{0, 1}, trackers)
+		if got := matrix[1][0]; got != dependencyWAW {
+			t.Fatalf("RAW+WAR class=%d want promoted WAW=%d", got, dependencyWAW)
+		}
+		got := nextVegetaBatch(matrix, []bool{false, false})
+		if !reflect.DeepEqual(got, []int{0}) {
+			t.Fatalf("RAW+WAR promoted batch=%v want [0]", got)
+		}
+	})
+
 	t.Run("waw precedence matches upstream", func(t *testing.T) {
 		trackers := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
 		trackers[0].write(store, []byte("a"))
@@ -411,6 +463,48 @@ func TestNextVegetaBatchMatchesUpstreamRule2(t *testing.T) {
 			t.Fatalf("dependency class=%d want WAW precedence=%d", got, dependencyWAW)
 		}
 	})
+}
+
+func TestVegetaReadyStateMatchesReference(t *testing.T) {
+	rng := rand.New(rand.NewSource(0x564547455441))
+	classes := []dependencyKinds{0, dependencyWAW, dependencyRAW, dependencyWAR}
+	for trial := 0; trial < 10000; trial++ {
+		n := 1 + rng.Intn(32)
+		matrix := make([][]dependencyKinds, n)
+		for later := 0; later < n; later++ {
+			matrix[later] = make([]dependencyKinds, n)
+			for earlier := 0; earlier < later; earlier++ {
+				matrix[later][earlier] = classes[rng.Intn(len(classes))]
+			}
+		}
+		refDone := make([]bool, n)
+		stateDone := make([]bool, n)
+		state := newVegetaReadyState(matrix)
+		completed := 0
+		for completed < n {
+			want := nextVegetaBatch(matrix, refDone)
+			got := state.next(stateDone)
+			if len(got) != len(want) {
+				t.Fatalf("trial=%d completed=%d batch=%v want=%v", trial, completed, got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("trial=%d completed=%d batch=%v want=%v", trial, completed, got, want)
+				}
+			}
+			if len(got) == 0 {
+				t.Fatalf("trial=%d DAG stalled completed=%d/%d", trial, completed, n)
+			}
+			for _, pos := range want {
+				refDone[pos] = true
+			}
+			advanced := state.markDone(got, stateDone)
+			if advanced != len(got) {
+				t.Fatalf("trial=%d markDone advanced=%d want=%d", trial, advanced, len(got))
+			}
+			completed += advanced
+		}
+	}
 }
 
 func TestSnapshotSerializationReversesRawOnly(t *testing.T) {
@@ -528,29 +622,21 @@ func TestAriaFallbackRestoresConflictLostByHotChainReversal(t *testing.T) {
 	}
 }
 
-func TestVegetaAccessChangeAllowsUnknownReadWithoutWriter(t *testing.T) {
-	store := storeIDFromName("wasm")
-	pre := newAccessTracker(nil)
-	actual := newAccessTracker(nil)
-	actual.read(store, []byte("new-key"))
-	change := classifyVegetaAccessChange(pre, actual, buildVegetaUniverse([]*accessTracker{pre}))
-	if change.changed {
-		t.Fatal("previously unseen read with no speculative writer should not force re-execution")
-	}
-	if len(change.newReadIDs) != 1 {
-		t.Fatalf("new reads=%d want 1", len(change.newReadIDs))
-	}
-}
-
-func TestVegetaBatchDefersUnknownReadOfConcurrentUnknownWrite(t *testing.T) {
+func TestVegetaAlgorithm3Case1KnownNewKeyDefersFinal(t *testing.T) {
 	store := storeIDFromName("wasm")
 	pre := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
 	actual := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
-	actual[0].read(store, []byte("new-key"))
-	actual[1].write(store, []byte("new-key"))
-	deferred, immediate, accepted, err := vegetaValidateBatch(
+	// tx1 establishes k in all_keys during speculation. tx0 did not access k
+	// during speculation but newly reads it during replay: Algorithm 3 lines 5-8
+	// require final serial re-execution.
+	pre[1].read(store, []byte("k"))
+	actual[0].read(store, []byte("k"))
+	actual[1].read(store, []byte("k"))
+	matrix, _ := buildDependencyMatrix([]int{0, 1}, pre)
+	validation, err := vegetaValidateBatch(
 		[]int{0, 1},
 		map[int]int{0: 0, 1: 1},
+		matrix,
 		pre,
 		actual,
 		buildVegetaUniverse(pre),
@@ -558,17 +644,143 @@ func TestVegetaBatchDefersUnknownReadOfConcurrentUnknownWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(deferred) != 0 {
-		t.Fatalf("final deferred=%v; new-key reader should replay immediately, not at block end", deferred)
+	if _, ok := validation.deferred[0]; !ok {
+		t.Fatalf("deferred=%v; Algorithm-3 Case 1 must defer tx0", validation.deferred)
 	}
-	if _, ok := immediate[0]; !ok {
-		t.Fatalf("immediate=%v; new reader must replay after the batch", immediate)
+	if _, ok := validation.immediate[0]; ok {
+		t.Fatalf("immediate=%v; known-key change belongs to final TxsRe", validation.immediate)
 	}
-	if _, ok := immediate[1]; ok {
-		t.Fatalf("immediate=%v; write-only new-key transaction should remain accepted", immediate)
+}
+
+func TestVegetaAlgorithm3Case2UnknownReadWithoutWriterCommits(t *testing.T) {
+	store := storeIDFromName("wasm")
+	pre := []*accessTracker{newAccessTracker(nil)}
+	actual := []*accessTracker{newAccessTracker(nil)}
+	actual[0].read(store, []byte("new-key"))
+	matrix, _ := buildDependencyMatrix([]int{0}, pre)
+	validation, err := vegetaValidateBatch(
+		[]int{0},
+		map[int]int{0: 0},
+		matrix,
+		pre,
+		actual,
+		buildVegetaUniverse(pre),
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(accepted) != 1 || accepted[0] != 1 {
-		t.Fatalf("accepted=%v want [1]", accepted)
+	if len(validation.deferred) != 0 || len(validation.immediate) != 0 {
+		t.Fatalf("deferred=%v immediate=%v; unknown read with no new writer must commit", validation.deferred, validation.immediate)
+	}
+	if !reflect.DeepEqual(validation.acceptedOrder, []int{0}) {
+		t.Fatalf("accepted=%v want [0]", validation.acceptedOrder)
+	}
+}
+
+func TestVegetaAlgorithm3Case2UnknownReadOfNewWriteReplaysImmediately(t *testing.T) {
+	store := storeIDFromName("wasm")
+	pre := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+	actual := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+	actual[0].read(store, []byte("new-key"))
+	actual[1].write(store, []byte("new-key"))
+	matrix, _ := buildDependencyMatrix([]int{0, 1}, pre)
+	validation, err := vegetaValidateBatch(
+		[]int{0, 1},
+		map[int]int{0: 0, 1: 1},
+		matrix,
+		pre,
+		actual,
+		buildVegetaUniverse(pre),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(validation.deferred) != 0 {
+		t.Fatalf("final deferred=%v; new-key reader should replay immediately, not at block end", validation.deferred)
+	}
+	if _, ok := validation.immediate[0]; !ok {
+		t.Fatalf("immediate=%v; new reader must replay after the batch", validation.immediate)
+	}
+	if _, ok := validation.immediate[1]; ok {
+		t.Fatalf("immediate=%v; write-only new-key transaction should remain accepted", validation.immediate)
+	}
+	if !reflect.DeepEqual(validation.acceptedOrder, []int{1}) {
+		t.Fatalf("accepted=%v want [1]", validation.acceptedOrder)
+	}
+}
+
+func TestVegetaAlgorithm3Case3UnknownWriteAloneCommits(t *testing.T) {
+	store := storeIDFromName("wasm")
+	pre := []*accessTracker{newAccessTracker(nil)}
+	actual := []*accessTracker{newAccessTracker(nil)}
+	actual[0].write(store, []byte("new-key"))
+	matrix, _ := buildDependencyMatrix([]int{0}, pre)
+	validation, err := vegetaValidateBatch(
+		[]int{0},
+		map[int]int{0: 0},
+		matrix,
+		pre,
+		actual,
+		buildVegetaUniverse(pre),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(validation.deferred) != 0 || len(validation.immediate) != 0 {
+		t.Fatalf("deferred=%v immediate=%v; Algorithm-3 Case 3 writer must commit without replay", validation.deferred, validation.immediate)
+	}
+	if !reflect.DeepEqual(validation.acceptedOrder, []int{0}) {
+		t.Fatalf("accepted=%v want [0]", validation.acceptedOrder)
+	}
+}
+
+func TestVegetaWasmdRangeValidationReplaysUnknownReaderOfNewWrite(t *testing.T) {
+	store := storeIDFromName("wasm")
+	pre := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+	actual := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+	actual[0].readRange(store, []byte("a"), []byte("z"))
+	actual[1].write(store, []byte("m"))
+	matrix, _ := buildDependencyMatrix([]int{0, 1}, pre)
+	validation, err := vegetaValidateBatch(
+		[]int{0, 1},
+		map[int]int{0: 0, 1: 1},
+		matrix,
+		pre,
+		actual,
+		buildVegetaUniverse(pre),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := validation.immediate[0]; !ok {
+		t.Fatalf("immediate=%v; new range reader must replay when another tx newly writes inside its range", validation.immediate)
+	}
+}
+
+func TestVegetaWasmdRangeValidationDefersRangeCoveringSpeculativePoint(t *testing.T) {
+	store := storeIDFromName("wasm")
+	pre := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+	actual := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil)}
+	// Raw speculative point locations are retained by the real Vegeta pre-pass;
+	// enable that behavior explicitly in this unit test.
+	pre[1].retainReadLocations = true
+	pre[1].read(store, []byte("m"))
+	actual[0].readRange(store, []byte("a"), []byte("z"))
+	actual[1].read(store, []byte("m"))
+	matrix, _ := buildDependencyMatrix([]int{0, 1}, pre)
+	validation, err := vegetaValidateBatch(
+		[]int{0, 1},
+		map[int]int{0: 0, 1: 1},
+		matrix,
+		pre,
+		actual,
+		buildVegetaUniverse(pre),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := validation.deferred[0]; !ok {
+		t.Fatalf("deferred=%v; new range covering a speculative point key must conservatively defer", validation.deferred)
 	}
 }
 

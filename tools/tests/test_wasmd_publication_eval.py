@@ -11,7 +11,7 @@ SUMMARIZER = ROOT / "evaluation" / "wasmd" / "summarize.py"
 
 
 class WasmdPublicationEvalTests(unittest.TestCase):
-    def test_fixed_campaign_consensus_window_and_six_strategy_throughput(self):
+    def test_vegeta_paper_replay_throughput_and_secondary_consensus_model(self):
         strategies = [
             "cosmos-wasmd-direct-serial",
             "cosmos-wasmd-symbgraph-rust-exact-trace-oracle",
@@ -84,11 +84,13 @@ class WasmdPublicationEvalTests(unittest.TestCase):
             oracle = by[("cosmos-wasmd-symbgraph-rust-exact-trace-oracle", 4)]
             vegeta = by[("cosmos-wasmd-vegeta", 4)]
             acg = by[("cosmos-wasmd-symbgraph-rust", 4)]
-            # Every strategy is charged the same two 40 ns consensus windows.
-            # Serial: 20 tx / (2*40 + 200) ns. Vegeta: 20 tx / (2*40 + 20) ns.
-            self.assertAlmostEqual(vegeta["throughput_speedup"], 280 / 100)
-            # ACG: 20 tx / (2*40 + 10) ns versus the same fixed-window serial baseline.
-            self.assertAlmostEqual(acg["throughput_speedup"], 280 / 90)
+            # Primary throughput follows Vegeta Figure 10: tx / replay (post) time.
+            # Serial replay is 200 ns; Vegeta is 20 ns and ACG is 10 ns.
+            self.assertAlmostEqual(vegeta["throughput_speedup"], 10.0)
+            self.assertAlmostEqual(acg["throughput_speedup"], 20.0)
+            # The older fixed-C model remains available only as a secondary metric.
+            self.assertAlmostEqual(vegeta["consensus_model_speedup"], 280 / 100)
+            self.assertAlmostEqual(acg["consensus_model_speedup"], 280 / 90)
             self.assertAlmostEqual(acg["post_x"], 20.0)
             self.assertAlmostEqual(serial["post_x"], 1.0)
             self.assertAlmostEqual(oracle["structural_parallelism"], 5.0)
@@ -96,9 +98,10 @@ class WasmdPublicationEvalTests(unittest.TestCase):
             self.assertEqual(oracle["source_trace_missing"], 1.0)
             self.assertIn("Rust-ACG perfect-access headroom", (out / "summary.txt").read_text())
             self.assertEqual(
-                obj["throughput_definition"]["all_strategies"],
-                "transactions / (blocks * consensus_window + sum(post_consensus))",
+                obj["throughput_definition"]["primary_all_strategies"],
+                "transactions / sum(post_consensus_nanos)",
             )
+            self.assertIn("Vegeta NSDI'25", obj["throughput_definition"]["primary_reference"])
 
     def test_summarizer_rejects_partial_strategy_campaign(self):
         strategies = [
@@ -259,8 +262,16 @@ class WasmdPublicationEvalTests(unittest.TestCase):
         self.assertIn("vegetaProposalOrder", runner)
         self.assertIn("nextVegetaBatch", runner)
         self.assertIn("vegetaValidateBatch", runner)
-        self.assertIn('SerialReferenceScope: "aria-derived-serialization"', main)
-        self.assertIn('SerialReferenceScope: "vegeta-derived-serialization"', main)
+        self.assertIn("classifyVegetaPointChange", runner)
+        self.assertIn("classifyVegetaRangeChange", runner)
+        self.assertIn("serializationOrderFromVegetaMatrix", runner)
+        self.assertNotIn("dependencyBetween(actualTrackers[earlier], actualTrackers[later])", runner)
+        self.assertIn("VegetaAlg3ValidationNanos", main)
+        self.assertIn("VegetaHistoricalFallbackNanos", main)
+        self.assertIn('SerialReferenceScope: "historical-block-order"', main)
+        self.assertIn('SerialReferenceScope: "vegeta-derived-serialization+historical-state-gate"', main)
+        self.assertRegex(main, r'VegetaCanonicalFallback:\s+canonicalFallback')
+        self.assertIn('vegetaSerialNanos = canonicalReplayNanos', main)
 
 
 if __name__ == "__main__":

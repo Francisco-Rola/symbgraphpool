@@ -9,8 +9,10 @@ mint.  It never uses debug_trace, SLOAD/SSTORE keys, or historical storage slots
 
 Safety rules are fail-closed:
 * source-failed transactions and caught internal revert scopes do not affect committed lifecycle;
-* translated cw721-drop mints are reconciled to exact public event token ids before recovery;
-* translated drop quantity/recipient must exactly match the public mint events in every reconciled tx;
+* translated cw721-drop mints on affected instances are reconciled to exact public event token ids;
+* translated drop quantity/recipient must exactly match the public mint events in its source tx;
+* public mint transactions without a translated mint_drop are ignored unless they contain a required
+  missing-token recovery event;
 * every missing token must have exactly one earlier committed zero-address Transfer mint event;
 * a mint event may not recreate a token that was already present in predecessor-state priming;
 * the rewritten 5,000-block plan is simulated again and must have zero committed NFT gaps.
@@ -382,19 +384,28 @@ def rewrite_plan(plan: Path, manifest_path: Path, manifest: dict, scan: dict, ev
     for rows in all_events_by_tx.values():
         rows.sort(key=lambda x: x["log_index"])
 
-    # Mixed instances are not repaired by adding a second synthetic mint stream.  Instead every
-    # translated mint_drop on those instances is rebound to the exact public token ids, preserving
-    # its quantity, recipient, stage, nonce and minter bookkeeping.  Public events on non-overlap
-    # instances remain effect-recovery SeedMint/Mint calls.
-    non_overlap_events_by_tx: dict[str, list[dict]] = defaultdict(list)
+    # Public logs are an oracle for exact token allocation, not a request to translate every mint
+    # on an affected collection.  Reconcile every committed translated mint_drop on an overlap
+    # instance.  A public mint tx with no translated mint_drop is only materialized when that exact
+    # event is required to close one of the lifecycle gaps discovered by the offline scan.
+    required_event_keys = {
+        (event["tx_hash"], event["instance_id"], int(event["token_id"]), int(event["log_index"]))
+        for event in required.values()
+    }
+    required_events_by_tx: dict[str, list[dict]] = defaultdict(list)
     for event in events:
-        if event["instance_id"] not in overlap:
-            non_overlap_events_by_tx[event["tx_hash"]].append(event)
+        key = (event["tx_hash"], event["instance_id"], int(event["token_id"]), int(event["log_index"]))
+        if key in required_event_keys:
+            required_events_by_tx[event["tx_hash"]].append(event)
+    for rows in required_events_by_tx.values():
+        rows.sort(key=lambda x: x["log_index"])
 
     tmp = plan.with_suffix(plan.suffix + ".lifecycle-repair.tmp")
     inserted = exactified_calls = exactified_tokens = 0
     found_event_txs: set[str] = set()
+    found_required_event_keys: set[tuple[str, str, int, int]] = set()
     exactified_tx_iids: set[tuple[str, str]] = set()
+    translated_drop_tx_iids: set[tuple[str, str]] = set()
     with plan.open(encoding="utf-8") as src, tmp.open("w", encoding="utf-8") as dst:
         for line in src:
             if not line.strip():
@@ -402,18 +413,38 @@ def rewrite_plan(plan: Path, manifest_path: Path, manifest: dict, scan: dict, ev
             block = json.loads(line)
             for tx in block.get("transactions") or []:
                 tx_hash = str(tx.get("tx_hash") or "").lower()
-                tx_events = all_events_by_tx.get(tx_hash)
-                if not tx_events:
-                    continue
-                if bool(tx.get("source_failed")):
-                    tmp.unlink(missing_ok=True)
-                    raise RuntimeError(f"committed ERC721 mint log belongs to source_failed tx {tx_hash}")
-                found_event_txs.add(tx_hash)
                 calls = tx.setdefault("calls", [])
 
-                tx_iids = sorted({event["instance_id"] for event in tx_events if event["instance_id"] in overlap})
-                for iid in tx_iids:
-                    rows = events_by_tx_iid[(tx_hash, iid)]
+                # Identify committed translated MintDrop calls from the plan itself.  This is the
+                # transaction-level distinction the previous instance-level overlap logic lacked.
+                drop_iids: set[str] = set()
+                if not bool(tx.get("source_failed")):
+                    for call in calls:
+                        if call.get("source_revert_scope_action_id") is not None:
+                            continue
+                        iid = str(call.get("instance_id") or "")
+                        if iid not in overlap:
+                            continue
+                        body = (call.get("msg") or {}).get("mint_drop")
+                        if isinstance(body, dict):
+                            drop_iids.add(iid)
+                            translated_drop_tx_iids.add((tx_hash, iid))
+
+                tx_events = all_events_by_tx.get(tx_hash, [])
+                if tx_events:
+                    if bool(tx.get("source_failed")):
+                        tmp.unlink(missing_ok=True)
+                        raise RuntimeError(f"committed ERC721 mint log belongs to source_failed tx {tx_hash}")
+                    found_event_txs.add(tx_hash)
+
+                for iid in sorted(drop_iids):
+                    rows = events_by_tx_iid.get((tx_hash, iid), [])
+                    if not rows:
+                        tmp.unlink(missing_ok=True)
+                        raise RuntimeError(
+                            "committed translated mint_drop on affected instance has no public "
+                            f"Transfer(from=0) events: instance={iid} tx={tx_hash}"
+                        )
                     c, n = exactify_drop_calls_for_tx(calls, iid, rows, tx_hash)
                     exactified_calls += c
                     exactified_tokens += n
@@ -427,15 +458,26 @@ def rewrite_plan(plan: Path, manifest_path: Path, manifest: dict, scan: dict, ev
                     )
                     for c in calls if c.get("source_effect_recovery") == "erc721-transfer-mint-log"
                 }
-                for event in non_overlap_events_by_tx.get(tx_hash, []):
+                for event in required_events_by_tx.get(tx_hash, []):
+                    event_key = (
+                        event["tx_hash"], event["instance_id"], int(event["token_id"]), int(event["log_index"])
+                    )
+                    found_required_event_keys.add(event_key)
+
+                    # If this source tx already has a translated MintDrop for the same instance,
+                    # exactification above materializes the event and preserves mint bookkeeping.
+                    if event["instance_id"] in drop_iids:
+                        continue
+
                     key = (event["instance_id"], int(event["token_id"]))
                     if key in existing_recovery:
                         continue
                     additions.append(recovery_call(family[event["instance_id"]], event["instance_id"], event))
                     inserted += 1
                 if additions:
-                    # Non-overlap instances have no translated in-window mint stream, so placing
-                    # exact effect-recovery mints first cannot perturb a MintDrop next-id allocator.
+                    # These are exact missing source effects.  SeedMint advances next_token_id, but
+                    # every translated MintDrop on an affected overlap instance is exactified above,
+                    # so later token allocation does not depend on that synthetic sequence.
                     tx["calls"] = additions + calls
             dst.write(json.dumps(block, separators=(",", ":")) + "\n")
 
@@ -444,16 +486,102 @@ def rewrite_plan(plan: Path, manifest_path: Path, manifest: dict, scan: dict, ev
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"mint-event transactions missing from execution plan: {missing_txs[:20]}")
 
-    # Every public mint transaction on a mixed instance must have been reconciled.  This makes the
-    # operation fail closed if an affected contract has a second, untranslated mint mechanism.
-    expected_mixed = set(events_by_tx_iid) & {(txh, iid) for txh, iid in events_by_tx_iid if iid in overlap}
-    missing_mixed = sorted(expected_mixed - exactified_tx_iids)
-    if missing_mixed:
+    missing_required = sorted(required_event_keys - found_required_event_keys)
+    if missing_required:
         tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"unreconciled mixed mint transactions remain: {missing_mixed[:20]}")
+        raise RuntimeError(f"required mint recovery events missing from execution plan: {missing_required[:20]}")
 
-    # Validate the prospective plan before replacing the user's cached execution plan.
+    missing_exactified = sorted(translated_drop_tx_iids - exactified_tx_iids)
+    if missing_exactified:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"unreconciled translated mint_drop transactions remain: {missing_exactified[:20]}")
+
+    # Exactifying a translated mint_drop can expose a token that the old synthetic sequential
+    # allocator happened to create by accident.  Such a token was not visible in the original gap
+    # set, so it could not have been part of `required` above.  Re-scan once after exactification and
+    # initial recovery, then materialize any newly exposed source mint effects from the *same* public
+    # log set.  No additional RPC is needed.
     after = scan_plan(tmp, manifest)
+    supplemental_required: dict[tuple[str, int], dict] = {}
+    if after["gaps"]:
+        supplemental_required = validate_recovery(after, events)
+        print(
+            "post-exactification lifecycle closure exposed supplemental gaps: "
+            f"gaps={len(after['gaps'])} recovery_events={len(supplemental_required)}",
+            flush=True,
+        )
+
+        supplemental_by_tx: dict[str, list[dict]] = defaultdict(list)
+        for event in supplemental_required.values():
+            supplemental_by_tx[event["tx_hash"]].append(event)
+        for rows in supplemental_by_tx.values():
+            rows.sort(key=lambda x: x["log_index"])
+
+        second = tmp.with_suffix(tmp.suffix + ".supplemental")
+        found_supplemental: set[tuple[str, int]] = set()
+        with tmp.open(encoding="utf-8") as src, second.open("w", encoding="utf-8") as dst:
+            for line in src:
+                if not line.strip():
+                    continue
+                block = json.loads(line)
+                for tx in block.get("transactions") or []:
+                    tx_hash = str(tx.get("tx_hash") or "").lower()
+                    rows = supplemental_by_tx.get(tx_hash, [])
+                    if not rows:
+                        continue
+                    if bool(tx.get("source_failed")):
+                        second.unlink(missing_ok=True)
+                        tmp.unlink(missing_ok=True)
+                        raise RuntimeError(f"supplemental ERC721 mint recovery belongs to source_failed tx {tx_hash}")
+
+                    calls = tx.setdefault("calls", [])
+                    additions = []
+                    existing_recovery = {
+                        (
+                            str(c.get("instance_id") or ""),
+                            int(((c.get("msg") or {}).get("seed_mint") or (c.get("msg") or {}).get("mint") or {}).get("token_id", -1)),
+                        )
+                        for c in calls if c.get("source_effect_recovery") == "erc721-transfer-mint-log"
+                    }
+                    for event in rows:
+                        key = (event["instance_id"], int(event["token_id"]))
+                        found_supplemental.add(key)
+
+                        # A token emitted by a translated MintDrop transaction should already exist
+                        # after exactification.  If it does not, adding SeedMint would hide a genuine
+                        # reconciliation bug, so keep this case fail-closed.
+                        translated_here = any(
+                            call.get("source_revert_scope_action_id") is None
+                            and str(call.get("instance_id") or "") == event["instance_id"]
+                            and isinstance((call.get("msg") or {}).get("mint_drop"), dict)
+                            for call in calls
+                        )
+                        if translated_here:
+                            second.unlink(missing_ok=True)
+                            tmp.unlink(missing_ok=True)
+                            raise RuntimeError(
+                                "post-exactification lifecycle gap points at a translated mint_drop tx; "
+                                "exact token reconciliation should already have materialized it: "
+                                f"instance={event['instance_id']} token_id={event['token_id']} tx={tx_hash}"
+                            )
+                        if key in existing_recovery:
+                            continue
+                        additions.append(recovery_call(family[event["instance_id"]], event["instance_id"], event))
+                        inserted += 1
+                    if additions:
+                        tx["calls"] = additions + calls
+                dst.write(json.dumps(block, separators=(",", ":")) + "\n")
+
+        missing_supplemental = sorted(set(supplemental_required) - found_supplemental)
+        if missing_supplemental:
+            second.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"supplemental mint recovery transactions missing from execution plan: {missing_supplemental[:20]}"
+            )
+        second.replace(tmp)
+        after = scan_plan(tmp, manifest)
+
     if after["gaps"]:
         sample = list(after["gaps"].values())[:10]
         tmp.unlink(missing_ok=True)
@@ -479,7 +607,10 @@ def rewrite_plan(plan: Path, manifest_path: Path, manifest: dict, scan: dict, ev
         "mode": "public-erc721-transfer-from-zero",
         "affected_instances": scan["affected_instances"],
         "translated_mint_overlap_instances": sorted(overlap),
-        "recovered_mint_events": len(events),
+        "observed_public_mint_events": len(events),
+        "required_gap_mint_events": len(required),
+        "supplemental_post_exactification_mint_events": len(supplemental_required),
+        "total_required_mint_events": len(set(required) | set(supplemental_required)),
         "injected_calls": inserted,
         "exactified_mint_drop_calls": exactified_calls,
         "exactified_mint_drop_tokens": exactified_tokens,
@@ -487,8 +618,9 @@ def rewrite_plan(plan: Path, manifest_path: Path, manifest: dict, scan: dict, ev
         "concrete_storage_keys_used": False,
         "debug_trace_used": False,
         "policy": (
-            "non-overlap instances receive exact event effect-recovery mints; overlap cw721-drop "
-            "instances retain mint_drop semantics but use exact public event token_ids"
+            "translated mint_drop transactions on overlap cw721-drop instances retain mint_drop semantics "
+            "with exact public token_ids; untranslated public mint transactions are materialized only for "
+            "events required to close an observed committed lifecycle gap"
         ),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -497,6 +629,7 @@ def rewrite_plan(plan: Path, manifest_path: Path, manifest: dict, scan: dict, ev
         "exactified_mint_drop_calls": exactified_calls,
         "exactified_mint_drop_tokens": exactified_tokens,
         "mint_event_transactions": len(all_events_by_tx),
+        "supplemental_post_exactification_mint_events": len(supplemental_required),
         "overlap_instances": sorted(overlap),
     }
 
@@ -534,6 +667,15 @@ def main() -> int:
     ap.add_argument("--report", type=Path, required=True)
     ap.add_argument("--rpc-url", default=os.environ.get("ETH_RPC_URL"))
     ap.add_argument("--chunk-blocks", type=int, default=int(os.environ.get("VEGETA_S1_LIFECYCLE_LOG_CHUNK_BLOCKS", "250")))
+    ap.add_argument(
+        "--reconcile-instance",
+        action="append",
+        default=[],
+        help=(
+            "also reconcile every committed cw721-drop mint_drop on this instance against public "
+            "Transfer(from=0) logs, even when the existence-only lifecycle scan has no gap; repeatable"
+        ),
+    )
     ns = ap.parse_args()
     if ns.chunk_blocks <= 0:
         raise SystemExit("--chunk-blocks must be positive")
@@ -545,7 +687,31 @@ def main() -> int:
     if scan["blocks"] != int(manifest.get("blocks", -1)) or scan["transactions"] != int(manifest.get("transactions", -1)):
         raise SystemExit("execution plan domain disagrees with manifest")
 
-    if not scan["gaps"]:
+    forced_instances = {str(value) for value in ns.reconcile_instance if str(value)}
+    if forced_instances:
+        known_families = {
+            str(row.get("instance_id") or ""): str(row.get("family") or "")
+            for row in manifest.get("instances") or []
+        }
+        unknown = sorted(iid for iid in forced_instances if iid not in known_families)
+        wrong_family = sorted(
+            iid for iid in forced_instances if known_families.get(iid) not in {None, "cw721-drop"}
+        )
+        no_translated_mints = sorted(
+            iid for iid in forced_instances if iid not in set(scan["translated_mint_instances"])
+        )
+        if unknown:
+            raise SystemExit(f"--reconcile-instance not present in manifest: {unknown}")
+        if wrong_family:
+            raise SystemExit(f"--reconcile-instance is not cw721-drop: {wrong_family}")
+        if no_translated_mints:
+            raise SystemExit(
+                "--reconcile-instance has no committed translated mint_drop calls to exactify: "
+                f"{no_translated_mints}"
+            )
+        scan["affected_instances"] = sorted(set(scan["affected_instances"]) | forced_instances)
+
+    if not scan["gaps"] and not forced_instances:
         data = {
             "schema_version": 1,
             "status": "already-complete",
@@ -565,15 +731,20 @@ def main() -> int:
 
     if not ns.rpc_url:
         sample = list(scan["gaps"].values())[:5]
+        reason = (
+            "committed NFT lifecycle gaps require" if scan["gaps"]
+            else "explicit cw721-drop mint reconciliation requires"
+        )
         raise SystemExit(
-            "committed NFT lifecycle gaps require one cheap eth_getLogs recovery pass, but ETH_RPC_URL is unset. "
+            f"{reason} one cheap eth_getLogs recovery pass, but ETH_RPC_URL is unset. "
             f"affected_instances={scan['affected_instances']} sample={json.dumps(sample, sort_keys=True)}"
         )
 
     iid_by_address = {iid_address(iid): iid for iid in scan["affected_instances"]}
     print(
         f"recovering S1 NFT lifecycle via public mint logs: gaps={len(scan['gaps'])} "
-        f"instances={len(iid_by_address)} blocks={scan['first_block']}..{scan['last_block']}",
+        f"instances={len(iid_by_address)} forced_reconcile_instances={len(forced_instances)} "
+        f"blocks={scan['first_block']}..{scan['last_block']}",
         flush=True,
     )
     client = RpcClient(ns.rpc_url, timeout=60, retries=5, backoff=1.0)
@@ -597,11 +768,13 @@ def main() -> int:
         "transactions": scan["transactions"],
         "initial_missing_tokens": len(scan["gaps"]),
         "affected_instances": scan["affected_instances"],
+        "forced_reconcile_instances": sorted(forced_instances),
         "public_mint_events_recovered": len(events),
         "mint_event_transactions": rewrite["mint_event_transactions"],
         "injected_calls": rewrite["injected_calls"],
         "exactified_mint_drop_calls": rewrite["exactified_mint_drop_calls"],
         "exactified_mint_drop_tokens": rewrite["exactified_mint_drop_tokens"],
+        "supplemental_post_exactification_mint_events": rewrite["supplemental_post_exactification_mint_events"],
         "translated_mint_overlap_instances": rewrite["overlap_instances"],
         "remaining_missing_tokens": 0,
         "first_missing_examples": list(scan["gaps"].values())[:20],
@@ -614,9 +787,10 @@ def main() -> int:
     }
     write_report(ns.report, data)
     print(
-        f"PASS: repaired full-domain committed NFT lifecycle from public mint logs: "
-        f"instances={len(scan['affected_instances'])} events={len(events)} "
-        f"exactified_calls={rewrite['exactified_mint_drop_calls']} injected={rewrite['injected_calls']} gaps=0",
+        f"PASS: repaired/reconciled full-domain committed NFT lifecycle from public mint logs: "
+        f"instances={len(scan['affected_instances'])} forced={len(forced_instances)} events={len(events)} "
+        f"exactified_calls={rewrite['exactified_mint_drop_calls']} injected={rewrite['injected_calls']} "
+        f"supplemental={rewrite['supplemental_post_exactification_mint_events']} gaps=0",
         flush=True,
     )
     return 0
