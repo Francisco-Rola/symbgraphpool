@@ -1,20 +1,11 @@
 # Contributing
 
-1. Keep analyzer-specific representations outside `acg-core`.
-2. Never persist dense `ProfileId` values as global identity.
-3. Preserve unknown analyzer fields with forward-compatible serde models where safe.
-4. Add fixtures/normalization tests for supported analyzer schema variants.
-5. Keep online graph loading deterministic and free of source parsing or symbolic analysis.
-6. Keep transaction scheduling in Rust `acg-*`; Go/Wasmd should execute the emitted plan and enforce
-   concrete correctness rather than reimplement symbolic scheduling.
-7. Add or update unit tests for graph compaction, scheduling, feedback, reconciliation and FFI
-   semantics when changing those paths.
+Keep symbolic scheduling policy in Rust and concrete execution/correctness enforcement in the runtime/Wasmd layer. Preserve stable profile identities, deterministic graph construction, conservative Unknown semantics, and serial-equivalent commit behavior. Changes to graph construction, feedback, scheduling, MVCC visibility or reconciliation must include focused tests.
 
-Before accepting a patch, run:
+Run the repository gate before committing:
 
 ```bash
 bash scripts/test-all.sh
 ```
 
-Long performance campaigns are not part of the normal patch gate. Use the current controlled Wasmd
-evaluator in `evaluation/wasmd/README.md`; historical one-off wrappers are under `tools/legacy-scripts/`.
+Performance campaigns are not part of the patch gate. Use only the canonical entry points documented in `evaluation/README.md`.

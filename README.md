@@ -1,47 +1,26 @@
 # Adaptive Conflict Graph
 
-Adaptive Conflict Graph (ACG) is a Rust/CosmWasm research runtime for conflict-aware speculative
-transaction execution. Offline symbolic entrypoint profiles build a persistent conflict model;
-blocks instantiate an atomic transaction candidate graph; runtime feedback refines conflict risk;
-Rust emits a reduced dependency-ready DAG; Wasmd/WasmVM executes speculatively; canonical validation
-and selective replay preserve serial-equivalent state.
+Adaptive Conflict Graph (ACG) is a Rust/CosmWasm research runtime for speculative smart-contract execution across the consensus boundary. Offline symbolic profiles predict conflicts, Rust builds a compact risk-aware dependency plan, Wasmd/WasmVM preexecutes dependency-ready transactions, and concrete reconciliation plus selective replay preserve serial-equivalent state.
 
-## Maintained commands
-
-Run the complete repository validation gate:
+## Start here
 
 ```bash
 bash scripts/test-all.sh
+PAPER_EVAL_PROFILE=debug bash evaluation/experiments/run-all.sh
 ```
 
-Run the controlled Wasmd comparison locally (2/4/6 workers on a six-core host):
-
-```bash
-bash scripts/eval-wasmd-debug.sh
-```
-
-Run the publication-style single-machine campaign from a clean committed tree:
-
-```bash
-bash scripts/eval-wasmd-paper.sh
-```
-
-The maintained comparison is Serial vs Cosmos BlockSTM vs AriaFB-style vs Vegeta-style vs Rust-ACG,
-all on the same Wasmd/WasmVM/Cosmos SDK state machine. See `evaluation/wasmd/README.md` for metric
-definitions and the publication roadmap.
+The paper artifact, workload preparation, metrics and figure plan live in [`evaluation/README.md`](evaluation/README.md) and [`evaluation/PAPER_PLAN.md`](evaluation/PAPER_PLAN.md). Publication entry points are only under `evaluation/experiments/`; historical preparation helpers under `tools/legacy-scripts/` are internal dependencies, not experiment interfaces.
 
 ## Repository map
 
 ```text
-crates/       symbolic profiles, predicates, candidate graph, adaptive feedback and scheduler
-runtime/      CosmWasm runtime/executors, MVCC, reconciliation, FFI and benchmark harnesses
-benchmarks/   contracts, Wasmd comparison machinery and symbolic profile corpus
-evaluation/   maintained experiment definitions and publication methodology
-tools/        internal data-preparation, validation and summarization utilities
-scripts/      small set of maintained user-facing entrypoints
-tools/legacy-scripts/ historical campaign wrappers retained only for reproducibility
-docs/         architecture, implementation summary and phase history
-research/     quarantined/archived research experiments
+crates/       symbolic profiles, candidate graph, adaptive feedback and scheduling
+runtime/      speculative execution, MVCC, reconciliation and Rust/Go bridge
+benchmarks/   CosmWasm contracts, Wasmd evaluator and prepared symbolic profiles
+evaluation/   canonical workloads, experiments, plotting and paper plan
+tools/        preparation, validation and summarization utilities
+scripts/      repository-wide validation only
+docs/         current architecture and implementation summary
 ```
 
-Start with `docs/implementation-summary.md` for the current end-to-end design.
+See [`docs/implementation-summary.md`](docs/implementation-summary.md) for the current system design.

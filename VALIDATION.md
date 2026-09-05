@@ -1,22 +1,11 @@
 # Validation
 
-The canonical repository gate is:
+The repository correctness gate is:
 
 ```bash
 bash scripts/test-all.sh
 ```
 
-It performs non-mutating Rust formatting checks, Cargo unit/integration tests and doctests for the
-core/runtime/benchmark workspaces, Clippy with warnings denied, Python tooling tests, Cosmos SDK
-BlockSTM Go tests, and Wasmd Go tests both with and without the Rust ACG FFI bridge. It also checks
-shell/Python syntax and `git diff --check`.
+It covers Rust formatting/tests/Clippy, Python tooling, Go scheduler tests, the Rust ACG FFI bridge, and shell/Python syntax checks.
 
-Performance evaluation is intentionally separate from the unit-test gate:
-
-```bash
-bash scripts/eval-wasmd-debug.sh
-bash scripts/eval-wasmd-paper.sh
-```
-
-Publication runs should use a clean frozen commit and preserve `records.jsonl`, `environment.txt`,
-compute-weight metadata, summary CSV/JSON/text and the records SHA-256 file.
+Paper experiments are intentionally separate. Run them from a frozen commit via `evaluation/experiments/`; preserve raw JSONL, workload manifests, evaluator/calibration metadata and summarized CSV/JSON with each result directory. See `evaluation/README.md`.

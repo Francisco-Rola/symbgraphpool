@@ -1597,7 +1597,7 @@ class EvaluationConfigTests(unittest.TestCase):
         self.assertEqual(set(semantic_components), {"ethereum_address_storage_slot"})
 
     def test_seven_strategy_grid_expands_to_three_matched_samples(self):
-        grid = ROOT / "evaluation" / "vegeta" / "s3-seven-strategy-smoke.grid.json"
+        grid = ROOT / "tools" / "tests" / "fixtures" / "vegeta" / "s3-seven-strategy-smoke.grid.json"
         generator = ROOT / "tools" / "internal" / "generate-manifest-matrix.py"
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = Path(tmp) / "manifest.json"

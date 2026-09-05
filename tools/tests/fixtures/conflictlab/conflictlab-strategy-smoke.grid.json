@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "physical_core_limit": 6,
+  "record_schema_version": 3,
+  "policy_file": "../../../../evaluation/policies/release-tuning.json",
+  "base_run": {
+    "workload": "conflictlab",
+    "parameters": {
+      "execution_backend": "wasm",
+      "vm_instance_lifecycle": "reuse",
+      "vm_gas_limit": "18446744073709551615",
+      "prediction_quality": "bucketed",
+      "prediction_buckets": "16",
+      "symbolic_granularity": "fine",
+      "prediction_fault_mode": "none",
+      "prediction_fault_rate_bps": "0",
+      "operation_mix": "credit",
+      "consensus_cutoff_ms": "5000",
+      "consensus_divergence": "identical",
+      "sim.admission_tps": "25000",
+      "sim.block_interval_ms": "2000",
+      "sim.block_size": "256",
+      "sim.mempool_policy": "fifo",
+      "transactions": "256",
+      "accounts": "256",
+      "complexity": "medium",
+      "complexity_mix": "homogeneous",
+      "work_iterations": "131072",
+      "storage_rounds": "3",
+      "payload_bytes": "512",
+      "warmup_blocks": "4",
+      "postchange_warmup_blocks": "0",
+      "acg.compact_equivalence_groups": "true",
+      "acg.soft_threshold": "0.20",
+      "acg.hard_threshold": "0.95",
+      "acg.risk_budget": "0.90",
+      "acg.softening_min_confidence": "0.20",
+      "acg.feedback_retention_factor": "0.99",
+      "acg.feedback_confidence_scale": "20.0",
+      "acg.candidate_miss_verification_weight_threshold": "32.0",
+      "acg.serial_bypass_enabled": "false",
+      "acg.regime_change_enabled": "false"
+    }
+  },
+  "order_seed": 2026081801,
+  "experiment_id": "conflictlab-strategy-smoke",
+  "matrix": {
+    "modes": [
+      "serial",
+      "aria-fb",
+      "vegeta",
+      "exact-access",
+      "static",
+      "probability-only",
+      "cost-aware"
+    ],
+    "workers": [
+      6
+    ],
+    "seeds": [
+      11,
+      47,
+      101
+    ],
+    "cases": [
+      {
+        "parameters": {
+          "contention": "0pct",
+          "hot_account_probability_bps": "0"
+        }
+      },
+      {
+        "parameters": {
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500"
+        }
+      },
+      {
+        "parameters": {
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500"
+        }
+      }
+    ]
+  }
+}

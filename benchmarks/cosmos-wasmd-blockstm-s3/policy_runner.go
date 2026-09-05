@@ -17,40 +17,54 @@ import (
 // policyRunStats records concrete strategy work. Attempts counts executions in the
 // measured phase; Reexecutions counts executions beyond each strategy's initial batch.
 type policyRunStats struct {
-	Attempts                        uint64
-	Reexecutions                    uint64
-	Speculated                      uint64
-	Reused                          uint64
-	Replayed                        uint64
-	PreConsensusNanos               uint64
-	PostConsensusNanos              uint64
-	ValidationNanos                 uint64
-	ReplayExecutionNanos            uint64
-	ConflictAnalysisNanos           uint64
-	DiscoveredConflicts             uint64
-	ForwardFallbacks                uint64
-	SafetyReplays                   uint64
-	SnapshotBuildNanos              uint64
-	SnapshotPointHits               uint64
-	SnapshotPointMisses             uint64
-	SnapshotRangeHits               uint64
-	SnapshotRangeMisses             uint64
-	PostBatches                     uint64
-	PostSingletonBatches            uint64
-	PostMaxBatch                    uint64
-	ReadySelectionNanos             uint64
-	PreExecWorkNanos                uint64
-	PreExecSpanNanos                uint64
-	PostExecWorkNanos               uint64
-	PostExecSpanNanos               uint64
-	PostWideExecWorkNanos           uint64
-	PostWideExecSpanNanos           uint64
-	PostWideTransactions            uint64
-	VegetaLongestChain              uint64
-	VegetaChainCount                uint64
-	VegetaAlg3ValidationNanos       uint64
-	VegetaRangeValidationNanos      uint64
-	VegetaIntrinsicReexecutionNanos uint64
+	Attempts                          uint64
+	Reexecutions                      uint64
+	Speculated                        uint64
+	Reused                            uint64
+	Replayed                          uint64
+	PreConsensusNanos                 uint64
+	PostConsensusNanos                uint64
+	ValidationNanos                   uint64
+	ReplayExecutionNanos              uint64
+	ConflictAnalysisNanos             uint64
+	DiscoveredConflicts               uint64
+	ForwardFallbacks                  uint64
+	SafetyReplays                     uint64
+	SnapshotBuildNanos                uint64
+	SnapshotPointHits                 uint64
+	SnapshotPointMisses               uint64
+	SnapshotRangeHits                 uint64
+	SnapshotRangeMisses               uint64
+	PostBatches                       uint64
+	PostSingletonBatches              uint64
+	PostMaxBatch                      uint64
+	ReadySelectionNanos               uint64
+	PreExecWorkNanos                  uint64
+	PreExecSpanNanos                  uint64
+	PostExecWorkNanos                 uint64
+	PostExecSpanNanos                 uint64
+	PostWideExecWorkNanos             uint64
+	PostWideExecSpanNanos             uint64
+	PostWideTransactions              uint64
+	VegetaLongestChain                uint64
+	VegetaChainCount                  uint64
+	VegetaWeightedLongestChainCost    uint64
+	VegetaTotalEstimatedCost          uint64
+	VegetaHotKeyWorkerLowerBoundCost  uint64
+	VegetaReadyWorkerLowerBoundCost   uint64
+	VegetaAlg3ValidationNanos         uint64
+	VegetaRangeValidationNanos        uint64
+	VegetaIntrinsicReexecutionNanos   uint64
+	AriaInitialBatchNanos             uint64
+	AriaInitialExecWorkNanos          uint64
+	AriaAcceptedCommitNanos           uint64
+	AriaFallbackDAGBuildNanos         uint64
+	AriaFallbackBranchBuildNanos      uint64
+	AriaFallbackVisibilityNanos       uint64
+	AriaFallbackMVCCPublishNanos      uint64
+	AriaFallbackPublishedDeltaEntries uint64
+	AriaFallbackTxExecWorkNanos       uint64
+	AriaFallbackFinalCommitNanos      uint64
 }
 
 // ariaSemanticExecutionError marks a source-successful transaction that cannot
@@ -779,6 +793,20 @@ func newTrackingMultiStoreWithMVCC(parent storetypes.MultiStore, readView *rustM
 	return wrapTrackingCacheMultiStore(parent.CacheMultiStore(), nil, newStoreIDRegistry(), readView, nil)
 }
 
+// newSpeculativeTrackingMultiStoreWithMVCC is the transaction-local variant used
+// when the parent is itself a staged tracking store. It preserves the same
+// private-tracker rule as newSpeculativeTrackingMultiStore while serving
+// predecessor values from a concurrent block-local MVCC view instead of
+// physically copying every ancestor delta into each child branch.
+func newSpeculativeTrackingMultiStoreWithMVCC(parent storetypes.MultiStore, readView *rustMvccReadView) *trackingMultiStore {
+	tracked := newSpeculativeTrackingMultiStore(parent)
+	tracked.readView = readView
+	if tracked.overlay == nil {
+		tracked.overlay = newRustLocalOverlay(nil)
+	}
+	return tracked
+}
+
 // newSpeculativeTrackingMultiStore creates a transaction-local branch without
 // stacking tracking wrappers when the parent is already a tracking store. Aria's
 // canonical block staging intentionally passes a *trackingMultiStore into the
@@ -1494,7 +1522,14 @@ func vegetaSortedDependencyChains(indices []int, trackers []*accessTracker) []ve
 	return out
 }
 
-func vegetaProposalOrderWithStats(trackers []*accessTracker) ([]int, int, int) {
+func vegetaCostAt(costs []uint32, idx int) uint64 {
+	if idx >= 0 && idx < len(costs) && costs[idx] > 0 {
+		return uint64(costs[idx])
+	}
+	return 1
+}
+
+func vegetaProposalOrderWithParallelismStats(trackers []*accessTracker, costs []uint32, workers int) ([]int, int, int, uint64, uint64, uint64) {
 	indices := make([]int, len(trackers))
 	for i := range indices {
 		indices[i] = i
@@ -1524,7 +1559,34 @@ func vegetaProposalOrderWithStats(trackers []*accessTracker) ([]int, int, int) {
 	if len(chains) > 0 {
 		longest = len(chains[0].txs)
 	}
-	return proposal, longest, len(chains)
+	var totalCost uint64
+	for idx := range trackers {
+		totalCost += vegetaCostAt(costs, idx)
+	}
+	var weightedLongest uint64
+	for _, chain := range chains {
+		var chainCost uint64
+		for _, idx := range chain.txs {
+			chainCost += vegetaCostAt(costs, idx)
+		}
+		if chainCost > weightedLongest {
+			weightedLongest = chainCost
+		}
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	workerCapacity := (totalCost + uint64(workers) - 1) / uint64(workers)
+	hotKeyLowerBound := weightedLongest
+	if workerCapacity > hotKeyLowerBound {
+		hotKeyLowerBound = workerCapacity
+	}
+	return proposal, longest, len(chains), weightedLongest, totalCost, hotKeyLowerBound
+}
+
+func vegetaProposalOrderWithStats(trackers []*accessTracker) ([]int, int, int) {
+	proposal, longest, chains, _, _, _ := vegetaProposalOrderWithParallelismStats(trackers, nil, 1)
+	return proposal, longest, chains
 }
 
 func vegetaProposalOrder(trackers []*accessTracker) []int {
@@ -2221,6 +2283,16 @@ func ariaReleaseSuccessors(done int, indegree map[int]int, edges map[int]map[int
 	return released
 }
 
+type ariaFallbackDiagnostics struct {
+	dagBuildNanos         uint64
+	branchBuildNanos      uint64
+	visibilityNanos       uint64
+	mvccPublishNanos      uint64
+	publishedDeltaEntries uint64
+	txExecWorkNanos       uint64
+	finalCommitNanos      uint64
+}
+
 type ariaFallbackJob struct {
 	index  int
 	branch *trackingMultiStore
@@ -2234,9 +2306,10 @@ type ariaFallbackJob struct {
 // the other strategies (the port does not grant AriaFB an uncounted extra core).
 //
 // The canonical Wasmd parent is immutable during this speculative fallback. A
-// newly ready transaction materializes the already-completed deltas of its DAG
-// ancestors into a private branch before execution. This provides the same
-// predecessor visibility without concurrently mutating a shared CacheMultiStore.
+// newly ready transaction reads completed DAG-ancestor writes through a
+// block-local MVCC view. This preserves predecessor visibility without the old
+// O(chain^2) behavior of physically copying every transitive ancestor delta into
+// every child branch, and without concurrently mutating a shared CacheMultiStore.
 // If a transaction's concrete access footprint differs from the initial Aria
 // batch, the speculative fallback is discarded and the caller serially replays
 // the subset as a conservative Wasmd-only safety extension.
@@ -2250,13 +2323,13 @@ func executeAriaFallbackReadyDAG(
 	hotChain []int,
 	expected []*accessTracker,
 	deliverTx sdk.DeliverTxFunc,
-) (map[int]speculativeResult, []int, uint64, uint64, bool, error) {
+) (map[int]speculativeResult, []int, uint64, uint64, ariaFallbackDiagnostics, bool, error) {
 	order, err := topologicalOrder(nodes, edges)
 	if err != nil {
-		return nil, nil, 0, 0, false, err
+		return nil, nil, 0, 0, ariaFallbackDiagnostics{}, false, err
 	}
 	if len(nodes) == 0 {
-		return map[int]speculativeResult{}, order, 0, 0, false, nil
+		return map[int]speculativeResult{}, order, 0, 0, ariaFallbackDiagnostics{}, false, nil
 	}
 	if workers < 1 {
 		workers = 1
@@ -2293,7 +2366,7 @@ func executeAriaFallbackReadyDAG(
 	for pos, node := range order {
 		orderPos[node] = pos
 	}
-	ancestors := make(map[int][]int, len(nodes))
+	visibilityByNode := make(map[int]rustVisibilityMask, len(nodes))
 	ancestorSets := make(map[int]map[int]struct{}, len(nodes))
 	for _, node := range order {
 		set := make(map[int]struct{})
@@ -2304,13 +2377,13 @@ func executeAriaFallbackReadyDAG(
 			}
 		}
 		ancestorSets[node] = set
-		list := make([]int, 0, len(set))
+		words := make([]uint64, (len(order)+63)/64)
 		for ancestor := range set {
-			list = append(list, ancestor)
+			markRustCompleted(words, orderPos[ancestor])
 		}
-		sort.Slice(list, func(i, j int) bool { return orderPos[list[i]] < orderPos[list[j]] })
-		ancestors[node] = list
+		visibilityByNode[node] = rustVisibilityMask{words: words}
 	}
+	versions := newRustBlockMVCC()
 
 	hot := make(map[int]struct{}, len(hotChain))
 	for _, idx := range hotChain {
@@ -2346,8 +2419,10 @@ func executeAriaFallbackReadyDAG(
 					continue
 				default:
 				}
+				execStarted := time.Now()
 				res := deliverTx(txs[job.index], nil, job.branch, job.index, map[string]any{})
-				done <- speculativeResult{index: job.index, store: job.branch, result: res, attempt: 1}
+				execEnded := time.Now()
+				done <- speculativeResult{index: job.index, store: job.branch, result: res, attempt: 1, execNanos: uint64(execEnded.Sub(execStarted).Nanoseconds()), execStartNanos: execStarted.UnixNano(), execEndNanos: execEnded.UnixNano()}
 			}
 		}()
 	}
@@ -2358,6 +2433,7 @@ func executeAriaFallbackReadyDAG(
 	finished := 0
 	var attempts uint64
 	var validationNanos uint64
+	var diag ariaFallbackDiagnostics
 	unstable := false
 
 	drainAndClose := func() {
@@ -2373,16 +2449,16 @@ func executeAriaFallbackReadyDAG(
 		for !unstable && active < workers && len(ready) > 0 {
 			idx := ready[0]
 			ready = ready[1:]
-			branch := newSpeculativeTrackingMultiStore(ms)
-			for _, ancestor := range ancestors[idx] {
-				delta, ok := deltas[ancestor]
-				if !ok {
-					return fmt.Errorf("aria-fb ready tx=%d missing completed ancestor delta tx=%d", idx, ancestor)
-				}
-				if err := applyRustDelta(branch.cacheMultiStoreDelegate.CacheMultiStore, delta); err != nil {
-					return fmt.Errorf("aria-fb materialize predecessor tx=%d into tx=%d: %w", ancestor, idx, err)
-				}
-			}
+			visibilityStarted := time.Now()
+			visibility := visibilityByNode[idx]
+			diag.visibilityNanos += uint64(time.Since(visibilityStarted).Nanoseconds())
+			branchStarted := time.Now()
+			branch := newSpeculativeTrackingMultiStoreWithMVCC(ms, &rustMvccReadView{
+				versions:       versions,
+				canonicalIndex: orderPos[idx],
+				visibility:     visibility,
+			})
+			diag.branchBuildNanos += uint64(time.Since(branchStarted).Nanoseconds())
 			jobs <- ariaFallbackJob{index: idx, branch: branch}
 			active++
 		}
@@ -2392,29 +2468,34 @@ func executeAriaFallbackReadyDAG(
 	for finished < len(nodes) {
 		if err := dispatch(); err != nil {
 			drainAndClose()
-			return nil, nil, attempts, validationNanos, false, err
+			return nil, nil, attempts, validationNanos, diag, false, err
 		}
 		if active == 0 {
 			close(jobs)
 			wg.Wait()
-			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb fallback DAG stalled finished=%d total=%d", finished, len(nodes))
+			return nil, nil, attempts, validationNanos, diag, false, fmt.Errorf("aria-fb fallback DAG stalled finished=%d total=%d", finished, len(nodes))
 		}
 		result := <-done
 		active--
 		attempts++
+		diag.txExecWorkNanos += result.execNanos
 		if result.result != nil && result.result.Code != 0 {
 			drainAndClose()
-			return nil, nil, attempts, validationNanos, false, &ariaSemanticExecutionError{phase: "fallback", index: result.index, log: result.result.Log}
+			return nil, nil, attempts, validationNanos, diag, false, &ariaSemanticExecutionError{phase: "fallback", index: result.index, log: result.result.Log}
 		}
 		if result.store == nil || result.index < 0 || result.index >= len(expected) {
 			drainAndClose()
-			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb invalid fallback result tx=%d", result.index)
+			return nil, nil, attempts, validationNanos, diag, false, fmt.Errorf("aria-fb invalid fallback result tx=%d", result.index)
 		}
 		delta, deltaErr := captureRustDelta(result.store)
 		if deltaErr != nil {
 			drainAndClose()
-			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb capture fallback tx %d delta: %w", result.index, deltaErr)
+			return nil, nil, attempts, validationNanos, diag, false, fmt.Errorf("aria-fb capture fallback tx %d delta: %w", result.index, deltaErr)
 		}
+		publishStarted := time.Now()
+		versions.publish(orderPos[result.index], delta)
+		diag.mvccPublishNanos += uint64(time.Since(publishStarted).Nanoseconds())
+		diag.publishedDeltaEntries += uint64(len(delta.entries))
 		validationStarted := time.Now()
 		if !accessTrackersEqual(expected[result.index], result.store.tracker) {
 			unstable = true
@@ -2422,7 +2503,7 @@ func executeAriaFallbackReadyDAG(
 		validationNanos += uint64(time.Since(validationStarted).Nanoseconds())
 		if unstable {
 			drainAndClose()
-			return nil, order, attempts, validationNanos, true, nil
+			return nil, order, attempts, validationNanos, diag, true, nil
 		}
 
 		results[result.index] = result
@@ -2434,12 +2515,14 @@ func executeAriaFallbackReadyDAG(
 	}
 	close(jobs)
 	wg.Wait()
+	commitStarted := time.Now()
 	for _, idx := range order {
 		if err := applyRustDelta(ms, deltas[idx]); err != nil {
-			return nil, nil, attempts, validationNanos, false, fmt.Errorf("aria-fb commit fallback tx %d delta: %w", idx, err)
+			return nil, nil, attempts, validationNanos, diag, false, fmt.Errorf("aria-fb commit fallback tx %d delta: %w", idx, err)
 		}
 	}
-	return results, order, attempts, validationNanos, false, nil
+	diag.finalCommitNanos = uint64(time.Since(commitStarted).Nanoseconds())
+	return results, order, attempts, validationNanos, diag, false, nil
 }
 
 // AriaFBRunner adapts the attached repository's AriaFB mechanism to Wasmd:
@@ -2481,7 +2564,9 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 
 	stats := policyRunStats{Speculated: uint64(len(indices))}
 	postStarted := time.Now()
+	initialStarted := time.Now()
 	initial := speculateIndices(ctx, r.workers, ms, txs, indices, deliverTx)
+	stats.AriaInitialBatchNanos = uint64(time.Since(initialStarted).Nanoseconds())
 	trackers := make([]*accessTracker, len(txs))
 	for idx, result := range initial {
 		if result.store == nil {
@@ -2494,6 +2579,7 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 			return nil, &ariaSemanticExecutionError{phase: "initial", index: idx, log: result.result.Log}
 		}
 		trackers[idx] = result.store.tracker
+		stats.AriaInitialExecWorkNanos += result.execNanos
 	}
 
 	analysisStarted := time.Now()
@@ -2509,11 +2595,13 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 	stats.Reused = uint64(len(indices) - len(fallbacks))
 	stats.Replayed = uint64(len(fallbacks))
 
+	acceptedCommitStarted := time.Now()
 	for _, idx := range acceptedOrder {
 		initial[idx].store.Write()
 		results[idx] = initial[idx].result
 		r.serializationOrder = append(r.serializationOrder, idx)
 	}
+	stats.AriaAcceptedCommitNanos = uint64(time.Since(acceptedCommitStarted).Nanoseconds())
 
 	fallback := make([]int, 0, len(fallbacks))
 	for idx := range fallbacks {
@@ -2522,13 +2610,21 @@ func (r *AriaFBRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 	sort.Ints(fallback)
 	if len(fallback) > 0 {
 		replayStarted := time.Now()
+		dagStarted := time.Now()
 		edges := ariaFallbackEdges(fallback, trackers)
 		hotChain := hottestAccessChain(fallback, trackers)
-		fallbackSpec, fallbackOrder, attempts, validationNanos, unstable, err := executeAriaFallbackReadyDAG(
+		stats.AriaFallbackDAGBuildNanos = uint64(time.Since(dagStarted).Nanoseconds())
+		fallbackSpec, fallbackOrder, attempts, validationNanos, fallbackDiag, unstable, err := executeAriaFallbackReadyDAG(
 			ctx, r.workers, ms, txs, fallback, edges, hotChain, trackers, deliverTx,
 		)
 		stats.Attempts += attempts
 		stats.ValidationNanos += validationNanos
+		stats.AriaFallbackBranchBuildNanos += fallbackDiag.branchBuildNanos
+		stats.AriaFallbackVisibilityNanos += fallbackDiag.visibilityNanos
+		stats.AriaFallbackMVCCPublishNanos += fallbackDiag.mvccPublishNanos
+		stats.AriaFallbackPublishedDeltaEntries += fallbackDiag.publishedDeltaEntries
+		stats.AriaFallbackTxExecWorkNanos += fallbackDiag.txExecWorkNanos
+		stats.AriaFallbackFinalCommitNanos += fallbackDiag.finalCommitNanos
 		if err != nil {
 			stats.ReplayExecutionNanos = uint64(time.Since(replayStarted).Nanoseconds())
 			stats.PostConsensusNanos = uint64(time.Since(postStarted).Nanoseconds())
@@ -2584,10 +2680,14 @@ type VegetaRunner struct {
 	last               policyRunStats
 	proposalOrder      []int
 	serializationOrder []int
+	estimatedCosts     []uint32
 }
 
 func NewVegetaRunner(workers int) *VegetaRunner   { return &VegetaRunner{workers: workers} }
 func (r *VegetaRunner) LastStats() policyRunStats { return r.last }
+func (r *VegetaRunner) SetEstimatedCosts(costs []uint32) {
+	r.estimatedCosts = append(r.estimatedCosts[:0], costs...)
+}
 func (r *VegetaRunner) LastProposalOrder() []int {
 	return append([]int(nil), r.proposalOrder...)
 }
@@ -2645,9 +2745,13 @@ func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 	}
 	analysisStarted := time.Now()
 	var longestChain, chainCount int
-	r.proposalOrder, longestChain, chainCount = vegetaProposalOrderWithStats(preTrackers)
+	proposalOrder, longestChain, chainCount, weightedLongest, totalEstimatedCost, hotKeyLowerBound := vegetaProposalOrderWithParallelismStats(preTrackers, r.estimatedCosts, r.workers)
+	r.proposalOrder = proposalOrder
 	stats.VegetaLongestChain = uint64(longestChain)
 	stats.VegetaChainCount = uint64(chainCount)
+	stats.VegetaWeightedLongestChainCost = weightedLongest
+	stats.VegetaTotalEstimatedCost = totalEstimatedCost
+	stats.VegetaHotKeyWorkerLowerBoundCost = hotKeyLowerBound
 	matrix, discovered := buildDependencyMatrix(r.proposalOrder, preTrackers)
 	universe := buildVegetaUniverse(preTrackers)
 	stats.ConflictAnalysisNanos = uint64(time.Since(analysisStarted).Nanoseconds())
@@ -2670,9 +2774,22 @@ func (r *VegetaRunner) Run(ctx context.Context, ms storetypes.MultiStore, txs []
 			return nil, fmt.Errorf("vegeta replay DAG stalled completed=%d total=%d", completed, len(r.proposalOrder))
 		}
 		batch := make([]int, 0, len(batchPositions))
+		var batchCost uint64
+		var maxBatchCost uint64
 		for _, pos := range batchPositions {
-			batch = append(batch, r.proposalOrder[pos])
+			idx := r.proposalOrder[pos]
+			batch = append(batch, idx)
+			cost := vegetaCostAt(r.estimatedCosts, idx)
+			batchCost += cost
+			if cost > maxBatchCost {
+				maxBatchCost = cost
+			}
 		}
+		workerCapacity := (batchCost + uint64(max(1, r.workers)) - 1) / uint64(max(1, r.workers))
+		if maxBatchCost > workerCapacity {
+			workerCapacity = maxBatchCost
+		}
+		stats.VegetaReadyWorkerLowerBoundCost += workerCapacity
 		snapshotStarted := time.Now()
 		readSnapshot, err := buildVegetaReadSnapshot(ms, batch, preTrackers, preStores)
 		if err != nil {

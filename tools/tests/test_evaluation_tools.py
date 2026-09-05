@@ -15,7 +15,8 @@ V1_CORRECTNESS_DIAG = ROOT / "tools" / "internal" / "diagnose-conflictlab-v1-cor
 V1_VALIDATOR = ROOT / "tools" / "internal" / "validate-conflictlab-v1.py"
 PARALLELISM_SUMMARY = ROOT / "tools" / "internal" / "summarize-conflictlab-parallelism.py"
 FOUR_FIX_SUMMARY = ROOT / "tools" / "internal" / "summarize-conflictlab-fixes.py"
-BASELINE_GRID = ROOT / "evaluation" / "baselines" / "conflictlab-strategy-smoke.grid.json"
+CONFLICTLAB_FIXTURES = ROOT / "tools" / "tests" / "fixtures" / "conflictlab"
+BASELINE_GRID = CONFLICTLAB_FIXTURES / "conflictlab-strategy-smoke.grid.json"
 BASELINE_SUMMARY = ROOT / "tools" / "internal" / "summarize-baseline-comparison.py"
 
 sys.path.insert(0, str(ROOT / "tools" / "internal"))
@@ -603,7 +604,7 @@ class EvaluationToolTests(unittest.TestCase):
         manifests = {}
         total = 0
         for name, count in expected.items():
-            source = ROOT / "evaluation/conflictlab" / name
+            source = CONFLICTLAB_FIXTURES / name
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "manifest.json"
                 subprocess.run([sys.executable, str(GENERATOR), str(source), str(output)], check=True)
@@ -718,7 +719,7 @@ class EvaluationToolTests(unittest.TestCase):
         }
         manifests = {}
         for name, count in expected.items():
-            source = ROOT / "evaluation/conflictlab" / name
+            source = CONFLICTLAB_FIXTURES / name
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "manifest.json"
                 subprocess.run([sys.executable, str(GENERATOR), str(source), str(output)], check=True)
@@ -815,7 +816,7 @@ class EvaluationToolTests(unittest.TestCase):
             self.assertIn("FAIL: focused validation completed", text)
 
     def test_parallelism_ceiling_matrix_has_balanced_lane_and_amortization_cases(self):
-        source = ROOT / "evaluation/conflictlab/parallelism-ceiling.grid.json"
+        source = CONFLICTLAB_FIXTURES / "parallelism-ceiling.grid.json"
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "manifest.json"
             subprocess.run([sys.executable, str(GENERATOR), str(source), str(output)], check=True)

@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "physical_core_limit": 6,
+  "record_schema_version": 3,
+  "policy_file": "../../../../evaluation/policies/release-tuning.json",
+  "base_run": {
+    "workload": "conflictlab",
+    "parameters": {
+      "execution_backend": "wasm",
+      "vm_instance_lifecycle": "reuse",
+      "vm_gas_limit": "18446744073709551615",
+      "prediction_buckets": "8",
+      "warmup_blocks": "4",
+      "postchange_warmup_blocks": "0",
+      "sim.admission_tps": "25000",
+      "sim.block_interval_ms": "2000",
+      "sim.mempool_policy": "fifo",
+      "acg.compact_equivalence_groups": "true",
+      "acg.soft_threshold": "0.20",
+      "acg.hard_threshold": "0.95",
+      "acg.risk_budget": "0.90",
+      "acg.feedback_retention_factor": "0.99",
+      "acg.feedback_confidence_scale": "20.0",
+      "acg.serial_bypass_min_transactions": "32",
+      "acg.serial_bypass_min_projected_speedup": "1.05",
+      "acg.serial_bypass_service_cost_reference_nanos_per_transaction": "150000",
+      "acg.serial_bypass_economics_ema_alpha": "0.35",
+      "acg.serial_bypass_min_economics_observations": "4",
+      "acg.serial_bypass_projected_speedup_hysteresis": "0.10",
+      "acg.serial_bypass_max_consecutive_bypasses": "4",
+      "acg.serialization_cost_reference_nanos": "250000",
+      "acg.invalidation_fanout_weight": "1.0",
+      "acg.pre_consensus_serialization_weight": "1.0",
+      "acg.post_consensus_replay_weight": "1.0",
+      "symbolic_granularity": "fine",
+      "prediction_fault_mode": "none",
+      "prediction_fault_rate_bps": "0",
+      "operation_mix": "credit",
+      "consensus_divergence": "identical",
+      "consensus_cutoff_ms": "5000",
+      "acg.warmup_compact_equivalence_groups": "false",
+      "acg.warmup_workers": "1",
+      "acg.softening_min_confidence": "0.20",
+      "acg.serial_bypass_immediate_speedup_floor": "1.0",
+      "acg.serial_bypass_buffered_preexecution": "false",
+      "acg.regime_change_enabled": "true",
+      "acg.regime_service_cost_drop_ratio": "0.60",
+      "acg.regime_contention_increase_ratio": "1.50",
+      "acg.regime_contention_increase_absolute": "0.10",
+      "acg.regime_retained_evidence": "0.20",
+      "acg.regime_probation_bypass_blocks": "2",
+      "acg.regime_probation_min_projected_speedup": "1.10",
+      "acg.candidate_miss_verification_weight_threshold": "32.0"
+    }
+  },
+  "order_seed": 2026081704,
+  "experiment_id": "conflictlab-v1-compaction-reference",
+  "matrix": {
+    "modes": [
+      "static",
+      "probability-only"
+    ],
+    "workers": [
+      6
+    ],
+    "seeds": [
+      11,
+      47,
+      101
+    ],
+    "parameters": {
+      "prediction_quality": [
+        "exact",
+        "bucketed"
+      ],
+      "acg.compact_equivalence_groups": [
+        "true",
+        "false"
+      ],
+      "acg.serial_bypass_enabled": [
+        "false"
+      ]
+    },
+    "cases": [
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "32",
+          "sim.block_size": "32",
+          "accounts": "32",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "64",
+          "sim.block_size": "64",
+          "accounts": "64",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "64",
+          "sim.block_size": "64",
+          "accounts": "64",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "128",
+          "sim.block_size": "128",
+          "accounts": "128",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "256",
+          "sim.block_size": "256",
+          "accounts": "256",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "256",
+          "sim.block_size": "256",
+          "accounts": "256",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "25pct",
+          "hot_account_probability_bps": "2500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      },
+      {
+        "parameters": {
+          "transactions": "512",
+          "sim.block_size": "512",
+          "accounts": "512",
+          "contention": "75pct",
+          "hot_account_probability_bps": "7500",
+          "complexity": "medium",
+          "complexity_mix": "homogeneous",
+          "work_iterations": "131072",
+          "storage_rounds": "3",
+          "payload_bytes": "512"
+        }
+      }
+    ]
+  }
+}

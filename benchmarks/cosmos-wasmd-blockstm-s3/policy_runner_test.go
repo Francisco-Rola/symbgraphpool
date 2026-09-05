@@ -801,3 +801,22 @@ func TestAccessTrackersEqualIncludesReadsRangesAndWrites(t *testing.T) {
 		t.Fatal("new concrete read must invalidate exact oracle footprint equality")
 	}
 }
+
+func TestVegetaProposalParallelismStatsWeightedHotKeyBound(t *testing.T) {
+	store := storeIDFromName("wasm")
+	trackers := []*accessTracker{newAccessTracker(nil), newAccessTracker(nil), newAccessTracker(nil)}
+	trackers[0].write(store, []byte("a"))
+	trackers[1].read(store, []byte("a"))
+	trackers[2].write(store, []byte("independent"))
+
+	_, longest, chains, weightedLongest, totalCost, lowerBound := vegetaProposalOrderWithParallelismStats(trackers, []uint32{10, 20, 30}, 2)
+	if longest != 2 || chains != 2 {
+		t.Fatalf("longest/chains=%d/%d want 2/2", longest, chains)
+	}
+	if weightedLongest != 30 || totalCost != 60 {
+		t.Fatalf("weightedLongest/total=%d/%d want 30/60", weightedLongest, totalCost)
+	}
+	if lowerBound != 30 {
+		t.Fatalf("hot-key 2-worker lower bound=%d want 30", lowerBound)
+	}
+}

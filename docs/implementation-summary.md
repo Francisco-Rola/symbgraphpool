@@ -91,44 +91,16 @@ The current path incorporates the main optimization work from the implementation
 7. exact final parent-DAG transitive reduction after Cosmos bank/funds dependencies;
 8. detailed phase, critical-path, dependency-provenance, oracle-DAG and replay diagnostics.
 
-## Evaluation baselines on the same Wasmd machinery
+## Evaluation baselines and metrics
 
-The maintained controlled evaluator now runs five strategies over the same state machine:
+The common Wasmd evaluator runs direct Serial, Cosmos SDK BlockSTM, repaired AriaFB and Vegeta mechanism ports, and Rust-ACG on the same state machine. AriaFB includes Rule-2 conflict analysis and completion-driven fallback; Vegeta includes full longest-to-shortest chain proposal ordering, the paper dependency classes/readiness rules and Algorithm-3 access-change validation. Harness-only historical-state restoration for fixed Ethereum traces is separated from each paper-method replay phase.
 
-- direct serial;
-- Cosmos SDK BlockSTM;
-- AriaFB same-Wasmd port with exact Rule-2 aborts and completion-driven hot-chain dependency-DAG fallback;
-- Vegeta same-Wasmd `SpeculateMod`/`ParallelMod` port with hot-key proposal reordering, Rule-2 replay batches, and access-change handling;
-- Rust-ACG pre-consensus symbolic/adaptive scheduling + canonical validation/replay.
+The publication-facing single-node metric follows Vegeta's replay methodology:
 
-AriaFB and Vegeta are mechanism ports over the same Wasmd execution substrate, not source-code identity
-with the upstream Ethereum engine. Unlike the earlier conservative baselines, they no longer force
-historical canonical-order semantics: Vegeta uses its proposal reorder and AriaFB uses a Rule-2-valid
-serialization. Each row is checked against an independent serial execution of that derived order; its
-`matched_serial_nanos` uses the same order, while `historical_serial_nanos` retains the common original-order
-timing control.
+`replay_tps = transactions / sum(post_consensus_nanos)` and `replay_x = replay_tps / Serial replay_tps`.
 
-## Evaluation metrics
+Pre-consensus speculation/planning is excluded; intrinsic post-decision validation/fallback/re-execution is included. Raw records retain phase, safety, workload-parallelism and baseline-fidelity diagnostics. The harness does not infer consensus latency from `pre_consensus_nanos`.
 
-The publication harness derives one fixed campaign consensus window `C` as the longest measured
-pre-consensus interval among ACG and Vegeta. Its primary execution-limited throughput metric charges the same
-`C + post-consensus` block-cycle denominator to every system. Rust-ACG and Vegeta use `C` for
-pre-execution; serial, BlockSTM and AriaFB wait through the same consensus interval before their
-post-consensus execution. The evaluator additionally reports post-x (serial/post-consensus),
-actual wall-x, replay rate, validation and replay-execution time, pre-consensus tail latency and
-confidence intervals.
+## Evaluation roadmap
 
-## Current evaluation interpretation
-
-Preliminary S3 runs show that the Rust graph-planning path has been reduced to sub-millisecond or
-low-millisecond work on representative blocks, while post-consensus replay can dominate individual
-blocks. This shifts the next optimization emphasis from generic graph representation toward
-post-consensus-aware adaptive feedback, replay attribution, and policy choices that treat
-pre-consensus serialization as cheap when it fits inside the consensus budget.
-
-## Publication roadmap
-
-The next research steps are: stabilize the five-way Wasmd comparison; run physical-core scaling on a
-dedicated host; add workload families; freeze externally defined consensus-window sensitivity;
-measure adaptation/ablation; integrate with a real consensus window; and package a reproducible
-artifact. `evaluation/wasmd/README.md` contains the detailed OSDI/EuroSys-oriented plan.
+The canonical evaluation is specified in `evaluation/PAPER_PLAN.md`: S1/S4 real-trace headlines, S3 phase/oracle and implementation ablations, native MiniWarehouse plus token/NFT/AMM workloads, and ConflictLab-controlled upper-bound/contention/prediction/adaptation/cutoff/semantics/compaction studies.

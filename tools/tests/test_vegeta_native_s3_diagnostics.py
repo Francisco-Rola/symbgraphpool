@@ -314,11 +314,14 @@ class RuntimeConcurrencyProfileTests(unittest.TestCase):
             self.assertAlmostEqual(static["active_wall_ms"], 0.0005)
             self.assertIn("post_p95_ms", static)
 
-    def test_evaluation_readme_is_a_continuation_checkpoint(self):
+    def test_evaluation_artifact_documents_vegeta_provenance(self):
         readme = (ROOT / "evaluation/vegeta/README.md").read_text()
-        self.assertIn("Continuation rule", readme)
-        self.assertIn("vegeta-s3-wasmd-wasm-genesis-params-hotfix.patch", readme)
-        self.assertIn("Immediate next steps", readme)
+        plan = (ROOT / "evaluation/PAPER_PLAN.md").read_text()
+        self.assertIn("S1", readme)
+        self.assertIn("S3", readme)
+        self.assertIn("S4", readme)
+        self.assertIn("replay_tps", plan)
+        self.assertIn("ConflictLab", plan)
 
     def test_runtime_profile_smoke_validation_is_strategy_aware(self):
         source = (ROOT / "tools/legacy-scripts/run-vegeta-s3-runtime-concurrency-profile.sh").read_text()
@@ -400,7 +403,8 @@ class RuntimeConcurrencyProfileTests(unittest.TestCase):
         self.assertIn("github.com/CosmWasm/wasmd v0.70.3",mod)
         self.assertIn("github.com/cosmos/cosmos-sdk v0.54.4",mod)
         self.assertIn("wasmapp.NewWasmApp",main)
-        self.assertRegex(main, r"NewWasmApp\(log\.NewNopLogger\(\), dbm\.NewMemDB\(\), true,")
+        self.assertIn("db := dbm.NewMemDB()", main)
+        self.assertRegex(main, r"NewWasmApp\(\s*log\.NewNopLogger\(\), db, true,")
         self.assertIn("loadLatest=true",main)
         self.assertIn("baseapp.SetChainID(chainID)",main)
         self.assertIn("benchmarkGenesisWithValidator",main)

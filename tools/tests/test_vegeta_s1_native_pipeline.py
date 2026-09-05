@@ -85,7 +85,7 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
 
     def test_wasmd_large_workload_streaming_is_wired(self):
         main = (ROOT / "benchmarks/cosmos-wasmd-blockstm-s3/main.go").read_text()
-        eval_sh = (ROOT / "scripts/eval-wasmd.sh").read_text()
+        eval_sh = (ROOT / "evaluation/lib/run_wasmd_campaign.sh").read_text()
         wrapper = (ROOT / "tools/legacy-scripts/run-vegeta-s1-wasmd-eval.sh").read_text()
         self.assertIn('"stream-plan"', main)
         self.assertIn("openPlanStream", main)

@@ -1,19 +1,5 @@
 # Benchmarks
 
-First-party CosmWasm workloads used by the common benchmark harness:
+This tree contains the CosmWasm contracts, prepared symbolic profiles, historical trace corpora and the common Wasmd evaluator used by the paper artifact.
 
-- `conflictlab` — controlled conflict, prediction, execution-cost and runtime-semantics workload;
-- `miniwarehouse` — larger TPC-C-inspired application workload.
-
-Symbolic analyzer output lives in `benchmarks/symbolic/` and is compiled against the runtime code
-checksum by the harness.
-
-Build the contracts with:
-
-```bash
-cargo test --manifest-path benchmarks/Cargo.toml --workspace
-cargo build --manifest-path benchmarks/Cargo.toml -p acg-benchmark-conflictlab --release --target wasm32-unknown-unknown
-cargo build --manifest-path benchmarks/Cargo.toml -p acg-benchmark-miniwarehouse --release --target wasm32-unknown-unknown
-```
-
-See `evaluation/conflictlab/README.md` for the active ConflictLab experiments.
+Canonical workload preparation and experiment entry points are documented in `evaluation/README.md`. Maintained ConflictLab paper grids live under `evaluation/grids/conflictlab/`; historical matrices retained only for regression tests live under `tools/tests/fixtures/conflictlab/`.

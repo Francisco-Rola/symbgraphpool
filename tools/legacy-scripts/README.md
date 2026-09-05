@@ -1,5 +1,3 @@
-# Legacy evaluation wrappers
+# Internal preparation helpers
 
-These wrappers preserve earlier ConflictLab, native-S3, profiling, ablation, and tuning campaigns. They are retained so old experiment notes remain reproducible, but new work should not add entrypoints here.
-
-Use `scripts/test-all.sh` for repository validation and `scripts/eval-wasmd*.sh` for the current Wasmd evaluation path.
+These scripts are retained only because the canonical workload-preparation wrappers in `evaluation/workloads/` or regression tests depend on them. They are not paper experiment entry points. Use `evaluation/README.md` for artifact commands.

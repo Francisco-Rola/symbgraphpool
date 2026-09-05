@@ -205,9 +205,27 @@ type Record struct {
 	VegetaPostWideTransactions           uint64  `json:"vegeta_post_wide_transactions,omitempty"`
 	VegetaLongestChain                   uint64  `json:"vegeta_longest_chain,omitempty"`
 	VegetaChainCount                     uint64  `json:"vegeta_chain_count,omitempty"`
+	VegetaWeightedLongestChainCost       uint64  `json:"vegeta_weighted_longest_chain_cost,omitempty"`
+	VegetaTotalEstimatedCost             uint64  `json:"vegeta_total_estimated_cost,omitempty"`
+	VegetaHotKeyWorkerLowerBoundCost     uint64  `json:"vegeta_hot_key_worker_lower_bound_cost,omitempty"`
+	VegetaReadyWorkerLowerBoundCost      uint64  `json:"vegeta_ready_worker_lower_bound_cost,omitempty"`
 	VegetaAlg3ValidationNanos            uint64  `json:"vegeta_alg3_validation_nanos,omitempty"`
 	VegetaRangeValidationNanos           uint64  `json:"vegeta_range_validation_nanos,omitempty"`
 	VegetaIntrinsicReexecutionNanos      uint64  `json:"vegeta_intrinsic_reexecution_nanos,omitempty"`
+	AriaHistoricalFallbackNanos          uint64  `json:"aria_historical_fallback_nanos,omitempty"`
+	AriaHistoricalFallbackTransactions   uint64  `json:"aria_historical_fallback_transactions,omitempty"`
+	AriaCanonicalFallback                bool    `json:"aria_canonical_fallback,omitempty"`
+	AriaCanonicalFallbackReason          string  `json:"aria_canonical_fallback_reason,omitempty"`
+	AriaInitialBatchNanos                uint64  `json:"aria_initial_batch_nanos,omitempty"`
+	AriaInitialExecWorkNanos             uint64  `json:"aria_initial_exec_work_nanos,omitempty"`
+	AriaAcceptedCommitNanos              uint64  `json:"aria_accepted_commit_nanos,omitempty"`
+	AriaFallbackDAGBuildNanos            uint64  `json:"aria_fallback_dag_build_nanos,omitempty"`
+	AriaFallbackBranchBuildNanos         uint64  `json:"aria_fallback_branch_build_nanos,omitempty"`
+	AriaFallbackVisibilityNanos          uint64  `json:"aria_fallback_visibility_nanos,omitempty"`
+	AriaFallbackMVCCPublishNanos         uint64  `json:"aria_fallback_mvcc_publish_nanos,omitempty"`
+	AriaFallbackPublishedDeltaEntries    uint64  `json:"aria_fallback_published_delta_entries,omitempty"`
+	AriaFallbackTxExecWorkNanos          uint64  `json:"aria_fallback_tx_exec_work_nanos,omitempty"`
+	AriaFallbackFinalCommitNanos         uint64  `json:"aria_fallback_final_commit_nanos,omitempty"`
 	VegetaHistoricalFallbackNanos        uint64  `json:"vegeta_historical_fallback_nanos,omitempty"`
 	VegetaHistoricalFallbackTransactions uint64  `json:"vegeta_historical_fallback_transactions,omitempty"`
 	VegetaCanonicalFallback              bool    `json:"vegeta_canonical_fallback,omitempty"`
@@ -2379,6 +2397,9 @@ func main() {
 					canonicalFallback := semanticFallback || canonicalMismatch
 					ariaStats := ariaRunner.LastStats()
 					strategyNanos := ariaWall
+					var ariaHistoricalFallbackNanos uint64
+					var ariaHistoricalFallbackTransactions uint64
+					ariaCanonicalFallbackReason := ""
 					if canonicalFallback {
 						reason := "post-block state differs from historical order"
 						if semanticFallback {
@@ -2388,11 +2409,15 @@ func main() {
 						canonicalBranch.Write()
 						ariaRunner.MarkCanonicalFallback(len(block.Transactions))
 						strategyNanos += canonicalReplayNanos
-						ariaStats.Attempts += uint64(len(block.Transactions))
-						ariaStats.Reexecutions += uint64(len(block.Transactions))
-						ariaStats.SafetyReplays += uint64(len(block.Transactions))
-						ariaStats.ReplayExecutionNanos += canonicalReplayNanos
-						ariaStats.PostConsensusNanos += canonicalReplayNanos
+						ariaHistoricalFallbackNanos = canonicalReplayNanos
+						ariaHistoricalFallbackTransactions = uint64(len(block.Transactions))
+						ariaCanonicalFallbackReason = reason
+						// The whole-block historical replay is a fixed-trace state-equivalence
+						// adaptation, not part of AriaFB's Rule-2/Fallback algorithm. Keep it
+						// visible in StrategyTotalNanos and dedicated raw diagnostics, but do
+						// not charge it to paper-style post_consensus_nanos, reexecutions, or
+						// replay_execution_nanos. This is the same accounting boundary used
+						// for Vegeta's historical-state gate below.
 					} else {
 						ariaBranch.Write()
 					}
@@ -2410,6 +2435,13 @@ func main() {
 						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, IAVLCacheSize: benchmarkIAVLCacheSize, IAVLSyncPruning: benchmarkIAVLSyncPruning, EvaluatorSHA256: evaluatorSHA256, BaselineScope: ariaFBScope, BlockSTMPreEstimate: false,
 						SpeculatedTransactions: ariaStats.Speculated, ReusedTransactions: ariaStats.Reused, ValidationNanos: ariaStats.ValidationNanos, ReplayExecutionNanos: ariaStats.ReplayExecutionNanos,
 						ConflictAnalysisNanos: ariaStats.ConflictAnalysisNanos, DiscoveredConflicts: ariaStats.DiscoveredConflicts, ForwardFallbacks: ariaStats.ForwardFallbacks, SafetyReplays: ariaStats.SafetyReplays,
+						AriaHistoricalFallbackNanos: ariaHistoricalFallbackNanos, AriaHistoricalFallbackTransactions: ariaHistoricalFallbackTransactions,
+						AriaCanonicalFallback: canonicalFallback, AriaCanonicalFallbackReason: ariaCanonicalFallbackReason,
+						AriaInitialBatchNanos: ariaStats.AriaInitialBatchNanos, AriaInitialExecWorkNanos: ariaStats.AriaInitialExecWorkNanos,
+						AriaAcceptedCommitNanos: ariaStats.AriaAcceptedCommitNanos, AriaFallbackDAGBuildNanos: ariaStats.AriaFallbackDAGBuildNanos,
+						AriaFallbackBranchBuildNanos: ariaStats.AriaFallbackBranchBuildNanos, AriaFallbackVisibilityNanos: ariaStats.AriaFallbackVisibilityNanos,
+						AriaFallbackMVCCPublishNanos: ariaStats.AriaFallbackMVCCPublishNanos, AriaFallbackPublishedDeltaEntries: ariaStats.AriaFallbackPublishedDeltaEntries, AriaFallbackTxExecWorkNanos: ariaStats.AriaFallbackTxExecWorkNanos,
+						AriaFallbackFinalCommitNanos: ariaStats.AriaFallbackFinalCommitNanos,
 					}
 					if ariaRec.StrategyTotalNanos > 0 {
 						ariaRec.MatchedSerialSpeedup = float64(ariaRec.MatchedSerialNanos) / float64(ariaRec.StrategyTotalNanos)
@@ -2502,6 +2534,7 @@ func main() {
 				}
 
 				if runVegeta && !*rustACGOnly {
+					vegetaRunner.SetEstimatedCosts(estimatedCosts)
 					// Vegeta speculation is staged at block scope so its derived-order safety
 					// reference can be short-lived. The previous implementation kept a full
 					// vegeta-reference Wasmd app alive for all 5,000 blocks, roughly doubling
@@ -2635,6 +2668,8 @@ func main() {
 						VegetaPreExecWorkNanos: vegetaStats.PreExecWorkNanos, VegetaPreExecSpanNanos: vegetaStats.PreExecSpanNanos, VegetaPostExecWorkNanos: vegetaStats.PostExecWorkNanos, VegetaPostExecSpanNanos: vegetaStats.PostExecSpanNanos,
 						VegetaPostWideExecWorkNanos: vegetaStats.PostWideExecWorkNanos, VegetaPostWideExecSpanNanos: vegetaStats.PostWideExecSpanNanos, VegetaPostWideTransactions: vegetaStats.PostWideTransactions,
 						VegetaLongestChain: vegetaStats.VegetaLongestChain, VegetaChainCount: vegetaStats.VegetaChainCount,
+						VegetaWeightedLongestChainCost: vegetaStats.VegetaWeightedLongestChainCost, VegetaTotalEstimatedCost: vegetaStats.VegetaTotalEstimatedCost,
+						VegetaHotKeyWorkerLowerBoundCost: vegetaStats.VegetaHotKeyWorkerLowerBoundCost, VegetaReadyWorkerLowerBoundCost: vegetaStats.VegetaReadyWorkerLowerBoundCost,
 						VegetaAlg3ValidationNanos: vegetaStats.VegetaAlg3ValidationNanos, VegetaRangeValidationNanos: vegetaStats.VegetaRangeValidationNanos,
 						VegetaIntrinsicReexecutionNanos: vegetaStats.VegetaIntrinsicReexecutionNanos, VegetaHistoricalFallbackNanos: canonicalFallbackNanos,
 						VegetaHistoricalFallbackTransactions: historicalFallbackTransactions,

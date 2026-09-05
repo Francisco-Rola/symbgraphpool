@@ -34,3 +34,4 @@ benchmarks/corpora/vegeta-ethereum/**/native-execution/
 *.rej
 *~
 evaluation/vegeta/wasmd-pprof/*.pprof
+benchmarks/cosmos-wasmd-blockstm-s3/wasmd-blockstm-s3

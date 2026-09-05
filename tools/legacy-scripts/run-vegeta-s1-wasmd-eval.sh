@@ -23,4 +23,4 @@ export EVAL_WASMD_DATASET="${EVAL_WASMD_DATASET:-vegeta-s1-wasmd}"
 export EVAL_WASMD_ALLOWED_MISSING_SOURCE=0
 export EVAL_WASMD_OUTPUT_DIR="${EVAL_WASMD_OUTPUT_DIR:-benchmark-results/wasmd-s1-${MODE}}"
 
-bash scripts/eval-wasmd.sh "$MODE"
+bash evaluation/lib/run_wasmd_campaign.sh "$MODE"

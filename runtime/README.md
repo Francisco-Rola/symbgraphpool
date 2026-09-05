@@ -1,25 +1,5 @@
 # Runtime
 
-The runtime workspace contains ACG's execution and evaluation path.
+The runtime contains the CosmWasm execution substrate used by ACG and the controlled benchmark harness. The paper artifact executes real Wasm through the common Wasmd evaluator; runnable experiments are under `evaluation/experiments/`.
 
-## Main crates
-
-- `acg-cosmwasm-engine` — CosmWasm/native execution, detached receipts, MVCC and READY-DAG metrics.
-- `acg-cosmwasm-adapter` — execution-request to graph-transaction adapter.
-- `acg-runtime-feedback` — adaptive planning and conflict/replay/serialization feedback.
-- `acg-validator-sim` — deterministic ingress, block production, speculative execution and replay.
-- `acg-evaluation` — stable experiment records, manifests and Phase-5F acceptance.
-- `acg-benchmark-harness` — workload-independent serial/speculative benchmark pipeline.
-
-## Validate
-
-```bash
-./scripts/test-all.sh
-```
-
-For performance work use the current ConflictLab runners from the repository root:
-
-```bash
-./tools/legacy-scripts/run-conflictlab-v1-evaluation.sh
-./tools/legacy-scripts/run-conflictlab-parallelism-evaluation.sh
-```
+Core responsibilities are dependency-ready speculative execution, block-local MVCC visibility, receipt/delta capture, concrete read/range/write tracking, indexed reconciliation, selective replay, and adaptive feedback handoff to the Rust scheduler.
