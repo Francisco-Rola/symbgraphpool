@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-bash tools/legacy-scripts/run-vegeta-s4-collect.sh
+bash tools/vegeta/run-vegeta-s4-collect.sh
 
 if [[ "${VEGETA_S4_SKIP_NATIVE_INPUTS:-0}" == "1" ]]; then
   echo
@@ -12,4 +12,4 @@ if [[ "${VEGETA_S4_SKIP_NATIVE_INPUTS:-0}" == "1" ]]; then
   exit 0
 fi
 
-bash tools/legacy-scripts/run-vegeta-s4-native-inputs.sh
+bash tools/vegeta/run-vegeta-s4-native-inputs.sh

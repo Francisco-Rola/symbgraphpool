@@ -429,18 +429,21 @@ func (r *RustSymbGraphRunner) preexecuteReadyDAG(
 		completedAt[receipt.index] = receipt.completedNanos
 		diag.SpecExecutionNanos += receipt.executionNanos
 		diag.DeltaCaptureNanos += receipt.deltaNanos
-		if receipt.result != nil && receipt.result.Code != 0 {
-			close(jobs)
-			wg.Wait()
-			return nil, nil, time.Since(phaseStart), fmt.Errorf("speculative tx %d failed: %s", receipt.index, receipt.result.Log)
-		}
-		if r.options.Visibility == rustVisibilityMVCC {
+		speculativeSucceeded := receipt.result == nil || receipt.result.Code == 0
+		// A contract-level speculative failure is still a valid receipt. It may
+		// have observed stale state and must survive until canonical validation,
+		// which can replay it against all earlier committed writes. This mirrors
+		// the production Rust engine: failed receipts are not published into MVCC
+		// visibility, but they do complete their DAG node and unblock successors.
+		if speculativeSucceeded && r.options.Visibility == rustVisibilityMVCC {
 			publishStarted := time.Now()
 			versions.publish(receipt.index, receipt.delta)
 			diag.MVCCPublishNanos += uint64(time.Since(publishStarted).Nanoseconds())
 		}
-		completedSuccess[receipt.index] = true
-		markRustCompleted(completedWords, receipt.index)
+		if speculativeSucceeded {
+			completedSuccess[receipt.index] = true
+			markRustCompleted(completedWords, receipt.index)
+		}
 		for _, successor := range succs[receipt.index] {
 			indegree[successor]--
 			if indegree[successor] == 0 {
@@ -551,7 +554,8 @@ func (r *RustSymbGraphRunner) reconcile(
 		}
 		diag.ValidationNanos += uint64(time.Since(validationStarted).Nanoseconds())
 
-		if len(invalidating) == 0 {
+		speculativeFailed := receipt.result != nil && receipt.result.Code != 0
+		if len(invalidating) == 0 && !speculativeFailed {
 			if err := applyRustDelta(ms, receipt.delta); err != nil {
 				return nil, nil, nil, nil, nil, time.Since(started), fmt.Errorf("apply reused tx %d delta: %w", idx, err)
 			}

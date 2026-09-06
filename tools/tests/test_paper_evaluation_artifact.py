@@ -41,10 +41,23 @@ class PaperEvaluationArtifactTests(unittest.TestCase):
         self.assertIn('--stream-plan auto|0|1', wrapper)
         self.assertIn('logical_addresses', wrapper)
 
-    def test_s4_is_an_explicit_placeholder_until_native_bundle_exists(self):
+    def test_s4_pipeline_is_under_tools_vegeta_and_fail_closed(self):
         text=(ROOT/'evaluation/experiments/02_s4_headline.sh').read_text()
         self.assertIn('PAPER_EVAL_REQUIRE_S4',text)
         self.assertIn('native-execution',text)
+        for name in [
+            'run-vegeta-s4-collect.sh',
+            'run-vegeta-s4-native-inputs.sh',
+            'run-vegeta-s4-collect-all.sh',
+            'run-vegeta-s4-characterize.sh',
+            'run-vegeta-s4-prepare-native.sh',
+        ]:
+            self.assertTrue((ROOT/'tools/vegeta'/name).exists(), name)
+            self.assertFalse((ROOT/'tools/legacy-scripts'/name).exists(), name)
+        prep=(ROOT/'evaluation/workloads/prepare_s4.sh').read_text()
+        self.assertIn('run-vegeta-s4-characterize.sh', prep)
+        self.assertIn('run-vegeta-s4-prepare-native.sh', prep)
+        self.assertIn('s4-native-family-map.v1.json', prep)
     def test_consensus_overlap_reporting_is_canonical(self):
         plan=(ROOT/'evaluation/PAPER_PLAN.md').read_text()
         readme=(ROOT/'evaluation/README.md').read_text()

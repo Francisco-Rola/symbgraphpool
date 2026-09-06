@@ -198,6 +198,7 @@ def main() -> int:
     ap.add_argument("--source-coverage", type=Path, default=None)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--text-output", type=Path, required=True)
+    ap.add_argument("--dataset", default="vegeta-s1")
     ns = ap.parse_args()
 
     total = structural = touched_covered = committed_covered = 0
@@ -328,7 +329,7 @@ def main() -> int:
     committed_balanced = balanced(per_block, "successful_committed_path_pairs")
     report = {
         "schema_version": 4,
-        "dataset": "vegeta-s1",
+        "dataset": ns.dataset,
         "definition": {
             "source_denominator": "public-rpc/prestate touched-state conflict pairs",
             "publication_metric": "selector-reviewed state-touch coverage; STATE_READ/STATE_WRITE/READ_WRITE count, PURE and OPAQUE do not; reviewed reverted state paths remain state-touch evidence but are excluded from committed-path coverage",
@@ -367,7 +368,7 @@ def main() -> int:
         "coverage": structural / total if total else 1.0,
     }
     lines = [
-        "Vegeta S1 reviewed state-semantics conflict coverage",
+        f"Vegeta {ns.dataset} reviewed state-semantics conflict coverage",
         "",
         f"owner structural conflict coverage: {structural_display['unique_conflict_pairs']}/{structural_display['total_unique_conflict_pairs']} ({100*structural_display['coverage']:.2f}%)",
         f"selector-reviewed state-touch coverage: {touched_covered}/{total} ({100*report['coverage']:.2f}%)",

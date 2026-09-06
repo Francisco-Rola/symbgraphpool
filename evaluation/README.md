@@ -25,7 +25,7 @@ Run one experiment by invoking its numbered script directly. Results go to `benc
 python3 evaluation/plots/plot_all.py
 ```
 
-`02_s4_headline.sh` intentionally skips until the S4 native execution bundle exists. Set `PAPER_EVAL_REQUIRE_S4=1` in the final artifact to make missing S4 a hard failure.
+`02_s4_headline.sh` skips until the reviewed S4 native execution bundle exists. The S4 post-collection pipeline lives under `tools/vegeta/`: characterize the frozen caches, review/freeze the S4 family map, then run `evaluation/workloads/prepare_s4.sh`. Set `PAPER_EVAL_REQUIRE_S4=1` in the final artifact to make a missing bundle a hard failure.
 
 ## Workload preparation
 
@@ -34,7 +34,8 @@ ETH_RPC_URL=... bash evaluation/workloads/collect_s1.sh
 bash evaluation/workloads/prepare_s1.sh
 bash evaluation/workloads/prepare_s3.sh
 ETH_RPC_URL=... bash evaluation/workloads/collect_s4.sh
-bash evaluation/workloads/prepare_s4.sh   # placeholder until S4 translation is implemented
+bash tools/vegeta/run-vegeta-s4-characterize.sh  # local-only: frozen caches -> family/selector review queue
+bash evaluation/workloads/prepare_s4.sh          # requires reviewed evaluation/vegeta/s4-native-family-map.v1.json
 ```
 
 Native application and ConflictLab inputs are generated deterministically by the experiment scripts and need no network access.
@@ -42,7 +43,7 @@ Native application and ConflictLab inputs are generated deterministically by the
 ## Experiment map
 
 - `01_s1_headline.sh` -- S1-derived Wasmd headline, all five systems, with translated-workload parallelism bounds.
-- `02_s4_headline.sh` -- S4 headline placeholder, same methodology.
+- `02_s4_headline.sh` -- S4-derived Wasmd headline after the reviewed S4 native bundle is prepared.
 - `03_s3_breakdown.sh` -- 101-block phase/oracle dataset.
 - `04_native_apps.sh` -- MiniWarehouse uniform/hot and native CW20/CW721/AMM mix.
 - `05_conflictlab_upper_bound.sh` -- zero-conflict native Wasm upper bound.

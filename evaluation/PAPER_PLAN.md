@@ -41,7 +41,7 @@ Historical Ethereum transactions from Vegeta S1 translated into the native Wasmd
 101 blocks. Use only for exact tracing, phase breakdown, oracle/headroom analysis and implementation ablations. It is intentionally not the headline throughput workload.
 
 ### Vegeta S4
-5,000 later Ethereum blocks (18,581,726--18,586,725). Source collection uses the scalable public-RPC prestate/diff + callTracer/code path and deliberately skips exact per-transaction SLOAD/SSTORE collection. **Native translation is currently a placeholder**; `02_s4_headline.sh` skips cleanly until `s4/native-execution` exists.
+5,000 later Ethereum blocks (18,581,726--18,586,725). Source collection uses the scalable public-RPC prestate/diff + callTracer/code path and deliberately skips exact per-transaction SLOAD/SSTORE collection. Post-collection translation is fail-closed: `tools/vegeta/run-vegeta-s4-characterize.sh` ranks frozen runtime families/selectors and bootstraps only already-reviewed identical-code mappings; a reviewed `evaluation/vegeta/s4-native-family-map.v1.json` plus coverage gates are required before `evaluation/workloads/prepare_s4.sh` materializes `s4/native-execution`. S4 has no exact-access oracle.
 
 ### Native CosmWasm applications
 `MiniWarehouse` is TPC-C-inspired but not TPC-C compliant. Run a partitioned/uniform setting and a hot-warehouse setting. `NativeMix` combines the repository's controlled CW20, mintable CW721 and Astroport-like pair contracts to give account-local, ownership-index and hot-pool state in one native workload.

@@ -11,7 +11,7 @@ REUSE_CACHED="${VEGETA_S4_REUSE_CACHED_INPUTS:-0}"
 
 [[ -s "$CORPUS" ]] || {
   echo "missing Vegeta S4 corpus: $CORPUS" >&2
-  echo "run tools/legacy-scripts/run-vegeta-s4-collect.sh first" >&2
+  echo "run tools/vegeta/run-vegeta-s4-collect.sh first" >&2
   exit 2
 }
 

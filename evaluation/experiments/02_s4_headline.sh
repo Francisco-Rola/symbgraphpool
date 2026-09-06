@@ -8,7 +8,7 @@ if [[ ! -s "$EXEC/execution-manifest.json" || ! -s "$EXEC/execution-plan.jsonl" 
   cat <<MSG
 SKIP S4: source collection may exist, but the native S4 execution bundle is not built yet.
 Expected: $EXEC/{execution-manifest.json,execution-plan.jsonl} and $SYM/
-When the tracer/translation is complete, this script becomes the S4 headline experiment without other changes.
+Run tools/vegeta/run-vegeta-s4-characterize.sh, freeze the reviewed S4 family map, then run evaluation/workloads/prepare_s4.sh.
 MSG
   [[ "${PAPER_EVAL_REQUIRE_S4:-0}" == 1 ]] && exit 2 || exit 0
 fi

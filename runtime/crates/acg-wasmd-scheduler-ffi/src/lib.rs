@@ -815,6 +815,14 @@ impl SchedulerState {
                     observation.right,
                     edge_index,
                 );
+                // Positive observations from non-candidate pairs are valuable: they
+                // expose candidate misses. Absence from the candidate graph, however,
+                // is not negative evidence for a static relationship. Counting every
+                // profile-adjacent non-candidate pair as independent dilutes sparse,
+                // key-specific conflicts (for example MiniWarehouse NewOrder pairs).
+                if !observation.conflict && !candidate_present {
+                    continue;
+                }
                 let item = if observation.conflict {
                     let kinds =
                         ConflictKinds::from_bits(observation.conflict_kinds).ok_or_else(|| {

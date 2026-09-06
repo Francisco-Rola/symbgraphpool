@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stream a native CosmWasm call plan for Vegeta S1 using the reviewed S3 family mechanisms.
+"""Stream a native CosmWasm call plan for a Vegeta corpus using reviewed native-family mechanisms.
 
 This planner deliberately consumes ``thin-corpus.jsonl`` rather than the full public-RPC corpus, so
 historical read/write sets cannot leak into Rust-ACG prediction.  The independent streaming source
@@ -65,7 +65,7 @@ def render(report: dict) -> str:
     calls = report["calls"]
     txc = report["transaction_semantic_coverage"]
     return "\n".join([
-        "Vegeta S1 native translation pre-execution coverage",
+        f"Vegeta {report.get('dataset', 'workload')} native translation pre-execution coverage",
         "",
         f"blocks retained: {report['blocks_retained']} / {report['source_blocks']}",
         f"transactions retained: {report['transactions_retained']} / {report['source_transactions']} ({100*report['transaction_retention']:.2f}%)",

@@ -103,6 +103,7 @@ def main() -> int:
     ap.add_argument("--target-coverage", type=float, default=0.80)
     ap.add_argument("--conflict-target-coverage", type=float, default=0.80)
     ap.add_argument("--top", type=int, default=100)
+    ap.add_argument("--dataset", default="vegeta-s1")
     ns = ap.parse_args()
     if not (0.0 <= ns.target_coverage <= 1.0):
         raise SystemExit("--target-coverage must be between 0 and 1")
@@ -310,7 +311,7 @@ def main() -> int:
 
     report = {
         "schema_version": 1,
-        "dataset": "vegeta-s1",
+        "dataset": ns.dataset,
         "definition": {
             "successful_reviewed_state_transaction": "transaction contains at least one non-reverted STATE_READ/STATE_WRITE/READ_WRITE reviewed action",
             "current_publication_denominator": "all retained S1 source transactions",
@@ -346,7 +347,7 @@ def main() -> int:
     ns.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     lines = [
-        "Vegeta S1 successful reviewed-state transaction deficit",
+        f"Vegeta {ns.dataset} successful reviewed-state transaction deficit",
         "",
         f"current publication denominator (all tx): {all_row['successful_reviewed_state_transactions']}/{all_row['transactions']} ({100*all_row['successful_reviewed_state_coverage']:.2f}%)",
         f"target: {100*ns.target_coverage:.2f}% = {target_success} successful reviewed-state tx",
