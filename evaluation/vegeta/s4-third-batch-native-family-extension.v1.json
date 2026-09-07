@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "S4 third conflict-closure native family extension. Registers the already-implemented fee-token-cw20 family for review bases that were bootstrapped from the narrower S4 candidate map, and adds the V3 pool alias as a conservative per-pool singleton dependency abstraction. Neither mapping is an EVM execution/state equivalence claim.",
+  "native_code_families": {
+    "fee-token-cw20": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+      "semantic_scope": "fungible token with transfer policy/fee/router state",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/fee-token-cw20.symbolic.json"
+    },
+    "v3-pool-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "semantic_scope": "Observed S4 Uniswap-V3 pool swap class modeled as an independent pool instance with a singleton pool-state dependency lock. This conservatively preserves same-pool cross-transaction dependency/conflict structure without modeling ticks, liquidity math, token settlement, or claiming EVM/Uniswap-V3 execution equivalence."
+    }
+  }
+}

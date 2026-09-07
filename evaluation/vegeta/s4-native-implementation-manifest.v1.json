@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4-reviewed-native-families",
+  "status": "implemented-source-derived-symbolic-plus-conservative-s4-aliases",
+  "methodology": [
+    "Each native code family is a real standalone CosmWasm contract with concrete storage semantics.",
+    "Each symbolic artifact was derived from the complete checked-in native source and records the source SHA-256 plus line-scoped evidence.",
+    "Historical Ethereum concrete read/write keys are forbidden as symbolic-analysis inputs and are not embedded in these contracts or artifacts.",
+    "Candidate extension families are workload analogues for the observed selector semantics; they are not claims of byte-for-byte Ethereum application equivalence.",
+    "S1 extends the reusable native family registry with selector-reviewed cw721-drop and stargate-cw20 families; unreviewed selectors remain explicit fallbacks and are excluded from selector-aware conflict coverage.",
+    "S4 adds custom-swap-router as an independent storage namespace reusing the checked-in marketplace-router CosmWasm binary/profile only for a conservative singleton route-execution guard; this is explicitly not an application-equivalence claim.",
+    "S4 adds v3-pool-lock as an independent per-pool storage namespace reusing the marketplace-router singleton ExecuteRoute dependency guard for the observed Uniswap-V3 swap class; ticks, liquidity math, settlement, and EVM execution equivalence are intentionally out of scope."
+  ],
+  "families": [
+    {
+      "native_code_family": "cw20-base",
+      "package": "acg-benchmark-native-s3-cw20-base",
+      "source": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw20-base.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_cw20_base.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "execute::Burn",
+        "query::Balance",
+        "query::Allowance",
+        "query::TotalSupply",
+        "query::Decimals"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "controlled-cw20",
+      "package": "acg-benchmark-native-s3-controlled-cw20",
+      "source": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/controlled-cw20.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_controlled_cw20.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "query::Balance",
+        "query::Allowance",
+        "query::TotalSupply"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "fee-token-cw20",
+      "package": "acg-benchmark-native-s3-fee-token-cw20",
+      "source": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/fee-token-cw20.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_fee_token_cw20.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "execute::SetPolicy",
+        "query::Balance",
+        "query::Allowance",
+        "query::TotalSupply"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "wrapped-native-token",
+      "package": "acg-benchmark-native-s3-wrapped-native-token",
+      "source": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/wrapped-native-token.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_wrapped_native_token.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Deposit",
+        "execute::Withdraw",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "query::Balance",
+        "query::TotalSupply"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "cw721-mintable",
+      "package": "acg-benchmark-native-s3-cw721-mintable",
+      "source": "benchmarks/contracts/native-s3/cw721-mintable/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw721-mintable.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_cw721_mintable.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Mint",
+        "execute::TransferNft",
+        "execute::SendOrSafeTransferNft",
+        "execute::ApproveNft",
+        "execute::ApproveAll",
+        "query::OwnerOf",
+        "query::TokensByOwnerCount"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "astroport-pair",
+      "package": "acg-benchmark-native-s3-astroport-pair",
+      "source": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/astroport-pair.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_astroport_pair.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Swap",
+        "execute::MintLiquidity",
+        "execute::BurnLiquidity",
+        "execute::Sync",
+        "query::GetReserves",
+        "query::LpBalance"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "xen-like",
+      "package": "acg-benchmark-native-s3-xen-like",
+      "source": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/xen-like.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_xen_like.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ClaimRank",
+        "execute::ClaimMintReward",
+        "execute::ClaimMintRewardAndShare",
+        "execute::Stake",
+        "execute::Withdraw",
+        "execute::Transfer",
+        "query::Balance"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "cw1155-like",
+      "package": "acg-benchmark-native-s3-cw1155-like",
+      "source": "benchmarks/contracts/native-s3/cw1155-like/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw1155-like.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_cw1155_like.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Mint",
+        "execute::SendFrom",
+        "execute::ApproveAll",
+        "query::Balance"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "marketplace-router",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::RegisterOrder",
+        "execute::SettleOrder",
+        "execute::ValidateOrder",
+        "execute::CancelOrder",
+        "execute::IncrementCounter",
+        "execute::ExecuteRoute",
+        "execute::V3SwapCallback",
+        "execute::BlurSettle",
+        "query::GetOrderStatus",
+        "query::GetCounter"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "operator-filter-helper",
+      "package": "acg-benchmark-native-s3-operator-filter-helper",
+      "source": "benchmarks/contracts/native-s3/operator-filter-helper/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/operator-filter-helper.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_operator_filter_helper.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::RegisterAndSubscribe",
+        "execute::SetOperatorAllowed",
+        "query::IsOperatorAllowed"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "cw721-drop",
+      "package": "acg-benchmark-native-s3-cw721-drop",
+      "source": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw721-drop.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_cw721_drop.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::SeedMint",
+        "execute::MintDrop",
+        "execute::TransferNft",
+        "execute::ApproveNft",
+        "execute::ApproveAll",
+        "query::OwnerOf",
+        "query::Balance",
+        "query::TotalSupply"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "stargate-cw20",
+      "package": "acg-benchmark-native-s3-stargate-cw20",
+      "source": "benchmarks/contracts/native-s3/stargate-cw20/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/stargate-cw20.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_stargate_cw20.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "execute::BridgeSend",
+        "execute::BridgeReceive",
+        "query::Balance",
+        "query::Allowance",
+        "query::TotalSupply"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "universal-router",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ExecuteRoute",
+        "execute::V3SwapCallback"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "fiat-token-cw20",
+      "package": "acg-benchmark-native-s3-fiat-token-cw20",
+      "source": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/fiat-token-cw20.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_fiat_token_cw20.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::Transfer",
+        "execute::TransferFrom",
+        "execute::Approve",
+        "execute::Permit",
+        "execute::Burn",
+        "query::Balance",
+        "query::Allowance",
+        "query::TotalSupply"
+      ],
+      "implementation_status": "implemented",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "custom-swap-router",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ExecuteRoute"
+      ],
+      "implementation_status": "implemented-conservative-alias",
+      "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "v3-pool-lock",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ExecuteRoute"
+      ],
+      "implementation_status": "implemented-conservative-alias",
+      "symbolic_status": "llm-source-derived"
+    }
+  ]
+}

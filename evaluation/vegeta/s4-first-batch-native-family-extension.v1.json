@@ -1,0 +1,32 @@
+{
+  "dataset": "vegeta-s4",
+  "native_code_families": {
+    "custom-swap-router": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "S4 Banana Gun router storage owner modeled as an independent router instance with a conservative singleton route-execution guard for the observed swap/fallback selector class. This preserves the reviewed conflict-relevant router state class without claiming EVM execution equivalence or Universal-Router application equivalence.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "cw20-base": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
+      "semantic_scope": "standard fungible-token transfer/balance/allowance behavior exercised by S3",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw20-base.symbolic.json"
+    },
+    "cw721-drop": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+      "semantic_scope": "reviewed ERC721 ownership/approval plus public, staged, signed, whitelist, SeaDrop, purchase, and sequential mint dependency classes exercised by frozen S1 selectors; proof/signature cryptography excluded while their public-input stage/nonce dependency state is preserved",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw721-drop.symbolic.json"
+    },
+    "fiat-token-cw20": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+      "semantic_scope": "S1 FiatToken/USDC-style balances, allowances, burn, and EIP-2612 permit nonce dependencies; signature verification itself is treated as public-input validation",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/fiat-token-cw20.symbolic.json"
+    }
+  },
+  "purpose": "Reviewed S4-only native family aliases/extensions required by the first semantic-review batch.",
+  "schema_version": 1
+}

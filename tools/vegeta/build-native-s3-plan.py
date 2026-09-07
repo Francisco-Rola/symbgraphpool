@@ -238,6 +238,37 @@ S1_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
 # reverted calls emit no committed mint, and there are no other owner mint transactions in S1. The
 # execution adapter consumes the frozen audit JSON for the exact public event token ID instead of
 # guessing a calldata layout.
+
+
+# S4-only reviewed selector extensions. These are intentionally separate from the frozen S1/S3
+# tables so later S4 family review cannot mutate the already-published workloads. The Banana Gun
+# router is modeled conservatively as a router-global execution guard; SEEK 0x3bb1ee11 preserves
+# only the mint dependency class (one logical mint event per source call), not exact EVM mint count.
+S4_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
+    "fiat-token-cw20": {
+        "0xa9059cbb": ("execute::transfer", [("recipient", "address"), ("amount", "uint256")]),
+        "0x23b872dd": ("execute::transfer_from", [("owner", "address"), ("recipient", "address"), ("amount", "uint256")]),
+        "0x70a08231": ("query::balance", [("address", "address")]),
+        "0x095ea7b3": ("execute::increase_allowance_or_approve", [("spender", "address"), ("amount", "uint256")]),
+        "0xdd62ed3e": ("query::allowance", [("owner", "address"), ("spender", "address")]),
+        "0x18160ddd": ("query::total_supply", []),
+        "0x313ce567": ("query::decimals", []),
+    },
+    "cw721-drop": {
+        "0x3bb1ee11": ("execute::mint_drop_one", []),
+    },
+    "custom-swap-router": {
+        "0x0162e2d0": ("execute::execute_route", []),
+        "0x70fef1da": ("execute::execute_route", []),
+        "0x": ("execute::execute_route", []),
+    },
+    "v3-pool-lock": {
+        # Frozen S4 pool 0x844e... is the MUBI/WETH Uniswap-V3 pool. Preserve only the
+        # observed per-pool swap dependency class; no tick/liquidity/EVM equivalence is claimed.
+        "0x128acb08": ("execute::execute_route", []),
+    },
+}
+
 S1_OWNER_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
     "0xbd18e233e12f2a066f5b5a351285ab5a39b1f2ac": {
         "0x29a0eee8": (
@@ -669,6 +700,8 @@ def translate_call_tree(
             # also covers implementation DELEGATECALL frames because their storage context is the
             # proxy owner, while keeping the selector opaque for every other cw721-drop instance.
             entry = S1_OWNER_ENTRYPOINT_EXTENSIONS.get(storage_context or "", {}).get(selector, entry)
+        elif resolver.dataset == "vegeta-s4":
+            entry = S4_ENTRYPOINT_EXTENSIONS.get(native_family or "", {}).get(selector, entry)
         system_action_kind = None
         semantic_entrypoint = None
         semantic_effect = SEMANTIC_OPAQUE
@@ -681,7 +714,7 @@ def translate_call_tree(
             # S1 retains reviewed semantic evidence from implementation frames for the proxy storage
             # namespace, but never executes those frames a second time. Frozen S3 keeps its original
             # inlined-helper dispatch byte-for-byte.
-            if resolver.dataset == "vegeta-s1" and entry is not None:
+            if resolver.dataset in {"vegeta-s1", "vegeta-s4"} and entry is not None:
                 semantic_entrypoint, semantic_schema = entry
                 dispatch = "inlined-reviewed-entrypoint"
                 semantic_effect = semantic_effect_for_entrypoint(semantic_entrypoint, dispatch)

@@ -82,7 +82,15 @@ def ratio(num: int, den: int) -> float:
     return num / den if den else 1.0
 
 
-def denominator_row(name: str, transactions: int, successful_count: int, touch_count: int) -> dict[str, Any]:
+def denominator_row(
+    name: str,
+    transactions: int,
+    successful_count: int,
+    touch_count: int,
+    source_gas_used: int,
+    successful_gas_used: int,
+    touch_gas_used: int,
+) -> dict[str, Any]:
     return {
         "name": name,
         "transactions": transactions,
@@ -91,6 +99,11 @@ def denominator_row(name: str, transactions: int, successful_count: int, touch_c
         "reviewed_state_touch_transactions": touch_count,
         "reviewed_state_touch_coverage": ratio(touch_count, transactions),
         "successful_state_deficit_transactions": transactions - successful_count,
+        "source_gas_used": source_gas_used,
+        "successful_reviewed_state_gas_used": successful_gas_used,
+        "successful_reviewed_state_gas_coverage": ratio(successful_gas_used, source_gas_used),
+        "reviewed_state_touch_gas_used": touch_gas_used,
+        "reviewed_state_touch_gas_coverage": ratio(touch_gas_used, source_gas_used),
     }
 
 
@@ -113,6 +126,9 @@ def main() -> int:
     all_tx_count = successful_tx_count = state_touch_tx_count = 0
     source_state_tx_count = source_state_successful_count = source_state_touch_count = 0
     conflict_tx_count = conflict_successful_count = conflict_touch_count = 0
+    all_gas = successful_gas = state_touch_gas = 0
+    source_state_gas = source_state_successful_gas = source_state_touch_gas = 0
+    conflict_gas = conflict_successful_gas = conflict_touch_gas = 0
     pure_only_tx_count = 0
 
     mapped_opaque_txs: dict[Candidate, set[TxId]] = defaultdict(set)
@@ -151,12 +167,16 @@ def main() -> int:
             for position, (source_tx, plan_tx) in enumerate(zip(source_txs, plan_txs)):
                 tid = all_tx_count
                 all_tx_count += 1
+                tx_gas = int(source_tx.get("gas_used", 0) or 0)
+                all_gas += tx_gas
                 has_source_state = bool(source_tx.get("reads") or source_tx.get("writes"))
                 is_conflict_participant = position in conflict_indices
                 if has_source_state:
                     source_state_tx_count += 1
+                    source_state_gas += tx_gas
                 if is_conflict_participant:
                     conflict_tx_count += 1
+                    conflict_gas += tx_gas
 
                 actions = plan_tx.get("native_actions") or []
                 has_successful_state = any(successful_reviewed_state(a) for a in actions)
@@ -166,16 +186,22 @@ def main() -> int:
                 )
                 if has_successful_state:
                     successful_tx_count += 1
+                    successful_gas += tx_gas
                     if has_source_state:
                         source_state_successful_count += 1
+                        source_state_successful_gas += tx_gas
                     if is_conflict_participant:
                         conflict_successful_count += 1
+                        conflict_successful_gas += tx_gas
                 if has_state_touch:
                     state_touch_tx_count += 1
+                    state_touch_gas += tx_gas
                     if has_source_state:
                         source_state_touch_count += 1
+                        source_state_touch_gas += tx_gas
                     if is_conflict_participant:
                         conflict_touch_count += 1
+                        conflict_touch_gas += tx_gas
                 if has_successful_pure and not has_state_touch:
                     pure_only_tx_count += 1
                 if has_successful_state:
@@ -240,18 +266,27 @@ def main() -> int:
     if block_count == 0:
         raise SystemExit("source corpus is empty")
 
-    all_row = denominator_row("all-source-transactions", all_tx_count, successful_tx_count, state_touch_tx_count)
+    all_row = denominator_row(
+        "all-source-transactions", all_tx_count, successful_tx_count, state_touch_tx_count,
+        all_gas, successful_gas, state_touch_gas,
+    )
     state_row = denominator_row(
         "source-storage-access-transactions",
         source_state_tx_count,
         source_state_successful_count,
         source_state_touch_count,
+        source_state_gas,
+        source_state_successful_gas,
+        source_state_touch_gas,
     )
     conflict_row = denominator_row(
         "source-conflict-participating-transactions",
         conflict_tx_count,
         conflict_successful_count,
         conflict_touch_count,
+        conflict_gas,
+        conflict_successful_gas,
+        conflict_touch_gas,
     )
 
     target_success = math.ceil(ns.target_coverage * all_tx_count - 1e-12)
@@ -357,7 +392,9 @@ def main() -> int:
         "",
         "Diagnostic denominator alignment (does not change the frozen gate):",
         f"  source storage-access tx: {state_row['successful_reviewed_state_transactions']}/{state_row['transactions']} ({100*state_row['successful_reviewed_state_coverage']:.2f}%)",
+        f"  source storage-access gas: {state_row['successful_reviewed_state_gas_used']}/{state_row['source_gas_used']} ({100*state_row['successful_reviewed_state_gas_coverage']:.2f}%)",
         f"  source conflict-participant tx: {conflict_row['successful_reviewed_state_transactions']}/{conflict_row['transactions']} ({100*conflict_row['successful_reviewed_state_coverage']:.2f}%)",
+        f"  source conflict-participant gas: {conflict_row['successful_reviewed_state_gas_used']}/{conflict_row['source_gas_used']} ({100*conflict_row['successful_reviewed_state_gas_coverage']:.2f}%)",
         f"  contention-oriented 80% target: {conflict_target_success}/{conflict_row['transactions']} (need {additional_for_conflict_target} additional successful reviewed-state conflict participants; {'PASS' if additional_for_conflict_target == 0 else 'FAIL'})",
         "",
         "Top mapped-owner opaque selectors by current deficit transactions:",

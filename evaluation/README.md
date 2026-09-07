@@ -25,7 +25,7 @@ Run one experiment by invoking its numbered script directly. Results go to `benc
 python3 evaluation/plots/plot_all.py
 ```
 
-`02_s4_headline.sh` skips until the reviewed S4 native execution bundle exists. The S4 post-collection pipeline lives under `tools/vegeta/`: characterize the frozen caches, review/freeze the S4 family map, then run `evaluation/workloads/prepare_s4.sh`. Set `PAPER_EVAL_REQUIRE_S4=1` in the final artifact to make a missing bundle a hard failure.
+`02_s4_headline.sh` skips until the reviewed S4 native execution bundle exists. The S4 post-collection pipeline lives under `tools/vegeta/`: audit frozen-corpus provenance, characterize the caches, inspect the transaction-level blocker-cluster/greedy coverage plan, review the seeded high-impact families, pass the conflict/median-block family freeze gates, freeze the family map with explicit review attestation, then run `evaluation/workloads/prepare_s4.sh`. Set `PAPER_EVAL_REQUIRE_S4=1` in the final artifact to make a missing bundle a hard failure.
 
 ## Workload preparation
 
@@ -34,8 +34,13 @@ ETH_RPC_URL=... bash evaluation/workloads/collect_s1.sh
 bash evaluation/workloads/prepare_s1.sh
 bash evaluation/workloads/prepare_s3.sh
 ETH_RPC_URL=... bash evaluation/workloads/collect_s4.sh
-bash tools/vegeta/run-vegeta-s4-characterize.sh  # local-only: frozen caches -> family/selector review queue
-bash evaluation/workloads/prepare_s4.sh          # requires reviewed evaluation/vegeta/s4-native-family-map.v1.json
+bash tools/vegeta/run-vegeta-s4-characterize.sh
+bash tools/vegeta/run-vegeta-s4-apply-first-batch.sh
+bash tools/vegeta/run-vegeta-s4-apply-second-batch.sh  # safe aliases + exact conflict-closure report
+# if still below 95% conflict: review only the top remaining conflict families, then rerun review-check
+bash tools/vegeta/run-vegeta-s4-review-check.sh        # strict 95% conflict / 80% median-block family freeze gate
+VEGETA_S4_REVIEW_ACK=1 bash tools/vegeta/run-vegeta-s4-freeze-reviewed-map.sh
+bash evaluation/workloads/prepare_s4.sh                # selector/conflict/transaction/implementation gates + Wasmd bundle
 ```
 
 Native application and ConflictLab inputs are generated deterministically by the experiment scripts and need no network access.

@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "Manual-review seed list for the first high-impact S4 family expansion. These are hints only and never change the executable family map until explicitly reviewed and applied.",
+  "decisions": [
+    {
+      "priority": 1,
+      "address": "0xdb5889e35e379ef0498aae126fc2cce1fbd23216",
+      "runtime_code_family": "b554904137f2259dd2578d406fe4bc4c1327c918d1340c1a8f121f7f3262da63",
+      "identity_hint": "custom swap/router family",
+      "observed_selectors": ["0x0162e2d0", "0x70fef1da", "0x"],
+      "suggested_native_family": null,
+      "review_status": "pending",
+      "reviewed_native_family": null,
+      "mapping_basis": "",
+      "semantic_notes": "High conflict and gas impact. Review routing/lock/state semantics; do not force into a generic router abstraction without source/interface evidence."
+    },
+    {
+      "priority": 2,
+      "address": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "runtime_code_family": "9792a60e149086e16264936114044e08b07981f87f64293339df5cd659e92a29",
+      "identity_hint": "LINK token family",
+      "observed_selectors": ["0xa9059cbb"],
+      "suggested_native_family": "cw20-base",
+      "review_status": "pending",
+      "reviewed_native_family": null,
+      "mapping_basis": "",
+      "semantic_notes": "Frozen S4 direct/call-frame activity is transfer-dominated; review any delegate/internal state paths before accepting cw20-base."
+    },
+    {
+      "priority": 3,
+      "address": "0xc114f87326c0e07f40e73b6c9fcea54888c2c67f",
+      "runtime_code_family": "e4774ce981798c23daad3f54c4b86ffc2ca58500d7268e52a4d4e696bf3cd69b",
+      "identity_hint": "SEEK ERC721-like family",
+      "observed_selectors": ["0x3bb1ee11", "0xa22cb465", "0x23b872dd"],
+      "suggested_native_family": "cw721-drop",
+      "review_status": "pending",
+      "reviewed_native_family": null,
+      "mapping_basis": "",
+      "semantic_notes": "Review custom mint selector 0x3bb1ee11 plus approval/transfer semantics before reusing cw721-drop."
+    },
+    {
+      "priority": 4,
+      "address": "0xbe9895146f7af43049ca1c1ae358b0541ea49704",
+      "runtime_code_family": "76bcd86b160a3cd8740d07c985eedc4c3b044c0fb9123c8f90f49ac17185fba8",
+      "identity_hint": "cbETH proxy/token family",
+      "observed_selectors": [],
+      "suggested_native_family": "fiat-token-cw20",
+      "review_status": "pending",
+      "reviewed_native_family": null,
+      "mapping_basis": "",
+      "semantic_notes": "Storage owner has no direct selector evidence in the frozen summary; resolve proxy/delegate target semantics before choosing a token abstraction."
+    },
+    {
+      "priority": 5,
+      "address": "0x6de037ef9ad2725eb40118bb1702ebb27e4aeb24",
+      "runtime_code_family": "2bac97e30a3749ba06f5ea2f1e205ad49fe9118caf7d283a1492760dd558b21b",
+      "identity_hint": "RNDR token family",
+      "observed_selectors": ["0xa9059cbb"],
+      "suggested_native_family": "cw20-base",
+      "review_status": "pending",
+      "reviewed_native_family": null,
+      "mapping_basis": "",
+      "semantic_notes": "Transfer is the observed direct selector; review proxy/implementation behavior before accepting the ERC20 abstraction."
+    },
+    {
+      "priority": 6,
+      "address": "0x38e382f74dfb84608f3c1f10187f6bef5951de93",
+      "runtime_code_family": "1fc5a4ab49d1d973bcb42d8287dc59cb7579b7e76548fc8d9c94551d3dd07ee5",
+      "identity_hint": "MUBI token family",
+      "observed_selectors": ["0x095ea7b3", "0x70a08231", "0xa9059cbb"],
+      "suggested_native_family": "cw20-base",
+      "review_status": "pending",
+      "reviewed_native_family": null,
+      "mapping_basis": "",
+      "semantic_notes": "Frozen activity is approve/balance/transfer-like; verify source/interface and any hidden state before accepting cw20-base."
+    }
+  ]
+}

@@ -9,14 +9,15 @@ WORK_DIR="${VEGETA_S4_NATIVE_WORK_DIR:-$S4_DIR/native-characterization}"
 PLAN_DIR="${VEGETA_S4_NATIVE_PLAN_DIR:-$S4_DIR/native-plan}"
 EXEC_DIR="${VEGETA_S4_NATIVE_EXEC_DIR:-$S4_DIR/native-execution}"
 FAMILY_MAP="${VEGETA_S4_NATIVE_FAMILY_MAP:-evaluation/vegeta/s4-native-family-map.v1.json}"
-IMPL_MANIFEST="${VEGETA_S4_IMPLEMENTATION_MANIFEST:-evaluation/vegeta/s1-native-implementation-manifest.v1.json}"
+IMPL_MANIFEST="${VEGETA_S4_IMPLEMENTATION_MANIFEST:-evaluation/vegeta/s4-native-implementation-manifest.v1.json}"
 MIN_CONFLICT="${VEGETA_S4_MIN_CONFLICT_COVERAGE:-0.95}"
 MIN_MEDIAN="${VEGETA_S4_MIN_MEDIAN_BLOCK_COVERAGE:-0.80}"
+DIAG_FAMILY_CONFLICT_RELEVANT_ACCESS_REFERENCE="${VEGETA_S4_MIN_CONFLICT_RELEVANT_ACCESS_COVERAGE:-${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-${VEGETA_S4_MIN_FAMILY_STATE_GAS_COVERAGE:-0.90}}}"
 MIN_SEM_TX="${VEGETA_S4_MIN_SEMANTIC_TX_COVERAGE:-0.80}"
 MIN_CONTENTION_TX="${VEGETA_S4_MIN_CONTENTION_TX_COVERAGE:-0.80}"
 INITIAL_STATE_MODE="${VEGETA_S4_NATIVE_INITIAL_STATE_MODE:-rpc}"
 
-for path in "$CORPUS" "$WORK_DIR/thin-corpus.jsonl" "$WORK_DIR/code-cache.json" "$FAMILY_MAP" "$IMPL_MANIFEST"; do
+for path in "$CORPUS" "$WORK_DIR/thin-corpus.jsonl" "$WORK_DIR/code-cache.json" "$WORK_DIR/corpus-provenance.json" "$FAMILY_MAP" "$IMPL_MANIFEST"; do
   [[ -s "$path" ]] || {
     echo "missing required S4 native-preparation input: $path" >&2
     if [[ "$path" == "$FAMILY_MAP" ]]; then
@@ -32,6 +33,7 @@ import json,sys
 p=sys.argv[1]; d=json.load(open(p))
 if d.get('dataset') != 'vegeta-s4': raise SystemExit(f"S4 family map has unexpected dataset: {d.get('dataset')!r}")
 if d.get('candidate_only'): raise SystemExit('refusing candidate_only map; review/freeze evaluation/vegeta/s4-native-family-map.v1.json first')
+if not d.get('freeze_evidence'): raise SystemExit('S4 family map lacks freeze_evidence; use tools/vegeta/freeze-vegeta-s4-family-map.py after the review gate passes')
 PY
 
 mkdir -p "$PLAN_DIR" "$EXEC_DIR"
@@ -87,6 +89,7 @@ python3 tools/vegeta/validate-vegeta-s4-readiness.py \
   --transaction-deficit "$PLAN_DIR/transaction-deficit.json" \
   --min-conflict "$MIN_CONFLICT" \
   --min-median-block "$MIN_MEDIAN" \
+  --min-family-conflict-relevant-access "$DIAG_FAMILY_CONFLICT_RELEVANT_ACCESS_REFERENCE" \
   --min-semantic-tx "$MIN_SEM_TX" \
   --min-contention-tx "$MIN_CONTENTION_TX" \
   --output "$PLAN_DIR/readiness.json" \

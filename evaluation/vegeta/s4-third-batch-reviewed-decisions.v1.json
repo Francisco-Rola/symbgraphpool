@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "Third S4 conflict-closure batch. Reviewed rows are family-level dependency aliases justified by frozen S4 selector scope plus public contract/token identity. Unknown/custom selectors remain mapped-opaque and must pass the later selector-semantic gate. Bridge/rollup/AMP-style families are intentionally not promoted here.",
+  "decisions": [
+    {
+      "priority": 17,
+      "address": "0xb912cfd8cd814988b794b5301785c12c71b51651",
+      "runtime_code_family": "5a4315b476318917253bb08310959df1de83fc6f1d0ffff9950fab1bbf5570b6",
+      "identity_hint": "OnBot (ONB) ERC20 token family",
+      "observed_selectors": [],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "review_class": "existing-native-family-alias",
+      "mapping_basis": "Public Ethereum token metadata identifies the exact owner as OnBot/ONB and ERC-20. Frozen S4 owner-level selector summary contains no custom selector evidence at this storage owner. Reuse cw20-base only for standard balance/allowance/transfer dependency classes; later selector-semantic validation remains authoritative and unsupported selectors remain opaque.",
+      "semantic_notes": "Family-level dependency classification only; no tokenomics or byte-for-byte EVM equivalence claim."
+    },
+    {
+      "priority": 18,
+      "address": "0x0b3ddf435d7e0a3cad97d85f94633a0e3a69fc01",
+      "runtime_code_family": "22b5c7e25fc0335550c67fd158ed9739d06aa126ee50126d5d6d1103f0a5c04e",
+      "identity_hint": "frozen S4 standard fungible-token selector family",
+      "observed_selectors": ["0x095ea7b3", "0x70a08231"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "review_class": "frozen-selector-scoped-existing-native-alias",
+      "mapping_basis": "Frozen S4 evidence for the storage owner is limited to standard ERC20 approve (0x095ea7b3) and balanceOf (0x70a08231) selector classes. Reuse cw20-base only for those standard dependency namespaces; this decision does not infer identity or semantics for any unobserved/custom selector, which remains mapped-opaque and is excluded by the later selector-semantic readiness gate unless reviewed separately.",
+      "semantic_notes": "Selector-scoped classification from frozen evidence; exact application identity intentionally unresolved."
+    },
+    {
+      "priority": 19,
+      "address": "0x844eb5c280f38c7462316aad3f338ef9bda62668",
+      "runtime_code_family": "39fc30b247bd5f4ffd99adffc0b8cb1d9775248075475088b054243f08a4a7b4",
+      "identity_hint": "Uniswap V3 MUBI/WETH pool",
+      "observed_selectors": ["0x128acb08"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "v3-pool-lock",
+      "review_class": "conservative-new-native-family-alias",
+      "mapping_basis": "Etherscan labels the exact address as the Uniswap V3 MUBI/WETH pool, and frozen S4 call-frame evidence is dominated by selector 0x128acb08 (Uniswap-V3 swap). The native alias models an independent per-pool singleton state dependency for this observed swap class. It intentionally does not model ticks/liquidity math or claim Uniswap-V3/EVM execution equivalence.",
+      "semantic_notes": "Conflict-preserving pool-global abstraction for the observed swap class; selector-semantic coverage remains separately gated."
+    },
+    {
+      "priority": 20,
+      "address": "0x9009bf358b29ec7091e6d9ade917a680df9c35f4",
+      "runtime_code_family": "910f88715b76121546c5e89ea4527598577f116b6304aa2c7cd3839e402e2f05",
+      "identity_hint": "ELONKID fungible token family",
+      "observed_selectors": ["0x70a08231"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "fee-token-cw20",
+      "review_class": "existing-native-family-alias",
+      "mapping_basis": "Public token metadata identifies the exact address as ELONKID and reports buy/sell-tax behavior; frozen S4 call-frame evidence at the owner is balanceOf. Reuse fee-token-cw20 as the conservative fungible-token dependency namespace; unreviewed custom/admin selectors remain opaque and do not inherit semantics automatically.",
+      "semantic_notes": "Conservative fee-token family classification; no claim about exact tax rates or administrative logic."
+    },
+    {
+      "priority": 21,
+      "address": "0x224da25c58574b852876a1c4e289be9eb7345322",
+      "runtime_code_family": "17a403ff0f06536c2f4ca216b03a512cbfdb6a3b9db607dcc53b65a5bf808b0a",
+      "identity_hint": "Pepe ERC20 token family",
+      "observed_selectors": ["0x70a08231"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "review_class": "existing-native-family-alias",
+      "mapping_basis": "Public token metadata identifies the exact address as Pepe/PEPE and frozen S4 call-frame evidence at this owner is standard balanceOf. Reuse cw20-base for standard fungible balance/allowance/transfer dependency classes only; custom selectors, if any, remain opaque and separately gated.",
+      "semantic_notes": "Standard token namespace only; no tokenomics equivalence claim."
+    },
+    {
+      "priority": 22,
+      "address": "0x4981816b0c2eef52473b708f914242a5e84a58a5",
+      "runtime_code_family": "ba7e918a2288ec52d2024fba5054224d962033ea64b880555cea18c0b2a3a562",
+      "identity_hint": "ACCEL (ACC) fee/limit ERC20 family",
+      "observed_selectors": ["0x70a08231"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "fee-token-cw20",
+      "review_class": "existing-native-family-alias",
+      "mapping_basis": "Verified public source for the exact ACCEL address exposes ERC20 transfer/balance/allowance state plus tax/max-transaction/max-wallet policy. Frozen S4 evidence includes standard balanceOf calls. Reuse fee-token-cw20 as the closest existing dependency abstraction for fungible balances/allowances plus shared policy state; exact tax/limit logic is not claimed.",
+      "semantic_notes": "Dependency-family reuse only; exact ACCEL policy values and EVM control flow are outside scope."
+    },
+    {
+      "priority": 23,
+      "address": "0x6ad252cb62f2c1fd589e37f6c07abf0cf3b81cd9",
+      "runtime_code_family": "a6bafdea07747a30664c475376d5ad1132ed654df2e1bf7f8a25fe53cef32cb1",
+      "identity_hint": "Live by X (LIVE) fungible token family",
+      "observed_selectors": ["0x70a08231"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "review_class": "frozen-selector-scoped-existing-native-alias",
+      "mapping_basis": "Public token metadata identifies the exact address as Live by X/LIVE and frozen S4 call-frame evidence at this owner is standard balanceOf. Reuse cw20-base for the observed standard fungible dependency namespace; unobserved/custom selector behavior remains opaque and separately gated.",
+      "semantic_notes": "Observed-selector/family-level mapping only; no claim about unobserved tokenomics."
+    },
+    {
+      "priority": 24,
+      "address": "0xda169ce4c000ec32d13fd78b504940c605645c43",
+      "runtime_code_family": "fe242a638f820dcb8a5ae15c13b2fea01efdb057a4c98b625cf1e5b1654c039d",
+      "identity_hint": "Dogecoin On The Moon (MOONDOGE) fee/limit ERC20 family",
+      "observed_selectors": ["0x70a08231"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "fee-token-cw20",
+      "review_class": "existing-native-family-alias",
+      "mapping_basis": "Verified public source for the exact MOONDOGE address exposes ERC20 balance/allowance/transfer plus trading-limit/bot/tax policy state; frozen S4 evidence includes balanceOf calls. Reuse fee-token-cw20 as the conservative balance/allowance plus shared-policy dependency abstraction, without claiming exact tax or anti-bot semantics.",
+      "semantic_notes": "Conservative policy-state abstraction; custom/admin selectors remain opaque unless separately reviewed."
+    },
+    {
+      "priority": 25,
+      "address": "0xc8d2f14c33064c810efa29ee7648ccca0cd1f772",
+      "runtime_code_family": "4de4849ca7a53ec6085061cf396d75c10f94ff6fdc21503694ec588f9acae905",
+      "identity_hint": "Spacecraft ERC20 token family",
+      "observed_selectors": [],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "review_class": "existing-native-family-alias",
+      "mapping_basis": "Public Ethereum token metadata identifies the exact address as Spacecraft and classifies it as ERC-20. Reuse cw20-base only for standard fungible dependency classes; absent owner-level selector evidence means custom behavior is not inferred and remains mapped-opaque at the later semantic gate.",
+      "semantic_notes": "Family-level token classification; exact application/tokenomics equivalence is not claimed."
+    },
+    {
+      "priority": 26,
+      "address": "0xa3c519683010d59fa54a4a6c4cac0f55cb20bb3f",
+      "runtime_code_family": "9771b5a2b4e1aa02727b5281f1afb2aa1f5c224ff9dfefc85d6d7e2d545f7eae",
+      "identity_hint": "BetIT ERC20 token family",
+      "observed_selectors": [],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "review_class": "existing-native-family-alias",
+      "mapping_basis": "Verified public source for the exact BetIT address includes the standard IERC20 balance/transfer/allowance interface. Reuse cw20-base for those standard dependency classes; any application-specific/admin functions remain opaque and must not inherit token semantics implicitly.",
+      "semantic_notes": "Standard IERC20 dependency mapping only."
+    }
+  ]
+}

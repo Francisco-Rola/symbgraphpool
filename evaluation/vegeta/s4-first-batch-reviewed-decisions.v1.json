@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "Human-reviewed first S4 family batch. These decisions are applied to the persistent S4 review base and remain candidate-only until the exact coverage/freeze gate passes.",
+  "decisions": [
+    {
+      "priority": 1,
+      "address": "0xdb5889e35e379ef0498aae126fc2cce1fbd23216",
+      "runtime_code_family": "b554904137f2259dd2578d406fe4bc4c1327c918d1340c1a8f121f7f3262da63",
+      "identity_hint": "Banana Gun custom swap/router family",
+      "observed_selectors": ["0x0162e2d0", "0x70fef1da", "0x"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "custom-swap-router",
+      "mapping_basis": "Frozen S4 bytecode/address review identifies the historical Banana Gun router. Its source ABI is unverified, so the native model intentionally uses an independent conservative router-global execution-guard state class for the observed swap/fallback selectors; this is a conflict-preserving semantic abstraction, not an EVM-application-equivalence claim.",
+      "semantic_notes": "Observed swap/fallback calls are mapped to the conservative route-execution guard. Unknown selectors remain explicit mapped-opaque/background behavior rather than guessed application semantics."
+    },
+    {
+      "priority": 2,
+      "address": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "runtime_code_family": "9792a60e149086e16264936114044e08b07981f87f64293339df5cd659e92a29",
+      "identity_hint": "LINK token family",
+      "observed_selectors": ["0xa9059cbb"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "mapping_basis": "Frozen S4 activity for this LINK runtime family is ERC20 transfer-dominated. The reviewed S4 selector scope is represented by cw20-base balance/transfer/allowance state; selectors outside that reviewed scope remain opaque.",
+      "semantic_notes": "Reuse only the standard fungible-token dependency classes exercised by frozen S4."
+    },
+    {
+      "priority": 3,
+      "address": "0xc114f87326c0e07f40e73b6c9fcea54888c2c67f",
+      "runtime_code_family": "e4774ce981798c23daad3f54c4b86ffc2ca58500d7268e52a4d4e696bf3cd69b",
+      "identity_hint": "SEEK ERC721-like family",
+      "observed_selectors": ["0x3bb1ee11", "0xa22cb465", "0x23b872dd"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw721-drop",
+      "mapping_basis": "Frozen S4 activity combines standard ERC721 approval/transfer paths with selector 0x3bb1ee11, whose public transaction effects are mint-like. The native translation preserves the ERC721 ownership/approval plus sequential-mint dependency classes; exact EVM mint cardinality/cryptographic validation is outside the S4 claim.",
+      "semantic_notes": "0x3bb1ee11 is translated as one logical mint event per source call to preserve the mint-state dependency class; the workload does not claim exact EVM final-state equivalence."
+    },
+    {
+      "priority": 4,
+      "address": "0xbe9895146f7af43049ca1c1ae358b0541ea49704",
+      "runtime_code_family": "76bcd86b160a3cd8740d07c985eedc4c3b044c0fb9123c8f90f49ac17185fba8",
+      "identity_hint": "cbETH proxy/token family",
+      "observed_selectors": [],
+      "review_status": "reviewed",
+      "reviewed_native_family": "fiat-token-cw20",
+      "mapping_basis": "Frozen S4 storage-owner and delegate-call review treats cbETH as an upgradeable fungible-token namespace. The native family preserves balances/allowances/supply-style token dependencies across the proxy storage context; unsupported implementation selectors remain explicit opaque actions.",
+      "semantic_notes": "The proxy owner is the native instance namespace; implementation DELEGATECALL frames inherit that storage namespace."
+    },
+    {
+      "priority": 5,
+      "address": "0x6de037ef9ad2725eb40118bb1702ebb27e4aeb24",
+      "runtime_code_family": "2bac97e30a3749ba06f5ea2f1e205ad49fe9118caf7d283a1492760dd558b21b",
+      "identity_hint": "RNDR token family",
+      "observed_selectors": ["0xa9059cbb"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "mapping_basis": "Frozen S4 direct activity is standard fungible-token transfer behavior. cw20-base preserves the reviewed balance/transfer/allowance state classes; unreviewed proxy/implementation selectors remain opaque.",
+      "semantic_notes": "No exact EVM storage-layout equivalence is claimed."
+    },
+    {
+      "priority": 6,
+      "address": "0x38e382f74dfb84608f3c1f10187f6bef5951de93",
+      "runtime_code_family": "1fc5a4ab49d1d973bcb42d8287dc59cb7579b7e76548fc8d9c94551d3dd07ee5",
+      "identity_hint": "MUBI token family",
+      "observed_selectors": ["0x095ea7b3", "0x70a08231", "0xa9059cbb"],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "mapping_basis": "Frozen S4 activity is approve/balance/transfer-like and is represented by the standard cw20-base balance/allowance dependency classes. Selectors outside the reviewed ERC20-like scope remain opaque.",
+      "semantic_notes": "Reuse is scoped to observed fungible-token dependency semantics, not bytecode equivalence."
+    }
+  ]
+}

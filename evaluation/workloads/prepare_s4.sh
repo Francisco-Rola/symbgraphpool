@@ -13,9 +13,14 @@ if [[ ! -s "$FAMILY_MAP" ]]; then
   cat <<MSG >&2
 
 S4 characterization is complete, but native preparation remains fail-closed.
-Review: $S4_DIR/native-characterization/family-review-queue.md
-Candidate: $S4_DIR/native-characterization/s4-native-family-map.candidate.json
-Freeze a reviewed map as: $FAMILY_MAP
+Review:    $S4_DIR/native-characterization/family-review-queue.md
+Decisions: $S4_DIR/native-characterization/s4-review-decisions.draft.json
+
+After editing reviewed decisions, run:
+  bash tools/vegeta/run-vegeta-s4-review-check.sh
+  VEGETA_S4_REVIEW_ACK=1 bash tools/vegeta/run-vegeta-s4-freeze-reviewed-map.sh
+
+The freeze step writes: $FAMILY_MAP
 Then rerun: bash evaluation/workloads/prepare_s4.sh
 MSG
   exit 3
