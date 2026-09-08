@@ -9,7 +9,9 @@
     "Candidate extension families are workload analogues for the observed selector semantics; they are not claims of byte-for-byte Ethereum application equivalence.",
     "S1 extends the reusable native family registry with selector-reviewed cw721-drop and stargate-cw20 families; unreviewed selectors remain explicit fallbacks and are excluded from selector-aware conflict coverage.",
     "S4 adds custom-swap-router as an independent storage namespace reusing the checked-in marketplace-router CosmWasm binary/profile only for a conservative singleton route-execution guard; this is explicitly not an application-equivalence claim.",
-    "S4 adds v3-pool-lock as an independent per-pool storage namespace reusing the marketplace-router singleton ExecuteRoute dependency guard for the observed Uniswap-V3 swap class; ticks, liquidity math, settlement, and EVM execution equivalence are intentionally out of scope."
+    "S4 adds v3-pool-lock as an independent per-pool storage namespace reusing the marketplace-router singleton ExecuteRoute dependency guard for the observed Uniswap-V3 swap class; ticks, liquidity math, settlement, and EVM execution equivalence are intentionally out of scope.",
+    "S4 fourth-batch review adds distinct amp-partition-collateral-lock, linea-rollup-lock, zksync-l1-system-lock, and arbitrum-bridge-lock namespaces. Each reuses only the checked-in marketplace-router ExecuteRoute singleton dependency guard as a conservative per-source-owner lock; public-source evidence is checked in separately and no EVM state/execution equivalence is claimed.",
+    "S4 fifth-batch review adds synthetix-system-lock and starknet-l1-system-lock as distinct conservative per-owner dependency aliases. Generic proxy runtime bytecode is not treated as an application identity; BlurPool and Starknet proxy storage owners are reviewed through verified delegate implementation profiles."
   ],
   "families": [
     {
@@ -296,6 +298,90 @@
       ],
       "implementation_status": "implemented-conservative-alias",
       "symbolic_status": "llm-source-derived"
+    },
+    {
+      "native_code_family": "amp-partition-collateral-lock",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ExecuteRoute"
+      ],
+      "implementation_status": "implemented-conservative-alias",
+      "symbolic_status": "llm-source-derived",
+      "implementation_alias_of": "marketplace-router"
+    },
+    {
+      "native_code_family": "linea-rollup-lock",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ExecuteRoute"
+      ],
+      "implementation_status": "implemented-conservative-alias",
+      "symbolic_status": "llm-source-derived",
+      "implementation_alias_of": "marketplace-router"
+    },
+    {
+      "native_code_family": "zksync-l1-system-lock",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ExecuteRoute"
+      ],
+      "implementation_status": "implemented-conservative-alias",
+      "symbolic_status": "llm-source-derived",
+      "implementation_alias_of": "marketplace-router"
+    },
+    {
+      "native_code_family": "arbitrum-bridge-lock",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ExecuteRoute"
+      ],
+      "implementation_status": "implemented-conservative-alias",
+      "symbolic_status": "llm-source-derived",
+      "implementation_alias_of": "marketplace-router"
+    },
+    {
+      "native_code_family": "synthetix-system-lock",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ExecuteRoute"
+      ],
+      "implementation_status": "implemented-conservative-alias",
+      "symbolic_status": "llm-source-derived",
+      "implementation_alias_of": "marketplace-router"
+    },
+    {
+      "native_code_family": "starknet-l1-system-lock",
+      "package": "acg-benchmark-native-s3-marketplace-router",
+      "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
+      "required_profiles": [
+        "instantiate",
+        "execute::ExecuteRoute"
+      ],
+      "implementation_status": "implemented-conservative-alias",
+      "symbolic_status": "llm-source-derived",
+      "implementation_alias_of": "marketplace-router"
     }
   ]
 }

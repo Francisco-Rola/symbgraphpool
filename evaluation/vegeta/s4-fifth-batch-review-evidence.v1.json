@@ -1,0 +1,558 @@
+{
+  "dataset": "vegeta-s4",
+  "purpose": "Checked-in compact review record for the fifth S4 batch. Full machine evidence remains in the generated native-characterization dossier; this file records the facts used for the executable review decisions and the one unresolved row.",
+  "records": [
+    {
+      "blocker_runtime_code_family": "8eee60ac0479c78b7dd93608ce2fe16b6b4eeacf92062605b30f348399208b12",
+      "call_frame_selectors": [
+        "0xa9059cbb",
+        "0x70a08231",
+        "0x095ea7b3",
+        "0x23b872dd",
+        "0x313ce567"
+      ],
+      "decision_runtime_code_family": "8eee60ac0479c78b7dd93608ce2fe16b6b4eeacf92062605b30f348399208b12",
+      "direct_selectors": [
+        "0xa9059cbb",
+        "0x095ea7b3"
+      ],
+      "evidence_id": "fifth-01-humanstandardtoken-erc20-run",
+      "priority": 17,
+      "review_conclusion": "Reviewed as a standard fungible-token dependency family for the exercised S4 selectors.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x2c7f4cca29a4627a7a8e20440abf107acc3e42eb",
+      "verified_contract_identifiers": [],
+      "verified_source_files": [
+        "HumanStandardToken.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "691f30987d6abddc240dd299586d6dc10a9a1d078eee0d30ab736f0ad0ff3ef5",
+      "call_frame_selectors": [
+        "0xa9059cbb"
+      ],
+      "decision_runtime_code_family": "691f30987d6abddc240dd299586d6dc10a9a1d078eee0d30ab736f0ad0ff3ef5",
+      "direct_selectors": [
+        "0xa9059cbb"
+      ],
+      "evidence_id": "fifth-02-troent-erc20-token",
+      "priority": 18,
+      "review_conclusion": "Safe cw20-base reuse for the exercised transfer dependency surface.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x42ccea04f823a130ff1a7603d9057b9fe2a25ac5",
+      "verified_contract_identifiers": [
+        "TROENT.sol:TROENT"
+      ],
+      "verified_source_files": [
+        "TROENT.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "eec09a60088c7bde51d7a34cd1299f7c26455fbe98593bd1b1f5f7c0cf82502d",
+      "call_frame_selectors": [
+        "0xa9059cbb",
+        "0x70a08231",
+        "0x23b872dd",
+        "0x095ea7b3"
+      ],
+      "decision_runtime_code_family": "eec09a60088c7bde51d7a34cd1299f7c26455fbe98593bd1b1f5f7c0cf82502d",
+      "direct_selectors": [
+        "0xa9059cbb",
+        "0x095ea7b3"
+      ],
+      "evidence_id": "fifth-03-verified-capped-erc20-token",
+      "priority": 19,
+      "review_conclusion": "Safe cw20-base reuse for the exercised standard ERC20 dependency surface.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x7da2641000cbb407c329310c461b2cb9c70c3046",
+      "verified_contract_identifiers": [
+        "contracts/Token.sol:Token"
+      ],
+      "verified_source_files": [
+        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
+        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
+        "@openzeppelin/contracts/token/ERC20/extensions/ERC20Capped.sol",
+        "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "@openzeppelin/contracts/utils/Context.sol",
+        "contracts/Token.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "4a60fba4eb9357db13a46f6da61074c58521f4869427acf1435b9d0e9d06b4d6",
+      "call_frame_selectors": [
+        "0x00000000",
+        "0x87201b41",
+        "0xf2d12b12",
+        "0xfb0f3ee1",
+        "0xfd9f1e10",
+        "0xe7acab24",
+        "0xed98a574",
+        "0xb3a34c4c",
+        "0x5b34b966",
+        "0x46423aa7",
+        "0xa8174404",
+        "0xf07ec373",
+        "0x79df72bd",
+        "0x",
+        "0x88147732"
+      ],
+      "decision_runtime_code_family": "4a60fba4eb9357db13a46f6da61074c58521f4869427acf1435b9d0e9d06b4d6",
+      "direct_selectors": [
+        "0x00000000",
+        "0xf2d12b12",
+        "0xfb0f3ee1",
+        "0x87201b41",
+        "0xfd9f1e10",
+        "0xed98a574",
+        "0xe7acab24",
+        "0xb3a34c4c",
+        "0x5b34b966",
+        "0xa8174404",
+        "0x"
+      ],
+      "evidence_id": "fifth-04-seaport-marketplace-settleme",
+      "priority": 20,
+      "review_conclusion": "Safe reuse of the existing marketplace-router dependency abstraction for Seaport.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x00000000000000adc04c56bf30ac9d3c0aaf14dc",
+      "verified_contract_identifiers": [
+        "contracts/Seaport.sol:Seaport"
+      ],
+      "verified_source_files": [
+        "contracts/Seaport.sol",
+        "contracts/conduit/lib/ConduitEnums.sol",
+        "contracts/conduit/lib/ConduitStructs.sol",
+        "contracts/helpers/PointerLibraries.sol",
+        "contracts/interfaces/AmountDerivationErrors.sol",
+        "contracts/interfaces/ConduitControllerInterface.sol",
+        "contracts/interfaces/ConduitInterface.sol",
+        "contracts/interfaces/ConsiderationEventsAndErrors.sol",
+        "contracts/interfaces/ConsiderationInterface.sol",
+        "contracts/interfaces/CriteriaResolutionErrors.sol",
+        "contracts/interfaces/FulfillmentApplicationErrors.sol",
+        "contracts/interfaces/ReentrancyErrors.sol",
+        "contracts/interfaces/SignatureVerificationErrors.sol",
+        "contracts/interfaces/TokenTransferrerErrors.sol",
+        "contracts/interfaces/ZoneInteractionErrors.sol",
+        "contracts/lib/AmountDeriver.sol",
+        "contracts/lib/Assertions.sol",
+        "contracts/lib/BasicOrderFulfiller.sol",
+        "contracts/lib/Consideration.sol",
+        "contracts/lib/ConsiderationBase.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "17dae0a0210e8d61d09959b96290901cbb5e4e59ab74749b9d5dcd554316ed9e",
+      "call_frame_selectors": [
+        "0xa9059cbb",
+        "0x70a08231",
+        "0x23b872dd",
+        "0x095ea7b3",
+        "0x"
+      ],
+      "decision_runtime_code_family": "17dae0a0210e8d61d09959b96290901cbb5e4e59ab74749b9d5dcd554316ed9e",
+      "direct_selectors": [
+        "0xa9059cbb",
+        "0x095ea7b3"
+      ],
+      "evidence_id": "fifth-05-springfield-fee-limit-erc20-",
+      "priority": 21,
+      "review_conclusion": "Safe fee-token-cw20 reuse for observed fee/limit-token dependencies.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x1e984e2220a06a1845d3c93aa562bc84e10ba948",
+      "verified_contract_identifiers": [
+        "SPRINGFIELD.sol:SPRINGFIELD"
+      ],
+      "verified_source_files": [
+        "SPRINGFIELD.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "5539edde619c40b46095e6bef16569aa67f818a1a4bd4a38db190abc1087c053",
+      "call_frame_selectors": [
+        "0x70a08231",
+        "0xa9059cbb",
+        "0x23b872dd",
+        "0x",
+        "0x095ea7b3",
+        "0xdd62ed3e"
+      ],
+      "decision_runtime_code_family": "5539edde619c40b46095e6bef16569aa67f818a1a4bd4a38db190abc1087c053",
+      "direct_selectors": [
+        "0xa9059cbb",
+        "0x095ea7b3",
+        "0x23b872dd"
+      ],
+      "evidence_id": "fifth-06-airtor-fee-limit-erc20-token",
+      "priority": 22,
+      "review_conclusion": "Safe fee-token-cw20 reuse for observed AirTor transfer-policy dependencies.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x0f7b3f5a8fed821c5eb60049538a548db2d479ce",
+      "verified_contract_identifiers": [
+        "AirTor.sol:AirTor"
+      ],
+      "verified_source_files": [
+        "AirTor.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "d87e25afc70f513a1c8807697b1a575142ae5761ddedc34545a75ef7250ca679",
+      "call_frame_selectors": [
+        "0xa9059cbb",
+        "0x40c10f19"
+      ],
+      "decision_runtime_code_family": "d87e25afc70f513a1c8807697b1a575142ae5761ddedc34545a75ef7250ca679",
+      "direct_selectors": [
+        "0xa9059cbb"
+      ],
+      "evidence_id": "fifth-07-entropy-role-controlled-erc2",
+      "priority": 23,
+      "review_conclusion": "Safe controlled-cw20 reuse for exercised transfer/mint and privileged-control dependencies.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x675ababd3a210566a5e213547523b740be80041a",
+      "verified_contract_identifiers": [
+        "contracts/erc20/EntropyErc20.sol:EntropyErc20"
+      ],
+      "verified_source_files": [
+        "@openzeppelin/contracts/access/AccessControl.sol",
+        "@openzeppelin/contracts/access/AccessControlEnumerable.sol",
+        "@openzeppelin/contracts/access/IAccessControl.sol",
+        "@openzeppelin/contracts/access/IAccessControlEnumerable.sol",
+        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
+        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
+        "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol",
+        "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol",
+        "@openzeppelin/contracts/utils/Context.sol",
+        "@openzeppelin/contracts/utils/Strings.sol",
+        "@openzeppelin/contracts/utils/introspection/ERC165.sol",
+        "@openzeppelin/contracts/utils/introspection/IERC165.sol",
+        "@openzeppelin/contracts/utils/structs/EnumerableSet.sol",
+        "contracts/erc20/EntropyErc20.sol",
+        "contracts/interface/IERC1363.sol",
+        "contracts/interface/IERC1363Receiver.sol",
+        "contracts/interface/IERC1363Spender.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "9e37ccc74af0aebc44759afd944123dfcd9dbc9c420093f252b85d1c6b7a023f",
+      "call_frame_selectors": [
+        "0xa9059cbb",
+        "0x70a08231",
+        "0x23b872dd",
+        "0x095ea7b3",
+        "0xdd62ed3e",
+        "0xd505accf"
+      ],
+      "decision_runtime_code_family": "9e37ccc74af0aebc44759afd944123dfcd9dbc9c420093f252b85d1c6b7a023f",
+      "direct_selectors": [
+        "0xa9059cbb",
+        "0x095ea7b3"
+      ],
+      "evidence_id": "fifth-08-lon-permit-mint-erc20-token",
+      "priority": 24,
+      "review_conclusion": "Safe fiat-token-cw20 reuse for the exercised ERC20/permit/control dependency surface.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x0000000000095413afc295d19edeb1ad7b71c952",
+      "verified_contract_identifiers": [
+        "contracts/implements/Lon.sol:Lon"
+      ],
+      "verified_source_files": [
+        "@openzeppelin/contracts/GSN/Context.sol",
+        "@openzeppelin/contracts/math/SafeMath.sol",
+        "@openzeppelin/contracts/token/ERC20/ERC20.sol",
+        "@openzeppelin/contracts/token/ERC20/IERC20.sol",
+        "@openzeppelin/contracts/utils/Address.sol",
+        "contracts/implements/Lon.sol",
+        "contracts/implements/Ownable.sol",
+        "contracts/interfaces/IEIP2612.sol",
+        "contracts/interfaces/IEmergency.sol",
+        "contracts/interfaces/ILon.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "333fe18b561619d120d3f984f328c4ca026e608c9c6138e6eab4cea53581ebc9",
+      "call_frame_selectors": [
+        "0xa9059cbb",
+        "0x70a08231",
+        "0x23b872dd",
+        "0x095ea7b3",
+        "0x62ad1b83",
+        "0xdd62ed3e",
+        "0xdcdc7dd0",
+        "0xfe9d9303",
+        "0x4d78fdc6"
+      ],
+      "decision_runtime_code_family": "333fe18b561619d120d3f984f328c4ca026e608c9c6138e6eab4cea53581ebc9",
+      "direct_selectors": [
+        "0xa9059cbb",
+        "0x23b872dd",
+        "0x095ea7b3",
+        "0x62ad1b83",
+        "0xdcdc7dd0",
+        "0xfe9d9303",
+        "0x4d78fdc6"
+      ],
+      "evidence_id": "fifth-09-vra-controlled-pausable-erc2",
+      "priority": 25,
+      "review_conclusion": "Safe family-level controlled fungible dependency reuse; custom operator execution semantics are not claimed.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0xf411903cbc70a74d22900a5de66a2dda66507255",
+      "verified_contract_identifiers": [
+        "VraToken.sol:VraToken"
+      ],
+      "verified_source_files": [
+        "VraToken.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "881d0161885a68df597c6831fa3b59c25e1543251c82252dab963eb612b98fe5",
+      "call_frame_selectors": [
+        "0xa9059cbb",
+        "0x70a08231",
+        "0x23b872dd",
+        "0x095ea7b3",
+        "0xdd62ed3e"
+      ],
+      "decision_runtime_code_family": "881d0161885a68df597c6831fa3b59c25e1543251c82252dab963eb612b98fe5",
+      "direct_selectors": [
+        "0xa9059cbb",
+        "0x095ea7b3"
+      ],
+      "evidence_id": "fifth-10-standard-fungible-selector-o",
+      "priority": 26,
+      "review_conclusion": "Selector-scoped cw20-base reuse is supported by the complete local S4 selector evidence despite missing verified source.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0xd8912c10681d8b21fd3742244f44658dba12264e",
+      "verified_contract_identifiers": [],
+      "verified_source_files": []
+    },
+    {
+      "blocker_runtime_code_family": "676e7a8f6295c36d83db31018f21dcaeeebaaef2da1198a3308e7c0435f2519a",
+      "call_frame_selectors": [
+        "0xa9059cbb",
+        "0x70a08231",
+        "0x23b872dd",
+        "0x095ea7b3",
+        "0xdd62ed3e",
+        "0x39509351",
+        "0x313ce567",
+        "0x01ffc9a7",
+        "0x06fdde03",
+        "0x95d89b41"
+      ],
+      "decision_runtime_code_family": "676e7a8f6295c36d83db31018f21dcaeeebaaef2da1198a3308e7c0435f2519a",
+      "direct_selectors": [
+        "0xa9059cbb",
+        "0x095ea7b3",
+        "0x39509351",
+        "0x23b872dd"
+      ],
+      "evidence_id": "fifth-11-matic-pausable-erc20-token",
+      "priority": 27,
+      "review_conclusion": "Safe controlled-cw20 reuse for MATIC's exercised fungible and pausable-control dependency surface.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x7d1afa7b718fb893db30a3abc0cfc608aacfebb0",
+      "verified_contract_identifiers": [
+        "MaticToken.sol:MaticToken"
+      ],
+      "verified_source_files": [
+        "MaticToken.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "057f5a9212d017d3a499e9ac4ddae634f8e484c9327b7f8266874c1ffd9df7e0",
+      "call_frame_selectors": [
+        "0xbc67f832",
+        "0xa9059cbb",
+        "0x70a08231",
+        "0x23b872dd",
+        "0x095ea7b3",
+        "0xdd62ed3e",
+        "0xaf086c7e",
+        "0x44b3e923",
+        "0x6c00f310",
+        "0x2f7206ce",
+        "0x295da87d",
+        "0x2d3169eb",
+        "0x8a290014",
+        "0x9741fb22",
+        "0x320223db",
+        "0xc2bf3880"
+      ],
+      "decision_runtime_code_family": "057f5a9212d017d3a499e9ac4ddae634f8e484c9327b7f8266874c1ffd9df7e0",
+      "direct_selectors": [],
+      "evidence_id": "fifth-12-synthetix-protocol-token-sys",
+      "priority": 28,
+      "review_conclusion": "Reviewed as a distinct conservative Synthetix system dependency namespace.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032",
+      "verified_contract_identifiers": [
+        "Synthetix.sol:Synthetix"
+      ],
+      "verified_source_files": [
+        "Synthetix.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "7421a58ad9ceb68c43df758b1d32821ba7d36b489789a778cb99936a3e1893ea",
+      "call_frame_selectors": [
+        "0x23b872dd",
+        "0x2e1a7d4d",
+        "0xd0e30db0",
+        "0x70a08231",
+        "0x9555a942",
+        "0xf340fa01",
+        "0xe04d94ae",
+        "0x627cdcb9",
+        "0xb3be57f8",
+        "0x9a1fc3a7",
+        "0xf4acd740",
+        "0x"
+      ],
+      "decision_runtime_code_family": "3b52a3f0be0f75537b6dadc9378a8db02e6eedee15b36f7374f510de285a3fed",
+      "delegate_target": "0x01a656024de4b89e2d0198bf4d468e8fd2358b17",
+      "direct_selectors": [
+        "0x2e1a7d4d",
+        "0xd0e30db0",
+        "0x627cdcb9",
+        "0xb3be57f8",
+        "0x9a1fc3a7",
+        "0xf4acd740",
+        "0x"
+      ],
+      "evidence_id": "fifth-13-blur-pool",
+      "priority": 29,
+      "review_conclusion": "Generic proxy runtime is resolved owner-specifically to verified BlurPool implementation and wrapped-native-token.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x0000000000a39bb272e79075ade125fd351887ac",
+      "verified_contract_identifiers": [
+        "contract/Proxy.sol:ERC1967Proxy",
+        "contracts/pool/BlurPool.sol:BlurPool"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "d124079c81bccc739fb75764c300034a3ea8da46a1fea0b8a497e32e381cfdcf",
+      "call_frame_selectors": [
+        "0x",
+        "0x3ccfd60b"
+      ],
+      "decision_runtime_code_family": "d124079c81bccc739fb75764c300034a3ea8da46a1fea0b8a497e32e381cfdcf",
+      "direct_selectors": [
+        "0x",
+        "0x3ccfd60b"
+      ],
+      "evidence_id": "fifth-14-unresolved",
+      "priority": 30,
+      "review_conclusion": "Unresolved: Sourcify source not found and local selector evidence is insufficient for semantic classification.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x9b9e1f03fa9e5934f5523f4b5d5445395d51e50c",
+      "verified_contract_identifiers": []
+    },
+    {
+      "blocker_runtime_code_family": "f3fd137f4a5a3d15084d199b2a1c0e93feb03da2d91baa02ac4d0d489239b163",
+      "call_frame_selectors": [
+        "0xa9059cbb",
+        "0x70a08231",
+        "0x23b872dd",
+        "0x095ea7b3",
+        "0xdd62ed3e"
+      ],
+      "decision_runtime_code_family": "f3fd137f4a5a3d15084d199b2a1c0e93feb03da2d91baa02ac4d0d489239b163",
+      "direct_selectors": [
+        "0xa9059cbb",
+        "0x095ea7b3",
+        "0x23b872dd"
+      ],
+      "evidence_id": "fifth-15-the-sandbox-sand-controlled-",
+      "priority": 31,
+      "review_conclusion": "Safe controlled-cw20 family reuse for the exercised SAND fungible/control dependency surface.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0x3845badade8e6dff049820680d1f14bd3903a5d0",
+      "verified_contract_identifiers": [
+        "src/Sand.sol:Sand"
+      ],
+      "verified_source_files": [
+        "contracts_common/src/BaseWithStorage/Admin.sol",
+        "contracts_common/src/BaseWithStorage/SuperOperators.sol",
+        "contracts_common/src/Interfaces/ERC20Events.sol",
+        "contracts_common/src/Libraries/BytesUtil.sol",
+        "src/Sand.sol",
+        "src/Sand/erc20/ERC20BaseToken.sol",
+        "src/Sand/erc20/ERC20BasicApproveExtension.sol",
+        "src/Sand/erc20/ERC20ExecuteExtension.sol"
+      ]
+    },
+    {
+      "blocker_runtime_code_family": "dbc6bd2a5b33cdae1c0d0bca27ba9bde66832cca035e1f592c821e6d82179fb9",
+      "call_frame_selectors": [
+        "0x77552641",
+        "0x3e3aa6c5",
+        "0x2c9dd5c0",
+        "0xa46efaf3"
+      ],
+      "decision_runtime_code_family": "044d6332da1b79172c779e718e485de3fba43e367eb494fa1b456678ac0e6eec",
+      "delegate_target": "0x16938e4b59297060484fa56a12594d8d6f4177e8",
+      "direct_selectors": [
+        "0x77552641"
+      ],
+      "evidence_id": "fifth-16-starknet",
+      "priority": 32,
+      "review_conclusion": "Verified Starknet implementation behind proxy; use owner-scoped conservative Starknet state lock.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json"
+      ],
+      "storage_owner": "0xc662c410c0ecf747543f5ba90660f6abebd9c8c4",
+      "verified_contract_identifiers": [
+        "Proxy.sol:Proxy",
+        "Starknet.sol:Starknet"
+      ]
+    }
+  ],
+  "schema_version": 1
+}

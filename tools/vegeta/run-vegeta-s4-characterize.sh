@@ -106,7 +106,8 @@ python3 tools/vegeta/plan-vegeta-s4-semantic-coverage.py \
   --top-clusters "${VEGETA_S4_COVERAGE_PLAN_TOP_CLUSTERS:-100}" \
   --top-families "${VEGETA_S4_COVERAGE_PLAN_TOP_FAMILIES:-100}" \
   --max-greedy-steps "${VEGETA_S4_COVERAGE_PLAN_MAX_STEPS:-100}" \
-  --target-conflict-relevant-access "${VEGETA_S4_MIN_CONFLICT_RELEVANT_ACCESS_COVERAGE:-${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-${VEGETA_S4_MIN_FAMILY_STATE_GAS_COVERAGE:-0.90}}}" \
+  --target-storage-access "${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}" \
+  --target-conflict-relevant-access "${VEGETA_S4_MIN_CONFLICT_RELEVANT_ACCESS_COVERAGE:-0.90}" \
   --target-conflict "${VEGETA_S4_MIN_CONFLICT_COVERAGE:-0.95}"
 
 python3 tools/vegeta/build-vegeta-s4-review-queue.py \
@@ -124,7 +125,8 @@ python3 tools/vegeta/check-vegeta-s4-family-review-readiness.py \
   --provenance "$WORK_DIR/corpus-provenance.json" \
   --min-conflict "${VEGETA_S4_MIN_CONFLICT_COVERAGE:-0.95}" \
   --min-median-block "${VEGETA_S4_MIN_MEDIAN_BLOCK_COVERAGE:-0.80}" \
-  --min-conflict-relevant-access "${VEGETA_S4_MIN_CONFLICT_RELEVANT_ACCESS_COVERAGE:-${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-${VEGETA_S4_MIN_FAMILY_STATE_GAS_COVERAGE:-0.90}}}" \
+  --min-storage-access "${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}" \
+  --min-conflict-relevant-access "${VEGETA_S4_MIN_CONFLICT_RELEVANT_ACCESS_COVERAGE:-0.90}" \
   --output "$WORK_DIR/family-review-readiness.json" \
   --text-output "$WORK_DIR/family-review-readiness.txt" \
   --allow-low
@@ -146,5 +148,5 @@ echo "family freeze gate:   $WORK_DIR/family-review-readiness.txt"
 echo
 echo "Next step: inspect $WORK_DIR/family-marginal-coverage.txt, then edit $REVIEW_DECISIONS for the first review batch."
 echo "For each completed row set review_status=reviewed, reviewed_native_family, and mapping_basis."
-echo "Then rerun this command (or tools/vegeta/run-vegeta-s4-review-check.sh) to recompute exact conflict coverage; access/gas metrics remain diagnostics."
+echo "Then rerun this command (or tools/vegeta/run-vegeta-s4-review-check.sh) to recompute the exact all-storage-access and conflict publication gates; conflict-relevant access and gas remain diagnostics."
 echo "Only after family-review-readiness PASS should you freeze evaluation/vegeta/s4-native-family-map.v1.json and run prepare-native."

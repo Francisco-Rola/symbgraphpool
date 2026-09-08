@@ -32,4 +32,4 @@ echo "coverage:  $WORK_DIR/source-family-coverage.txt"
 echo "planner:   $WORK_DIR/family-marginal-coverage.txt"
 echo "gate:      $WORK_DIR/family-review-readiness.txt"
 echo
-echo "Next: inspect the exact post-batch gate. If it is not ready, continue only with the newly ranked conflict/conflict-relevant-access families."
+echo "Next: inspect the exact post-batch gate. If it is not ready, continue with the balanced all-storage-access/conflict planner; conflict-relevant access and strict gas are diagnostics."

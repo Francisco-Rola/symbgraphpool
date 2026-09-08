@@ -1,0 +1,21 @@
+{
+  "dataset": "vegeta-s4",
+  "native_code_families": {
+    "starknet-l1-system-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Starknet L1 core proxy/implementation global state for state updates, L1/L2 messaging, governance/operator state, and related protocol-global storage. One independent singleton dependency namespace is used per reviewed storage owner; proof verification, message payloads, state roots, and EVM execution equivalence are out of scope.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "synthetix-system-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Synthetix protocol/token implementation state spanning synth issuance/burn/exchange/settlement and token transfer classes observed in frozen S4. One independent singleton dependency namespace is used per reviewed storage owner; synth accounting, resolver internals, debt ledger semantics, and EVM execution equivalence are out of scope.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    }
+  },
+  "purpose": "Fifth-batch conservative dependency aliases for protocol/system families materially broader than existing token/router analogues. Each alias reuses only marketplace-router ExecuteRoute as an independent per-storage-owner singleton dependency guard; this preserves conservative family conflicts without claiming EVM state/execution equivalence.",
+  "schema_version": 1
+}

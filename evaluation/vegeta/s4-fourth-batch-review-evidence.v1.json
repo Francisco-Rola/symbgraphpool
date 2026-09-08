@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "reviewed_on": "2026-09-08",
+  "purpose": "Auditable public-source evidence for the fourth S4 P12-P16 family review. Sources support family identity and dependency-class selection only; they are not historical concrete storage-key or per-transaction oracle inputs.",
+  "records": [
+    {
+      "evidence_id": "p12-amp",
+      "runtime_code_family": "9c3952a6a60eb6294bc00efde1f3cd908d3726074e3528c34fec263e0a4b5a6a",
+      "address": "0xff20817765cb7f73d4bde2e66e067e58d11095c2",
+      "review_conclusion": "AMP requires partition/collateral/operator semantics beyond a plain ERC20. Use a dedicated conservative owner-scoped dependency lock rather than cw20-base.",
+      "sources": [
+        {
+          "kind": "official-docs",
+          "url": "https://docs.amp.xyz/api-reference",
+          "supports": "API includes ERC20 functions plus balanceOfByPartition, transferByPartition, partition operators/allowances, collateral-manager registration, and partition strategies."
+        },
+        {
+          "kind": "official-docs",
+          "url": "https://docs.amp.xyz/contracts-and-audits",
+          "supports": "Confirms the mainnet AMP token contract address 0xff20817765cb7f73d4bde2e66e067e58d11095c2."
+        },
+        {
+          "kind": "verified-source",
+          "url": "https://etherscan.io/token/0xff20817765cb7f73d4bde2e66e067e58d11095c2",
+          "supports": "Verified source describes partitions, operators, transfer hooks, and collateral-management partition strategies."
+        }
+      ],
+      "limits": "Frozen S4 owner-level queue exposes no direct selector for this owner; exact AMP partition/storage-key execution is not claimed."
+    },
+    {
+      "evidence_id": "p13-linea",
+      "runtime_code_family": "e518057ee9772b6d5ad104f0c0cbae96d42e5543dcaaff3b39257089ab5fe699",
+      "address": "0xd19d4b5d358258f05d7b411e21a1460d11b0876f",
+      "review_conclusion": "Treat the reviewed owner as Linea rollup/message-service global state; selector 0x4165d6dd is the frozen Finalize Blocks class and receives a conservative owner-scoped singleton dependency.",
+      "sources": [
+        {
+          "kind": "official-source",
+          "url": "https://github.com/Consensys/linea-contracts/blob/main/contracts/LineaRollup.sol",
+          "supports": "LineaRollup manages cross-chain messaging, L2 data submission, rollup finalization, and proof verification."
+        },
+        {
+          "kind": "explorer",
+          "url": "https://etherscan.io/tx/0xf3489b37e9df31aceff3d99f92424620a56e9233c18117a2e6c83c705ffc17ca",
+          "supports": "Exact owner transaction is labeled Call Finalize Blocks Function by Linea: Operator on Linea: L1 Message Service."
+        },
+        {
+          "kind": "source-index",
+          "url": "https://www.codeslaw.app/contracts/ethereum/0xd19d4b5d358258f05d7b411e21a1460d11b0876f",
+          "supports": "Confirms exact Ethereum address and Linea L1 Message Service proxy identity."
+        }
+      ],
+      "limits": "The conservative alias does not model proof verification, message trees, or per-block finalization keys."
+    },
+    {
+      "evidence_id": "p14-zksync",
+      "runtime_code_family": "b7d07cf451c70118754002caa25c35e6371e3c4e14fee774d0621bb718c32cdd",
+      "address": "0x32400084c286cf3e17e7b677ea9583e60a000324",
+      "review_conclusion": "Treat 0x324000...0324 as the ZKsync Era L1 chain DiamondProxy; frozen selector 0xeb672419 is requestL2Transaction and receives a conservative chain-global dependency lock.",
+      "sources": [
+        {
+          "kind": "official-docs",
+          "url": "https://docs.zksync.io/zksync-network/environment/l1-contracts",
+          "supports": "Lists 0x32400084c286cf3e17e7b677ea9583e60a000324 as the mainnet DiamondProxy."
+        },
+        {
+          "kind": "official-sdk-binding",
+          "url": "https://pkg.go.dev/github.com/zksync-sdk/zksync2-go/contracts/zksync",
+          "supports": "Identifies method selector 0xeb672419 as requestL2Transaction with its full ABI."
+        },
+        {
+          "kind": "official-docs",
+          "url": "https://docs.zksync.io/zksync-protocol/contracts/l1-contracts",
+          "supports": "Describes the main contract as a diamond proxy delegating selectors to facets and maintaining chain/bridge system state."
+        }
+      ],
+      "limits": "The alias does not model facet dispatch, priority queue contents, proof state, or bridge settlement."
+    },
+    {
+      "evidence_id": "p15-arbitrum",
+      "runtime_code_family": "c2c49b1400159c76a8b41064333aa784bc108a11a5700d1f49a2c4fdc4a6fd78",
+      "address": "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+      "review_conclusion": "Treat the exact owner as the Arbitrum One L1 Bridge and preserve bridge-global accumulator/counter/outbox/inbox dependency state conservatively.",
+      "sources": [
+        {
+          "kind": "official-source",
+          "url": "https://github.com/OffchainLabs/nitro-contracts/blob/main/src/bridge/Bridge.sol",
+          "supports": "Bridge is the staging ground for incoming/outgoing messages and ETH escrow and implements delayed-message enqueue."
+        },
+        {
+          "kind": "official-interface",
+          "url": "https://github.com/OffchainLabs/nitro-contracts/blob/main/src/bridge/IBridge.sol",
+          "supports": "Exposes delayed/sequencer accumulators and counts, active outbox, allowed inbox/outbox state, rollup, and bridge execution."
+        },
+        {
+          "kind": "explorer",
+          "url": "https://etherscan.io/address/0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+          "supports": "Identifies exact owner as Arbitrum: Bridge and shows delayed-message enqueue activity."
+        }
+      ],
+      "limits": "Frozen owner-level review does not supply one dominant selector; no exact accumulator or escrow state equivalence is claimed."
+    },
+    {
+      "evidence_id": "p16-archetype-erc721",
+      "runtime_code_family": "18c16c15c30c2696c7b126c4f4f0964e02d9020c9a09fad2661e218007530e9e",
+      "address": null,
+      "review_conclusion": "The 31-owner identical runtime family is an Archetype ERC721 minimal-proxy collection family. Reuse cw721-drop for ownership/approval/transfer/mint dependency classes.",
+      "representative_owners": [
+        "0x0d049ab46e0e04fa155a2f469f296c528ac43a46",
+        "0x12dd66366d45f44128083233c6fbadfe7cbae221",
+        "0xc374a204334d4edd4c6a62f0867c752d65e9579c"
+      ],
+      "sources": [
+        {
+          "kind": "explorer-verified-source",
+          "url": "https://etherscan.io/address/0x0D049ab46E0E04FA155a2f469F296C528ac43a46",
+          "supports": "Representative owner is an ERC721 collection and a minimal proxy for Archetype implementation 0x563fbc5181a6ca2970e94152c9969f19d0e37ad3; source exposes mint and ERC721 paths."
+        },
+        {
+          "kind": "explorer-verified-source",
+          "url": "https://etherscan.io/address/0x12dd66366d45f44128083233c6fbadfe7cbae221",
+          "supports": "Second representative owner is an ERC721 collection using the same Archetype minimal-proxy implementation."
+        },
+        {
+          "kind": "explorer-token-source",
+          "url": "https://ethereum.routescan.io/token/0xc374a204334d4Edd4C6a62f0867C752d65E9579c?chainid=1",
+          "supports": "Third representative owner is Project AEON ERC721 and reports the same implementation 0x563fbc5181a6ca2970e94152c9969f19d0e37ad3."
+        }
+      ],
+      "limits": "Collection-specific sale/affiliate/withdraw/admin behavior remains outside cw721-drop and unsupported selectors remain opaque."
+    }
+  ]
+}

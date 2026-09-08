@@ -165,7 +165,7 @@ def main() -> int:
     conflict_relevant_storage = {
         "definition": (
             "diagnostic reviewed-family coverage over concrete source storage accesses whose storage owner participates "
-            "in at least one observed cross-transaction source conflict; S4 family freeze is gated on conflict coverage, not raw access coverage"
+            "in at least one observed cross-transaction source conflict; this is a secondary diagnostic, while the hard storage gate uses all source accesses"
         ),
         "conflict_relevant_owner_count": len(conflict_relevant_owners),
         "total_access_records": conflict_relevant_total_access,
@@ -176,7 +176,7 @@ def main() -> int:
         ),
     }
     storage = {
-        "definition": "diagnostic reviewed-family coverage over all concrete source storage accesses; non-conflicting long-tail state is included",
+        "definition": "reviewed-family coverage over all concrete source storage accesses; this is the S4 publication/family-freeze storage gate and includes non-conflicting long-tail state",
         "total_access_records": total_access,
         "selected_family_access_records": mapped_access,
         "access_record_coverage": mapped_access / total_access if total_access else 1.0,
@@ -225,7 +225,7 @@ def main() -> int:
         f"blocks: {blocks}", f"transactions: {total_txs}",
         f"conflict-pair coverage: {mapped_pairs}/{total_pairs} ({100*(mapped_pairs/total_pairs if total_pairs else 1):.2f}%)",
         f"conflict-relevant storage-access coverage (diagnostic): {conflict_relevant_mapped_access}/{conflict_relevant_total_access} ({100*(conflict_relevant_mapped_access/conflict_relevant_total_access if conflict_relevant_total_access else 1):.2f}%)",
-        f"all storage-access coverage (diagnostic): {mapped_access}/{total_access} ({100*(mapped_access/total_access if total_access else 1):.2f}%)",
+        f"all storage-access coverage: {mapped_access}/{total_access} ({100*(mapped_access/total_access if total_access else 1):.2f}%)",
         f"state-owner occurrence coverage: {mapped_state_owner_occurrences}/{total_state_owner_occurrences} ({100*(mapped_state_owner_occurrences/total_state_owner_occurrences if total_state_owner_occurrences else 1):.2f}%)",
         f"transactions touching mapped storage: {mapped_txs}/{total_txs} ({100*(mapped_txs/total_txs if total_txs else 1):.2f}%)",
         f"fully mapped state-tx gas coverage (conservative diagnostic): {fully_mapped_state_gas}/{source_state_gas} ({100*(fully_mapped_state_gas/source_state_gas if source_state_gas else 1):.2f}%)",

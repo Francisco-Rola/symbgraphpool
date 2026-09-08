@@ -11,6 +11,7 @@ FAMILY_EXTENSION="${VEGETA_S4_THIRD_BATCH_FAMILY_EXTENSION:-evaluation/vegeta/s4
 THIRD_BATCH="${VEGETA_S4_THIRD_BATCH_REVIEWED_DECISIONS:-evaluation/vegeta/s4-third-batch-reviewed-decisions.v1.json}"
 PENDING_OUT="${VEGETA_S4_THIRD_BATCH_PENDING_OUT:-$WORK_DIR/s4-third-batch-pending-review.json}"
 MIN_CONFLICT="${VEGETA_S4_MIN_CONFLICT_COVERAGE:-0.95}"
+MIN_STORAGE_ACCESS="${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}"
 
 for path in "$REVIEW_BASE" "$WORKSPACE_DECISIONS" "$FAMILY_EXTENSION" "$THIRD_BATCH"; do
   [[ -s "$path" ]] || { echo "missing S4 third-batch input: $path" >&2; exit 2; }
@@ -44,6 +45,7 @@ python3 tools/vegeta/summarize-vegeta-s4-conflict-closure.py \
   --readiness "$WORK_DIR/family-review-readiness.json" \
   --decisions "$WORKSPACE_DECISIONS" \
   --min-conflict "$MIN_CONFLICT" \
+  --min-storage-access "$MIN_STORAGE_ACCESS" \
   --output "$WORK_DIR/conflict-closure.json" \
   --text-output "$WORK_DIR/conflict-closure.txt"
 
@@ -56,9 +58,9 @@ echo "gate:      $WORK_DIR/family-review-readiness.txt"
 echo "closure:   $WORK_DIR/conflict-closure.txt"
 echo
 if grep -q '^family freeze gate: PASS' "$WORK_DIR/conflict-closure.txt"; then
-  echo "Conflict family gate is closed. Next:"
+  echo "Dual publication/family gate is closed. Next:"
   echo "  VEGETA_S4_REVIEW_ACK=1 bash tools/vegeta/run-vegeta-s4-freeze-reviewed-map.sh"
 else
-  echo "Conflict family gate is still open. Do NOT freeze. Inspect only the top remaining conflict owners in conflict-closure.txt."
-  echo "AMP/bridge/rollup families remain intentionally pending unless explicit semantics are reviewed."
+  echo "Publication/family gate is still open. Do NOT freeze. Use the balanced planner for the remaining access/conflict deficits."
+  echo "AMP/bridge/rollup families remain intentionally pending unless explicit semantics are reviewed; access-heavy families may also be required after conflict closure."
 fi

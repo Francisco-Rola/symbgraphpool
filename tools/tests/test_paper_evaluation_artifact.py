@@ -53,6 +53,10 @@ class PaperEvaluationArtifactTests(unittest.TestCase):
             'run-vegeta-s4-review-check.sh',
             'run-vegeta-s4-apply-first-batch.sh',
             'run-vegeta-s4-apply-second-batch.sh',
+            'run-vegeta-s4-apply-fourth-batch.sh',
+            'run-vegeta-s4-plan-fifth-batch.sh',
+            'run-vegeta-s4-analyze-fifth-batch.sh',
+            'run-vegeta-s4-apply-fifth-batch.sh',
             'run-vegeta-s4-freeze-reviewed-map.sh',
             'run-vegeta-s4-prepare-native.sh',
         ]:
@@ -66,11 +70,15 @@ class PaperEvaluationArtifactTests(unittest.TestCase):
         self.assertIn('audit-vegeta-s4-corpus-provenance.py', characterize)
         self.assertIn('s4-review-decisions.draft.json', characterize)
         self.assertIn('VEGETA_S4_MIN_CONFLICT_RELEVANT_ACCESS_COVERAGE', characterize)
+        self.assertIn('VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE', characterize)
         self.assertIn('plan-vegeta-s4-semantic-coverage.py', characterize)
         self.assertIn('family-blocker-clusters.json', characterize)
         self.assertIn('family-marginal-coverage.txt', characterize)
         self.assertIn('--target-conflict', characterize)
         self.assertTrue((ROOT/'tools/vegeta/plan-vegeta-s4-semantic-coverage.py').exists())
+        wide=(ROOT/'tools/vegeta/run-vegeta-s4-plan-fifth-batch.sh').read_text()
+        self.assertIn('VEGETA_S4_WIDE_PLAN_TOP_FAMILIES:-2000', wide)
+        self.assertIn('VEGETA_S4_WIDE_PLAN_MAX_STEPS:-2000', wide)
         self.assertTrue((ROOT/'evaluation/vegeta/s4-review-seeds.v1.json').exists())
         self.assertTrue((ROOT/'evaluation/vegeta/s4-first-batch-reviewed-decisions.v1.json').exists())
         self.assertTrue((ROOT/'evaluation/vegeta/s4-first-batch-native-family-extension.v1.json').exists())
@@ -81,6 +89,7 @@ class PaperEvaluationArtifactTests(unittest.TestCase):
         ready=(ROOT/'tools/vegeta/validate-vegeta-s4-readiness.py').read_text()
         self.assertIn('family_conflict_relevant_access', ready)
         self.assertNotIn('\"family_conflict_relevant_access\": metrics[\"family_conflict_relevant_access\"] >=', ready)
+        self.assertIn('\"family_storage_access\": metrics[\"family_storage_access\"] >=', ready)
         self.assertIn('family_fully_mapped_state_gas_diagnostic', ready)
         self.assertIn('semantic_state_gas_diagnostic', ready)
     def test_consensus_overlap_reporting_is_canonical(self):

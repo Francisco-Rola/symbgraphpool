@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "Fourth S4 conflict-closure family extension. Registers four explicitly named conservative dependency-lock aliases for reviewed AMP/Linea/zkSync/Arbitrum source families. Each alias reuses only the checked-in marketplace-router ExecuteRoute singleton dependency guard as an independent per-storage-owner namespace; the names and review evidence prevent these system/token families from being mislabeled as routers or generic ERC20s. These are conflict-preserving family-level abstractions, not EVM execution/state equivalence claims.",
+  "native_code_families": {
+    "amp-partition-collateral-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "semantic_scope": "AMP's verified contract exposes ERC20-compatible balances plus partition balances, partition/operator permissions, collateral-manager registration, transfer hooks, and partition strategies. S4 family review therefore does not collapse AMP to cw20-base. The native alias uses one independent per-AMP-owner singleton dependency lock as a conservative family-level conflict abstraction for the reviewed S4 storage surface; it does not claim exact partition keys, balances, hook execution, or EVM state equivalence."
+    },
+    "linea-rollup-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "semantic_scope": "Linea L1 Message Service/LineaRollup global finalization and message-service state. Frozen S4 directly observes selector 0x4165d6dd on the reviewed owner and public explorer evidence identifies those calls as Finalize Blocks. The alias models one independent per-Linea-owner singleton state dependency for that rollup-global mutation class; it does not model proof verification, message Merkle structures, individual block roots, or EVM execution equivalence."
+    },
+    "zksync-l1-system-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "semantic_scope": "ZKsync Era L1 DiamondProxy/main-chain contract state. Frozen S4 directly observes selector 0xeb672419, independently documented as requestL2Transaction. The alias models one independent per-chain singleton dependency for priority-operation/mailbox/chain-global state touched by the observed request class; it does not model diamond facets, priority queue contents, bridge settlement, proof state, or EVM execution equivalence."
+    },
+    "arbitrum-bridge-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json",
+      "semantic_scope": "Arbitrum L1 Bridge accumulator/counter/outbox/inbox configuration state. Official Nitro Bridge/IBridge source exposes delayed and sequencer accumulators/counts, allowed inbox/outbox state, active outbox, and bridge execution. The alias models one independent per-bridge-owner singleton dependency for the reviewed S4 bridge-global storage surface; it does not model accumulator contents, ETH escrow, low-level calls, or EVM execution equivalence."
+    }
+  }
+}

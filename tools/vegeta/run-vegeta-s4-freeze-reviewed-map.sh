@@ -17,7 +17,8 @@ WORK_DIR="${VEGETA_S4_NATIVE_WORK_DIR:-$S4_DIR/native-characterization}"
 DRAFT_MAP="${VEGETA_S4_REVIEW_DRAFT_MAP:-$WORK_DIR/s4-native-family-map.reviewed-draft.json}"
 OUTPUT="${VEGETA_S4_NATIVE_FAMILY_MAP:-evaluation/vegeta/s4-native-family-map.v1.json}"
 
-# Strict recomputation: this exits non-zero until conflict, median-block, and gas gates pass.
+# Strict recomputation: this exits non-zero until corpus integrity, all-storage-access,
+# conflict, and median conflict-bearing-block gates pass.
 bash tools/vegeta/run-vegeta-s4-review-check.sh
 
 python3 tools/vegeta/freeze-vegeta-s4-family-map.py \

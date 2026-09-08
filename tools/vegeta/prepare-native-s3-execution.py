@@ -955,7 +955,7 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         if 'sendfrom' in ec:
             return contract_call('execute',family,iid,caller,{'send_from':{'from':abi_addr(data,0),'to':abi_addr(data,1),'token_id':token_ids.map(iid,abi_uint(data,2)),'amount':str(max(amount(abi_uint(data,3)),1))}},a)
         if 'balance' in e: return contract_call('query',family,iid,None,{'balance':{'address':abi_addr(data,0),'token_id':token_ids.map(iid,abi_uint(data,1))}},a)
-    if family in {'marketplace-router','universal-router','custom-swap-router','v3-pool-lock'}:
+    if family in {'marketplace-router','universal-router','custom-swap-router','v3-pool-lock','amp-partition-collateral-lock','linea-rollup-lock','zksync-l1-system-lock','arbitrum-bridge-lock'}:
         semantic_id=calldata_fingerprint(data)
         if 'incrementcounter' in ec or 'incrementnonce' in ec:
             return contract_call('execute',family,iid,caller,{'increment_counter':{}},a)

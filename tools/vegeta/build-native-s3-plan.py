@@ -267,6 +267,26 @@ S4_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
         # observed per-pool swap dependency class; no tick/liquidity/EVM equivalence is claimed.
         "0x128acb08": ("execute::execute_route", []),
     },
+    "amp-partition-collateral-lock": {
+        # P12 has no direct owner selector in the frozen review queue. Keep common ERC20 paths
+        # conservative if they are surfaced by later call-frame translation; partition-specific
+        # selectors remain opaque until separately reviewed.
+        "0xa9059cbb": ("execute::execute_route", []),
+        "0x23b872dd": ("execute::execute_route", []),
+        "0x095ea7b3": ("execute::execute_route", []),
+    },
+    "linea-rollup-lock": {
+        # Frozen S4 0xd19d... selector 0x4165d6dd is explorer-identified Finalize Blocks.
+        "0x4165d6dd": ("execute::execute_route", []),
+    },
+    "zksync-l1-system-lock": {
+        # Official ZKsync SDK binding: requestL2Transaction(...).
+        "0xeb672419": ("execute::execute_route", []),
+    },
+    "arbitrum-bridge-lock": {
+        # No dominant owner selector is asserted by the frozen P15 review; family-level bridge
+        # coverage is reviewed, while selector-level execution remains fail-closed.
+    },
 }
 
 S1_OWNER_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {

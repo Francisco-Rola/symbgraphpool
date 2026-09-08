@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Freeze a human-reviewed S4 family map after structural conflict gates pass."""
+"""Freeze a human-reviewed S4 family map after dual semantic-surface gates pass."""
 from __future__ import annotations
 
 import argparse
@@ -48,7 +48,7 @@ def main() -> int:
             raise SystemExit(f"mapping references undeclared native family: {row.get('native_code_family')}")
     fmap["candidate_only"] = False
     fmap["status"] = "frozen-reviewed-s4-family-map-pending-native-plan-semantic-readiness"
-    fmap["review_status"] = "HUMAN REVIEW ATTESTED; structural conflict family-freeze gates passed. Conflict-relevant/all-storage and gas metrics remain diagnostics; full selector/semantic/transaction/implementation gates are still required by prepare-native."
+    fmap["review_status"] = "HUMAN REVIEW ATTESTED; all-storage-access, structural conflict, median-block, and corpus-integrity family-freeze gates passed. Conflict-relevant access and gas metrics remain diagnostics; full selector/semantic/transaction/implementation gates are still required by prepare-native."
     fmap["freeze_evidence"] = {
         "draft_map_sha256": sha(ns.draft_map),
         "freeze_readiness_sha256": sha(ns.freeze_readiness),

@@ -11,7 +11,8 @@ REVIEW_DECISIONS="${VEGETA_S4_REVIEW_DECISIONS:-$WORK_DIR/s4-review-decisions.dr
 DRAFT_MAP="${VEGETA_S4_REVIEW_DRAFT_MAP:-$WORK_DIR/s4-native-family-map.reviewed-draft.json}"
 MIN_CONFLICT="${VEGETA_S4_MIN_CONFLICT_COVERAGE:-0.95}"
 MIN_MEDIAN="${VEGETA_S4_MIN_MEDIAN_BLOCK_COVERAGE:-0.80}"
-DIAG_CONFLICT_RELEVANT_ACCESS_REFERENCE="${VEGETA_S4_MIN_CONFLICT_RELEVANT_ACCESS_COVERAGE:-${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-${VEGETA_S4_MIN_FAMILY_STATE_GAS_COVERAGE:-0.90}}}"
+MIN_STORAGE_ACCESS="${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}"
+DIAG_CONFLICT_RELEVANT_ACCESS_REFERENCE="${VEGETA_S4_MIN_CONFLICT_RELEVANT_ACCESS_COVERAGE:-0.90}"
 
 for path in "$CORPUS" "$WORK_DIR/code-cache.json" "$WORK_DIR/thin-corpus.jsonl" "$WORK_DIR/corpus-provenance.json" "$REVIEW_BASE" "$REVIEW_DECISIONS"; do
   [[ -s "$path" ]] || { echo "missing S4 review-check input: $path" >&2; exit 2; }
@@ -52,6 +53,7 @@ python3 tools/vegeta/plan-vegeta-s4-semantic-coverage.py \
   --top-clusters "${VEGETA_S4_COVERAGE_PLAN_TOP_CLUSTERS:-100}" \
   --top-families "${VEGETA_S4_COVERAGE_PLAN_TOP_FAMILIES:-100}" \
   --max-greedy-steps "${VEGETA_S4_COVERAGE_PLAN_MAX_STEPS:-100}" \
+  --target-storage-access "$MIN_STORAGE_ACCESS" \
   --target-conflict-relevant-access "$DIAG_CONFLICT_RELEVANT_ACCESS_REFERENCE" \
   --target-conflict "$MIN_CONFLICT"
 
@@ -71,6 +73,7 @@ CHECK=(
   --provenance "$WORK_DIR/corpus-provenance.json"
   --min-conflict "$MIN_CONFLICT"
   --min-median-block "$MIN_MEDIAN"
+  --min-storage-access "$MIN_STORAGE_ACCESS"
   --min-conflict-relevant-access "$DIAG_CONFLICT_RELEVANT_ACCESS_REFERENCE"
   --output "$WORK_DIR/family-review-readiness.json"
   --text-output "$WORK_DIR/family-review-readiness.txt"
@@ -86,5 +89,6 @@ echo "clusters: $WORK_DIR/family-blocker-clusters.json"
 echo "queue:    $WORK_DIR/family-review-queue.md"
 echo "gate:     $WORK_DIR/family-review-readiness.txt"
 echo
-echo "If the gate fails, use the blocker-cluster planner first, then continue down the ranked review queue; prioritize families that close the remaining unique conflict deficit; access and strict-gas plans are diagnostic only."
+echo "If the gate fails, use the dual-gate planner first; prioritize normalized closure of the remaining all-storage-access and unique-conflict deficits. Strict-gas complement lookahead is diagnostic only."
+echo "For the full storage tail / next conflict review prefix, run: bash tools/vegeta/run-vegeta-s4-plan-fifth-batch.sh"
 echo "If PASS and the draft is manually reviewed, freeze with: VEGETA_S4_REVIEW_ACK=1 bash tools/vegeta/run-vegeta-s4-freeze-reviewed-map.sh"

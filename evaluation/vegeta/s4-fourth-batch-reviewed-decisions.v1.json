@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "Fourth S4 conflict-closure batch implementing the reviewed P12-P16 families. Four distinct conservative dependency-lock aliases cover AMP and bridge/rollup system families without pretending they are generic tokens/routers; P16 is promoted to the existing cw721-drop family after representative minimal-proxy/implementation review. All mappings remain candidate-only until exact family gates and later selector/native-readiness gates pass.",
+  "decisions": [
+    {
+      "priority": 12,
+      "address": "0xff20817765cb7f73d4bde2e66e067e58d11095c2",
+      "runtime_code_family": "9c3952a6a60eb6294bc00efde1f3cd908d3726074e3528c34fec263e0a4b5a6a",
+      "identity_hint": "AMP partition/collateral token family",
+      "observed_selectors": [],
+      "review_status": "reviewed",
+      "reviewed_native_family": "amp-partition-collateral-lock",
+      "review_class": "conservative-new-native-family-alias",
+      "evidence_id": "p12-amp",
+      "mapping_basis": "Official AMP documentation and the verified Ethereum source for 0xff2081...95c2 show that AMP is not a plain ERC20: it adds per-holder partitions, partition allowances/operators, collateral-manager registration, ERC1820 transfer hooks, and partition strategies. Because the frozen S4 owner-level review exposes no selector narrow enough to justify a cw20-base subset, map the runtime family to the dedicated amp-partition-collateral-lock alias. The alias is deliberately conservative: one independent owner-scoped singleton dependency preserves every within-owner conflict without claiming exact AMP storage keys or EVM behavior. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p12-amp.",
+      "semantic_notes": "Do not reinterpret this as cw20-base semantic equivalence. The family-level lock is an explicit conservative dependency abstraction; selector-level/native-execution readiness remains separately fail-closed."
+    },
+    {
+      "priority": 13,
+      "address": "0xd19d4b5d358258f05d7b411e21a1460d11b0876f",
+      "runtime_code_family": "e518057ee9772b6d5ad104f0c0cbae96d42e5543dcaaff3b39257089ab5fe699",
+      "identity_hint": "Linea L1 Message Service / LineaRollup family",
+      "observed_selectors": [
+        "0x4165d6dd"
+      ],
+      "review_status": "reviewed",
+      "reviewed_native_family": "linea-rollup-lock",
+      "review_class": "conservative-new-native-family-alias",
+      "evidence_id": "p13-linea",
+      "mapping_basis": "The exact owner is publicly identified as Linea's L1 Message Service/LineaRollup. Frozen S4 directly observes selector 0x4165d6dd, and public transaction/explorer evidence identifies calls with this selector as Finalize Blocks. Linea's reviewed source describes global rollup/message-service state for block finalization and cross-chain messaging. Map the family to linea-rollup-lock, an independent owner-scoped singleton dependency for the observed global mutation class. This preserves conservative conflicts while making no claim about proof verification, per-block root layout, message Merkle structures, or EVM state equivalence. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p13-linea.",
+      "semantic_notes": "0x4165d6dd is translated only to the conservative global dependency guard; later selector-semantic validation remains authoritative."
+    },
+    {
+      "priority": 14,
+      "address": "0x32400084c286cf3e17e7b677ea9583e60a000324",
+      "runtime_code_family": "b7d07cf451c70118754002caa25c35e6371e3c4e14fee774d0621bb718c32cdd",
+      "identity_hint": "ZKsync Era L1 DiamondProxy/main-chain contract family",
+      "observed_selectors": [
+        "0xeb672419"
+      ],
+      "review_status": "reviewed",
+      "reviewed_native_family": "zksync-l1-system-lock",
+      "review_class": "conservative-new-native-family-alias",
+      "evidence_id": "p14-zksync",
+      "mapping_basis": "Official ZKsync documentation identifies 0x324000...0324 as the Era L1 DiamondProxy/main chain contract. Frozen S4 directly observes selector 0xeb672419; official SDK bindings identify it as requestL2Transaction(address,uint256,bytes,uint256,uint256,bytes[],address). The request path mutates chain-global priority-operation/mailbox state across diamond facets, so it is not mapped to a token/router family. zksync-l1-system-lock conservatively serializes that owner-scoped state-touch class without modeling facet routing, queue contents, proof state, or EVM execution equivalence. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p14-zksync.",
+      "semantic_notes": "The DiamondProxy storage namespace is the native instance namespace; the observed requestL2Transaction class maps only to the conservative singleton dependency guard."
+    },
+    {
+      "priority": 15,
+      "address": "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+      "runtime_code_family": "c2c49b1400159c76a8b41064333aa784bc108a11a5700d1f49a2c4fdc4a6fd78",
+      "identity_hint": "Arbitrum One L1 Bridge family",
+      "observed_selectors": [],
+      "review_status": "reviewed",
+      "reviewed_native_family": "arbitrum-bridge-lock",
+      "review_class": "conservative-new-native-family-alias",
+      "evidence_id": "p15-arbitrum",
+      "mapping_basis": "The exact owner is publicly identified as the Arbitrum One L1 Bridge. Official Nitro Bridge/IBridge source defines delayed and sequencer message accumulators/counts, allowed inbox/outbox state, active outbox, rollup linkage, and execution state; current explorer activity also shows delayed-message enqueue calls reaching this bridge. Because the frozen owner summary does not expose a selector narrow enough for a more granular alias, map the runtime family to arbitrum-bridge-lock, an independent owner-scoped singleton dependency. This conservatively preserves bridge-global conflict structure without modeling accumulator contents, ETH escrow, low-level call effects, or EVM state equivalence. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p15-arbitrum.",
+      "semantic_notes": "Family-level bridge dependency classification only. Selector-level execution remains fail-closed until separately reviewed."
+    },
+    {
+      "priority": 16,
+      "address": null,
+      "runtime_code_family": "18c16c15c30c2696c7b126c4f4f0964e02d9020c9a09fad2661e218007530e9e",
+      "identity_hint": "Archetype ERC721 minimal-proxy collection family",
+      "observed_selectors": [],
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw721-drop",
+      "review_class": "existing-native-family-alias",
+      "evidence_id": "p16-archetype-erc721",
+      "mapping_basis": "Frozen S4 groups 31 storage owners under this identical runtime-code family. Public explorer/source review of representative owners 0x0d049a...43a46, 0x12dd66...ae221, and 0xc374a2...e9579c identifies ERC721 collections implemented as minimal proxies to the same Archetype implementation 0x563fbc5181a6ca2970e94152c9969f19d0e37ad3. The implementation exposes ERC721 ownership/approval/transfer plus mint flows. Reuse cw721-drop for those ownership/approval/sequential-mint dependency classes; collection-specific sale, affiliate, withdrawal, metadata, and admin state is not inferred and unsupported selectors remain opaque. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p16-archetype-erc721.",
+      "semantic_notes": "Family-wide reuse is justified by identical minimal-proxy runtime plus representative exact-owner implementation checks. This is dependency-family reuse, not application state equivalence."
+    }
+  ]
+}

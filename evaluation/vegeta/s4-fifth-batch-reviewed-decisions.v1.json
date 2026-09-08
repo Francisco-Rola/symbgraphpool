@@ -1,0 +1,296 @@
+{
+  "dataset": "vegeta-s4",
+  "decisions": [
+    {
+      "address": "0x2c7f4cca29a4627a7a8e20440abf107acc3e42eb",
+      "blocker_runtime_code_family": "8eee60ac0479c78b7dd93608ce2fe16b6b4eeacf92062605b30f348399208b12",
+      "evidence_id": "fifth-01-humanstandardtoken-erc20-run",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "complete frozen S4 local selector evidence"
+      ],
+      "identity_hint": "HumanStandardToken ERC20 runtime family",
+      "mapping_basis": "Verified Sourcify metadata for all observed owners points to HumanStandardToken.sol with the standard ERC20 balance/allowance/transfer surface plus approveAndCall/version. Frozen S4 storage activity for this family is exercised through transfer/approve and standard ERC20 call-frame selectors. Reuse cw20-base for the observed fungible balance/allowance/transfer dependency namespace; approveAndCall/version behavior is not inferred.",
+      "priority": 17,
+      "review_class": "frozen-selector-scoped-existing-native-alias",
+      "review_conclusion": "Reviewed as a standard fungible-token dependency family for the exercised S4 selectors.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "runtime_code_family": "8eee60ac0479c78b7dd93608ce2fe16b6b4eeacf92062605b30f348399208b12",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0x42ccea04f823a130ff1a7603d9057b9fe2a25ac5",
+      "blocker_runtime_code_family": "691f30987d6abddc240dd299586d6dc10a9a1d078eee0d30ab736f0ad0ff3ef5",
+      "evidence_id": "fifth-02-troent-erc20-token",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: TROENT.sol:TROENT"
+      ],
+      "identity_hint": "TROENT ERC20 token",
+      "mapping_basis": "Verified source identifies TROENT.sol:TROENT. Frozen S4 directly exercises only transfer(address,uint256), with two balance writes per transfer. Reuse cw20-base for the exercised standard fungible-token dependency namespace.",
+      "priority": 18,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe cw20-base reuse for the exercised transfer dependency surface.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "runtime_code_family": "691f30987d6abddc240dd299586d6dc10a9a1d078eee0d30ab736f0ad0ff3ef5",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0x7da2641000cbb407c329310c461b2cb9c70c3046",
+      "blocker_runtime_code_family": "eec09a60088c7bde51d7a34cd1299f7c26455fbe98593bd1b1f5f7c0cf82502d",
+      "evidence_id": "fifth-03-verified-capped-erc20-token",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: contracts/Token.sol:Token"
+      ],
+      "identity_hint": "verified capped ERC20 Token",
+      "mapping_basis": "Verified source identifies contracts/Token.sol:Token with standard ERC20 balance/allowance/transfer functions and cap metadata. Frozen S4 directly exercises transfer and approve with standard balanceOf/transferFrom call frames. Reuse cw20-base for those exercised fungible dependencies; cap administration is outside the exercised selector surface.",
+      "priority": 19,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe cw20-base reuse for the exercised standard ERC20 dependency surface.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "runtime_code_family": "eec09a60088c7bde51d7a34cd1299f7c26455fbe98593bd1b1f5f7c0cf82502d",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0x00000000000000adc04c56bf30ac9d3c0aaf14dc",
+      "blocker_runtime_code_family": "4a60fba4eb9357db13a46f6da61074c58521f4869427acf1435b9d0e9d06b4d6",
+      "evidence_id": "fifth-04-seaport-marketplace-settleme",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: contracts/Seaport.sol:Seaport"
+      ],
+      "identity_hint": "Seaport marketplace settlement family",
+      "mapping_basis": "Verified source identifies contracts/Seaport.sol:Seaport at the exact storage owner. Frozen S4 exercises Seaport order fulfillment/cancellation/status/counter selector classes and 44k storage accesses. The checked-in marketplace-router family was created for Seaport/marketplace order-registration, validation, settlement, cancellation, counter, and route dependencies, so reuse it without claiming byte-for-byte state equivalence.",
+      "priority": 20,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe reuse of the existing marketplace-router dependency abstraction for Seaport.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "marketplace-router",
+      "runtime_code_family": "4a60fba4eb9357db13a46f6da61074c58521f4869427acf1435b9d0e9d06b4d6",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0x1e984e2220a06a1845d3c93aa562bc84e10ba948",
+      "blocker_runtime_code_family": "17dae0a0210e8d61d09959b96290901cbb5e4e59ab74749b9d5dcd554316ed9e",
+      "evidence_id": "fifth-05-springfield-fee-limit-erc20-",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: SPRINGFIELD.sol:SPRINGFIELD"
+      ],
+      "identity_hint": "SPRINGFIELD fee/limit ERC20 token",
+      "mapping_basis": "Verified source identifies SPRINGFIELD.sol:SPRINGFIELD and exposes tax-swap thresholds, max transaction/wallet state, bot flags, trading enablement, and standard ERC20 transfers. Frozen S4 exercises transfer/approve plus standard token call frames. Reuse fee-token-cw20 as the conservative balance/allowance plus shared transfer-policy dependency abstraction.",
+      "priority": 21,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe fee-token-cw20 reuse for observed fee/limit-token dependencies.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "fee-token-cw20",
+      "runtime_code_family": "17dae0a0210e8d61d09959b96290901cbb5e4e59ab74749b9d5dcd554316ed9e",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0x0f7b3f5a8fed821c5eb60049538a548db2d479ce",
+      "blocker_runtime_code_family": "5539edde619c40b46095e6bef16569aa67f818a1a4bd4a38db190abc1087c053",
+      "evidence_id": "fifth-06-airtor-fee-limit-erc20-token",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: AirTor.sol:AirTor"
+      ],
+      "identity_hint": "AirTor fee/limit ERC20 token",
+      "mapping_basis": "Verified source identifies AirTor.sol:AirTor and exposes buy/sell fee buckets, treasury/operations/liquidity accounting, bot/early-buy state, max transaction/wallet limits, router/pair configuration, and ERC20 balances/allowances. Frozen S4 heavily exercises transfer/approve/transferFrom. Reuse fee-token-cw20 for the conservative shared-policy plus fungible balance/allowance dependency surface; exact tokenomics are not claimed.",
+      "priority": 22,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe fee-token-cw20 reuse for observed AirTor transfer-policy dependencies.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "fee-token-cw20",
+      "runtime_code_family": "5539edde619c40b46095e6bef16569aa67f818a1a4bd4a38db190abc1087c053",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0x675ababd3a210566a5e213547523b740be80041a",
+      "blocker_runtime_code_family": "d87e25afc70f513a1c8807697b1a575142ae5761ddedc34545a75ef7250ca679",
+      "evidence_id": "fifth-07-entropy-role-controlled-erc2",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: contracts/erc20/EntropyErc20.sol:EntropyErc20"
+      ],
+      "identity_hint": "Entropy role-controlled ERC20",
+      "mapping_basis": "Verified source identifies contracts/erc20/EntropyErc20.sol:EntropyErc20 with role-controlled minting, burn, bridge configuration, and ERC20 balances/allowances. Frozen S4 exercises transfer and one mint(address,uint256) call frame. Reuse controlled-cw20 because it models fungible balances/allowances plus privileged mint/control state; transferAndCall/bridge-specific behavior remains outside the reviewed selector scope.",
+      "priority": 23,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe controlled-cw20 reuse for exercised transfer/mint and privileged-control dependencies.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "controlled-cw20",
+      "runtime_code_family": "d87e25afc70f513a1c8807697b1a575142ae5761ddedc34545a75ef7250ca679",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0x0000000000095413afc295d19edeb1ad7b71c952",
+      "blocker_runtime_code_family": "9e37ccc74af0aebc44759afd944123dfcd9dbc9c420093f252b85d1c6b7a023f",
+      "evidence_id": "fifth-08-lon-permit-mint-erc20-token",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: contracts/implements/Lon.sol:Lon"
+      ],
+      "identity_hint": "LON permit/mint ERC20 token",
+      "mapping_basis": "Verified source identifies contracts/implements/Lon.sol:Lon with ERC20 balances/allowances, mint/burn, EIP-2612 permit nonces/domain state, and ownership/minter controls. Frozen S4 exercises transfer/approve/transferFrom/balance and a permit selector. Reuse fiat-token-cw20 because it already models controlled fungible state plus permit nonce/allowance dependencies.",
+      "priority": 24,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe fiat-token-cw20 reuse for the exercised ERC20/permit/control dependency surface.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "fiat-token-cw20",
+      "runtime_code_family": "9e37ccc74af0aebc44759afd944123dfcd9dbc9c420093f252b85d1c6b7a023f",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0xf411903cbc70a74d22900a5de66a2dda66507255",
+      "blocker_runtime_code_family": "333fe18b561619d120d3f984f328c4ca026e608c9c6138e6eab4cea53581ebc9",
+      "evidence_id": "fifth-09-vra-controlled-pausable-erc2",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: VraToken.sol:VraToken"
+      ],
+      "identity_hint": "VRA controlled/pausable ERC20-777 style token",
+      "mapping_basis": "Verified source identifies VraToken.sol:VraToken with role-based minting, pause/blocklist state, operators, and ERC20/ERC777-style transfer paths. Frozen S4 exercises standard token selectors plus several custom operator/control selectors. Reuse controlled-cw20 for the reviewed fungible balance/allowance plus global control/block state at family level; unsupported ERC777 operator selector semantics remain subject to later selector/native readiness rather than being claimed equivalent.",
+      "priority": 25,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe family-level controlled fungible dependency reuse; custom operator execution semantics are not claimed.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "controlled-cw20",
+      "runtime_code_family": "333fe18b561619d120d3f984f328c4ca026e608c9c6138e6eab4cea53581ebc9",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0xd8912c10681d8b21fd3742244f44658dba12264e",
+      "blocker_runtime_code_family": "881d0161885a68df597c6831fa3b59c25e1543251c82252dab963eb612b98fe5",
+      "evidence_id": "fifth-10-standard-fungible-selector-o",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "complete frozen S4 local selector evidence"
+      ],
+      "identity_hint": "standard fungible selector-only family",
+      "mapping_basis": "Verified source was unavailable, but the complete frozen S4 evidence for the owner is limited to ERC20 transfer/approve directly and transfer/transferFrom/balanceOf/allowance call frames, with no delegate target and no custom selector. Reuse cw20-base only for this observed standard fungible dependency namespace.",
+      "priority": 26,
+      "review_class": "frozen-selector-scoped-existing-native-alias",
+      "review_conclusion": "Selector-scoped cw20-base reuse is supported by the complete local S4 selector evidence despite missing verified source.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "cw20-base",
+      "runtime_code_family": "881d0161885a68df597c6831fa3b59c25e1543251c82252dab963eb612b98fe5",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0x7d1afa7b718fb893db30a3abc0cfc608aacfebb0",
+      "blocker_runtime_code_family": "676e7a8f6295c36d83db31018f21dcaeeebaaef2da1198a3308e7c0435f2519a",
+      "evidence_id": "fifth-11-matic-pausable-erc20-token",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: MaticToken.sol:MaticToken"
+      ],
+      "identity_hint": "MATIC pausable ERC20 token",
+      "mapping_basis": "Verified source identifies MaticToken.sol:MaticToken with standard ERC20 state plus pauser role and pause/unpause control. Frozen S4 exercises transfer/approve/transferFrom and increaseAllowance. Reuse controlled-cw20 for balances/allowances plus shared pause/control dependencies.",
+      "priority": 27,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe controlled-cw20 reuse for MATIC's exercised fungible and pausable-control dependency surface.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "controlled-cw20",
+      "runtime_code_family": "676e7a8f6295c36d83db31018f21dcaeeebaaef2da1198a3308e7c0435f2519a",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032",
+      "blocker_runtime_code_family": "057f5a9212d017d3a499e9ac4ddae634f8e484c9327b7f8266874c1ffd9df7e0",
+      "evidence_id": "fifth-12-synthetix-protocol-token-sys",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: Synthetix.sol:Synthetix"
+      ],
+      "identity_hint": "Synthetix protocol/token system family",
+      "mapping_basis": "Verified source identifies Synthetix.sol:Synthetix and the frozen call frames include synth issue/burn/exchange/settlement and token transfer classes, with repeated access to a very small global storage surface. This is materially broader than a generic ERC20. Use a distinct per-storage-owner conservative singleton dependency lock for the reviewed Synthetix implementation state; no synth accounting or EVM execution equivalence is claimed.",
+      "priority": 28,
+      "review_class": "conservative-new-native-family-alias",
+      "review_conclusion": "Reviewed as a distinct conservative Synthetix system dependency namespace.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "synthetix-system-lock",
+      "runtime_code_family": "057f5a9212d017d3a499e9ac4ddae634f8e484c9327b7f8266874c1ffd9df7e0",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0x0000000000a39bb272e79075ade125fd351887ac",
+      "blocker_runtime_code_family": "7421a58ad9ceb68c43df758b1d32821ba7d36b489789a778cb99936a3e1893ea",
+      "evidence_id": "fifth-13-blur-pool",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify contracts/pool/BlurPool.sol:BlurPool via source-resolution cache"
+      ],
+      "identity_hint": "BlurPool implementation behind reviewed ERC1967Proxy storage owner",
+      "mapping_basis": "The blocker runtime family is generic ERC1967Proxy bytecode shared by multiple applications, so it must not be mapped by proxy runtime hash. Frozen callTracer evidence for storage owner 0x0000000000a39bb272e79075ade125fd351887ac delegates to implementation family 3b52a3f0... identified by verified source as contracts/pool/BlurPool.sol:BlurPool. BlurPool exposes deposit, withdraw, balanceOf, totalSupply, and transferFrom. Map that proxy storage owner explicitly to the implementation profile and reuse wrapped-native-token for the wrapped/deposit-withdraw fungible dependency surface.",
+      "priority": 29,
+      "review_class": "delegate-implementation-owner-scoped-existing-native-alias",
+      "review_conclusion": "Safe owner-scoped implementation mapping for BlurPool; no generic ERC1967Proxy semantic alias is created.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "wrapped-native-token",
+      "runtime_code_family": "3b52a3f0be0f75537b6dadc9378a8db02e6eedee15b36f7374f510de285a3fed",
+      "semantic_notes": "Explicit owner scope prevents the same generic proxy runtime family from conflating BlurPool with BlurExchange."
+    },
+    {
+      "address": "0x9b9e1f03fa9e5934f5523f4b5d5445395d51e50c",
+      "blocker_runtime_code_family": "d124079c81bccc739fb75764c300034a3ea8da46a1fea0b8a497e32e381cfdcf",
+      "evidence_id": "fifth-14-unresolved",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "local owner 0x9b9e1f03fa9e5934f5523f4b5d5445395d51e50c: source enrichment not-found; direct selectors empty/0x3ccfd60b only"
+      ],
+      "identity_hint": "unresolved contract with withdraw-like local selector evidence",
+      "mapping_basis": "",
+      "priority": 30,
+      "review_class": "insufficient-evidence",
+      "review_conclusion": "Insufficient verified identity/interface evidence to assign a native dependency family safely.",
+      "review_status": "unresolved",
+      "reviewed_native_family": null,
+      "runtime_code_family": "d124079c81bccc739fb75764c300034a3ea8da46a1fea0b8a497e32e381cfdcf",
+      "semantic_notes": "Remain unmapped and fail-closed; rerun the planner after applying the reviewed subset."
+    },
+    {
+      "address": "0x3845badade8e6dff049820680d1f14bd3903a5d0",
+      "blocker_runtime_code_family": "f3fd137f4a5a3d15084d199b2a1c0e93feb03da2d91baa02ac4d0d489239b163",
+      "evidence_id": "fifth-15-the-sandbox-sand-controlled-",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: src/Sand.sol:Sand"
+      ],
+      "identity_hint": "The Sandbox SAND controlled/super-operator ERC20",
+      "mapping_basis": "Verified source identifies src/Sand.sol:Sand with ERC20 balances/allowances plus admin, super-operator, execution-operator, approve-and-call, paid-call, and burn extensions. Frozen S4 exercises transfer/approve/transferFrom/balance/allowance selectors. Reuse controlled-cw20 as the closest existing fungible plus shared-control dependency abstraction; super-operator/call-extension execution semantics are not claimed equivalent.",
+      "priority": 31,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe controlled-cw20 family reuse for the exercised SAND fungible/control dependency surface.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "controlled-cw20",
+      "runtime_code_family": "f3fd137f4a5a3d15084d199b2a1c0e93feb03da2d91baa02ac4d0d489239b163",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
+    },
+    {
+      "address": "0xc662c410c0ecf747543f5ba90660f6abebd9c8c4",
+      "blocker_runtime_code_family": "dbc6bd2a5b33cdae1c0d0bca27ba9bde66832cca035e1f592c821e6d82179fb9",
+      "evidence_id": "fifth-16-starknet",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify Starknet.sol:Starknet via source-resolution cache"
+      ],
+      "identity_hint": "Starknet L1 core implementation behind reviewed Proxy storage owner",
+      "mapping_basis": "The storage owner is verified Proxy.sol:Proxy, while every observed delegate frame resolves to implementation 0x16938e4b59297060484fa56a12594d8d6f4177e8, verified as Starknet.sol:Starknet. Frozen calls exercise implementation selectors across state updates and L1/L2 message-state paths. Map the proxy storage owner explicitly to the verified implementation profile and use a distinct per-owner singleton dependency lock for Starknet core state; proof/message contents and EVM execution are not modeled.",
+      "priority": 32,
+      "review_class": "delegate-implementation-owner-scoped-conservative-native-alias",
+      "review_conclusion": "Safe owner-scoped Starknet implementation mapping with a distinct conservative system-state lock.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "starknet-l1-system-lock",
+      "runtime_code_family": "044d6332da1b79172c779e718e485de3fba43e367eb494fa1b456678ac0e6eec",
+      "semantic_notes": "Mapping is implementation-aware; the generic Proxy runtime hash itself is not assigned Starknet semantics."
+    }
+  ],
+  "evidence_artifact": "benchmarks/corpora/vegeta-ethereum/s4/native-characterization/s4-fifth-batch-evidence.json",
+  "purpose": "Fifth S4 reviewed conflict-closure subset derived from the source-enriched local evidence dossier. Fifteen shortlist rows are reviewed; one remains explicitly unresolved and non-executable. Generic proxy runtime hashes are not assigned application semantics: BlurPool and Starknet use owner-scoped implementation-profile decisions.",
+  "schema_version": 1
+}

@@ -2,14 +2,16 @@
 """Plan S4 semantic-family expansion from transaction-level unresolved blocker sets.
 
 This is an offline planning aid.  It never mutates the reviewed/frozen family map.
-The key unit is the *complete unresolved family set* for a source transaction. Strict
-fully-mapped transaction gas and conflict-relevant storage-access coverage are retained as
-planning/diagnostic references. The family-freeze hard target is source conflict coverage.
+The key unit is the *complete unresolved family set* for a source transaction. The
+publication/family-freeze hard targets are all-storage-access coverage and exact source
+conflict-pair coverage. Conflict-relevant access and strict fully-mapped transaction gas
+remain diagnostics.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,9 +115,12 @@ def main() -> int:
     ap.add_argument("--top-clusters", type=int, default=100)
     ap.add_argument("--top-families", type=int, default=100)
     ap.add_argument(
-        "--target-conflict-relevant-access", "--target-storage-access",
-        dest="target_conflict_relevant_access", type=float, default=0.90,
-        help="target coverage of accesses whose storage owner participates in an observed cross-transaction conflict; --target-storage-access is a legacy alias",
+        "--target-storage-access", type=float, default=0.90,
+        help="hard target for coverage of all concrete source storage-access records",
+    )
+    ap.add_argument(
+        "--target-conflict-relevant-access", type=float, default=0.90,
+        help="diagnostic reference for accesses whose storage owner participates in an observed cross-transaction conflict",
     )
     ap.add_argument("--target-conflict", type=float, default=0.95)
     ap.add_argument("--target-state-gas", type=float, default=None, help=argparse.SUPPRESS)
@@ -123,6 +128,8 @@ def main() -> int:
     ns = ap.parse_args()
     if ns.top_clusters <= 0 or ns.top_families <= 0 or ns.max_greedy_steps <= 0:
         raise SystemExit("top/max values must be positive")
+    if not 0 < ns.target_storage_access <= 1:
+        raise SystemExit("--target-storage-access must be in (0,1]")
     if not 0 < ns.target_conflict_relevant_access <= 1:
         raise SystemExit("--target-conflict-relevant-access must be in (0,1]")
     if not 0 < ns.target_conflict <= 1:
@@ -296,8 +303,8 @@ def main() -> int:
     currently_covered_conflict_pairs = len(global_mapped_pairs)
 
     # Conflict-relevant semantic surface: every concrete storage access whose owner
-    # participates in at least one observed cross-transaction source conflict.
-    # This remains a useful diagnostic/planning reference, but is not a family-freeze gate.
+    # participates in at least one observed cross-transaction source conflict. This is a
+    # useful secondary diagnostic; the hard storage gate uses the complete access surface.
     total_conflict_relevant_access_records = sum(owner_access_records[o] for o in conflict_relevant_owners)
     currently_covered_conflict_relevant_access_records = sum(
         owner_access_records[o] for o in conflict_relevant_owners if o in mapped_storage_owners
@@ -351,8 +358,9 @@ def main() -> int:
         "current_state_gas_coverage": current_gas_coverage,
         "total_state_access_records": total_state_access_records,
         "currently_mapped_state_access_records": currently_covered_access_records,
-        "current_storage_access_coverage_diagnostic": current_storage_access_coverage,
-        "current_all_storage_access_coverage_diagnostic": current_storage_access_coverage,
+        "current_storage_access_coverage": current_storage_access_coverage,
+        "current_storage_access_coverage_diagnostic": current_storage_access_coverage,  # compatibility alias
+        "current_all_storage_access_coverage_diagnostic": current_storage_access_coverage,  # compatibility alias
         "total_conflict_relevant_access_records": total_conflict_relevant_access_records,
         "currently_mapped_conflict_relevant_access_records": currently_covered_conflict_relevant_access_records,
         "current_conflict_relevant_access_coverage": current_conflict_relevant_access_coverage,
@@ -362,13 +370,16 @@ def main() -> int:
     }
     write_json(ns.clusters_output, cluster_doc)
 
-    # Planning exposes both conflict closure and a conflict-relevant-access reference. The
-    # family-freeze hard gate is source conflict-pair coverage; access and strict all-or-nothing
-    # transaction gas remain diagnostics/planning references. Access records are disjoint across blocker ids, while
-    # conflict pairs can overlap across families, so projected conflict gain is recomputed
-    # exactly from the union of selected blocker-pair sets at every step.
-    target_access_records = ns.target_conflict_relevant_access * total_conflict_relevant_access_records
-    target_conflict_pairs = ns.target_conflict * total_conflict_pairs
+    # Dual-gate set-cover planning: all source storage-access records and exact unique source
+    # conflict pairs are the hard targets. Access records are disjoint across blocker ids,
+    # while conflict pairs can overlap across families, so projected conflict gain is
+    # recomputed exactly from the union of selected blocker-pair sets at every step.
+    # Use integer ceil targets so displayed deficits and stop conditions are identical.
+    target_storage_access_records = math.ceil(ns.target_storage_access * total_state_access_records) if total_state_access_records else 0
+    target_conflict_relevant_access_records = math.ceil(
+        ns.target_conflict_relevant_access * total_conflict_relevant_access_records
+    ) if total_conflict_relevant_access_records else 0
+    target_conflict_pairs = math.ceil(ns.target_conflict * total_conflict_pairs) if total_conflict_pairs else 0
 
     clusters_by_blocker: dict[str, list[tuple[str, ...]]] = defaultdict(list)
     for cluster in cluster_gas:
@@ -378,28 +389,28 @@ def main() -> int:
     def build_gate_plan(mode: str) -> dict:
         selected: set[str] = set()
         covered_pairs = set(global_mapped_pairs)
-        covered_access_records = currently_covered_conflict_relevant_access_records
-        covered_all_access_records_diagnostic = currently_covered_access_records
+        covered_access_records = currently_covered_access_records
+        covered_conflict_relevant_access_records = currently_covered_conflict_relevant_access_records
         strict_unlocked_gas = 0
         strict_unlocked_txs = 0
         credited_clusters: set[tuple[str, ...]] = set()
         rows: list[dict] = []
 
         for step_no in range(1, ns.max_greedy_steps + 1):
-            access_cov = (covered_access_records / total_conflict_relevant_access_records if total_conflict_relevant_access_records else 1.0)
+            access_cov = (covered_access_records / total_state_access_records if total_state_access_records else 1.0)
             conflict_cov = len(covered_pairs) / total_conflict_pairs if total_conflict_pairs else 1.0
-            if access_cov >= ns.target_conflict_relevant_access and conflict_cov >= ns.target_conflict:
+            if covered_access_records >= target_storage_access_records and len(covered_pairs) >= target_conflict_pairs:
                 break
 
-            remaining_access_deficit = max(target_access_records - covered_access_records, 0.0)
-            remaining_conflict_deficit = max(target_conflict_pairs - len(covered_pairs), 0.0)
+            remaining_access_deficit = max(target_storage_access_records - covered_access_records, 0)
+            remaining_conflict_deficit = max(target_conflict_pairs - len(covered_pairs), 0)
             candidates = [b for b in blockers if b not in selected]
             if not candidates:
                 break
 
             scored: list[tuple[tuple[float, ...], str, int, int, float, float]] = []
             for blocker_id in candidates:
-                access_gain = blockers[blocker_id].conflict_relevant_access_records
+                access_gain = blockers[blocker_id].access_records
                 conflict_gain = len(blocker_global_pairs.get(blocker_id, set()) - covered_pairs)
                 access_fraction = (
                     min(access_gain, remaining_access_deficit) / remaining_access_deficit
@@ -433,7 +444,8 @@ def main() -> int:
             _, chosen, access_gain, conflict_gain, access_fraction, conflict_fraction = scored[0]
             selected.add(chosen)
             covered_access_records += access_gain
-            covered_all_access_records_diagnostic += blockers[chosen].access_records
+            conflict_relevant_access_gain = blockers[chosen].conflict_relevant_access_records
+            covered_conflict_relevant_access_records += conflict_relevant_access_gain
             new_pairs = blocker_global_pairs.get(chosen, set()) - covered_pairs
             covered_pairs.update(new_pairs)
 
@@ -449,9 +461,10 @@ def main() -> int:
             strict_unlocked_gas += newly_unlocked_gas
             strict_unlocked_txs += newly_unlocked_txs
 
-            projected_access_cov = (covered_access_records / total_conflict_relevant_access_records if total_conflict_relevant_access_records else 1.0)
-            projected_all_access_cov_diagnostic = (
-                covered_all_access_records_diagnostic / total_state_access_records if total_state_access_records else 1.0
+            projected_access_cov = (covered_access_records / total_state_access_records if total_state_access_records else 1.0)
+            projected_conflict_relevant_access_cov = (
+                covered_conflict_relevant_access_records / total_conflict_relevant_access_records
+                if total_conflict_relevant_access_records else 1.0
             )
             projected_conflict_cov = len(covered_pairs) / total_conflict_pairs if total_conflict_pairs else 1.0
             info = blockers[chosen]
@@ -460,10 +473,11 @@ def main() -> int:
                 {
                     "step": step_no,
                     "plan_mode": mode,
-                    "selection_reason": "conflict-and-access-planning-reference-closure",
-                    "newly_covered_conflict_relevant_access_records": access_gain,
-                    "newly_covered_storage_access_records": access_gain,  # legacy alias: now conflict-relevant
-                    "newly_covered_all_storage_access_records_diagnostic": info.access_records,
+                    "selection_reason": "publication-gate-deficit-closure",
+                    "newly_covered_storage_access_records": access_gain,
+                    "newly_covered_all_storage_access_records": access_gain,
+                    "newly_covered_all_storage_access_records_diagnostic": access_gain,  # compatibility alias
+                    "newly_covered_conflict_relevant_access_records": conflict_relevant_access_gain,
                     "newly_covered_conflict_pairs": len(new_pairs),
                     "normalized_remaining_access_deficit_closed": access_fraction,
                     "normalized_remaining_conflict_deficit_closed": conflict_fraction,
@@ -473,41 +487,49 @@ def main() -> int:
                     # Backward-compatible aliases used by earlier local analysis snippets.
                     "newly_unlocked_gas": newly_unlocked_gas,
                     "newly_unlocked_transactions": newly_unlocked_txs,
-                    "cumulative_projected_mapped_conflict_relevant_access_records": covered_access_records,
-                    "cumulative_projected_conflict_relevant_access_coverage": projected_access_cov,
-                    "cumulative_projected_mapped_storage_access_records": covered_access_records,  # legacy alias
-                    "cumulative_projected_storage_access_coverage": projected_access_cov,  # legacy alias
-                    "cumulative_projected_all_storage_access_coverage_diagnostic": projected_all_access_cov_diagnostic,
+                    "cumulative_projected_mapped_storage_access_records": covered_access_records,
+                    "cumulative_projected_storage_access_coverage": projected_access_cov,
+                    "cumulative_projected_all_storage_access_coverage_diagnostic": projected_access_cov,  # compatibility alias
+                    "cumulative_projected_mapped_conflict_relevant_access_records": covered_conflict_relevant_access_records,
+                    "cumulative_projected_conflict_relevant_access_coverage": projected_conflict_relevant_access_cov,
                     "cumulative_projected_covered_conflict_pairs": len(covered_pairs),
                     "cumulative_projected_conflict_coverage": projected_conflict_cov,
                     "cumulative_projected_fully_mapped_state_gas_used": currently_covered_gas + strict_unlocked_gas,
                     "cumulative_projected_state_gas_coverage": (
                         (currently_covered_gas + strict_unlocked_gas) / source_state_gas if source_state_gas else 1.0
                     ),
-                    "remaining_storage_access_deficit_records": max(target_access_records - covered_access_records, 0.0),
-                    "remaining_conflict_deficit_pairs": max(target_conflict_pairs - len(covered_pairs), 0.0),
+                    "remaining_storage_access_deficit_records": max(target_storage_access_records - covered_access_records, 0),
+                    "remaining_conflict_deficit_pairs": max(target_conflict_pairs - len(covered_pairs), 0),
                 }
             )
             rows.append(row)
 
-        final_access = (covered_access_records / total_conflict_relevant_access_records if total_conflict_relevant_access_records else 1.0)
-        final_all_access_diagnostic = (
-            covered_all_access_records_diagnostic / total_state_access_records if total_state_access_records else 1.0
+        final_access = (covered_access_records / total_state_access_records if total_state_access_records else 1.0)
+        final_conflict_relevant_access = (
+            covered_conflict_relevant_access_records / total_conflict_relevant_access_records
+            if total_conflict_relevant_access_records else 1.0
         )
         final_conflict = len(covered_pairs) / total_conflict_pairs if total_conflict_pairs else 1.0
         final_strict_gas = (currently_covered_gas + strict_unlocked_gas) / source_state_gas if source_state_gas else 1.0
         return {
             "mode": mode,
             "steps": rows,
-            "projected_conflict_relevant_access_coverage": final_access,
-            "projected_storage_access_coverage": final_access,  # legacy alias
-            "projected_all_storage_access_coverage_diagnostic": final_all_access_diagnostic,
+            "projected_storage_access_coverage": final_access,
+            "projected_all_storage_access_coverage_diagnostic": final_access,  # compatibility alias
+            "projected_conflict_relevant_access_coverage": final_conflict_relevant_access,
             "projected_conflict_coverage": final_conflict,
             "projected_fully_mapped_state_gas_coverage_diagnostic": final_strict_gas,
-            "conflict_relevant_access_target_reached": final_access >= ns.target_conflict_relevant_access,
-            "storage_access_target_reached": final_access >= ns.target_conflict_relevant_access,  # legacy alias
-            "conflict_target_reached": final_conflict >= ns.target_conflict,
-            "both_targets_reached": final_access >= ns.target_conflict_relevant_access and final_conflict >= ns.target_conflict,
+            "storage_access_target_reached": covered_access_records >= target_storage_access_records,
+            "conflict_relevant_access_reference_reached": (
+                covered_conflict_relevant_access_records >= target_conflict_relevant_access_records
+            ),
+            "conflict_relevant_access_target_reached": (
+                covered_conflict_relevant_access_records >= target_conflict_relevant_access_records
+            ),  # compatibility alias
+            "conflict_target_reached": len(covered_pairs) >= target_conflict_pairs,
+            "both_targets_reached": (
+                covered_access_records >= target_storage_access_records and len(covered_pairs) >= target_conflict_pairs
+            ),
         }
 
     balanced_plan = build_gate_plan("balanced")
@@ -575,27 +597,32 @@ def main() -> int:
         ),
     )
     plan_doc = {
-        "schema_version": 3,
+        "schema_version": 4,
         "dataset": family_map.get("dataset"),
         "method": (
-            "Set-cover planning over the hard source-conflict target plus a conflict-relevant-access planning reference. "
-            "The balanced/access-first/conflict-first plans expose the tradeoff, but only exact source conflict coverage and "
-            "median conflict-bearing-block coverage gate family freeze. Strict fully mapped transaction gas is diagnostic only."
+            "Dual-gate set-cover planning over hard all-storage-access and exact source-conflict targets. "
+            "The balanced/access-first/conflict-first plans expose the tradeoff. Conflict-relevant access and strict fully "
+            "mapped transaction gas remain diagnostics; strict-gas complement lookahead never affects publication-gate ordering."
         ),
         "safety_note": (
             "Planner suggestions never modify the family map. Runtime-family equivalence does not imply semantic "
             "equivalence; every selected family still requires explicit review and the normal exact coverage gate."
         ),
-        "target_conflict_relevant_access_coverage": ns.target_conflict_relevant_access,
-        "target_storage_access_coverage": ns.target_conflict_relevant_access,  # legacy alias
+        "target_storage_access_coverage": ns.target_storage_access,
+        "target_storage_access_records": target_storage_access_records,
+        "target_conflict_relevant_access_coverage_diagnostic": ns.target_conflict_relevant_access,
+        "target_conflict_relevant_access_records_diagnostic": target_conflict_relevant_access_records,
+        "target_conflict_relevant_access_coverage": ns.target_conflict_relevant_access,  # compatibility alias
         "target_conflict_coverage": ns.target_conflict,
+        "target_conflict_pairs": target_conflict_pairs,
         "deprecated_target_state_gas_reference": ns.target_state_gas,
         "source_state_gas_used": source_state_gas,
         "source_state_transactions": source_state_txs,
         "total_state_access_records": total_state_access_records,
         "current_mapped_state_access_records": currently_covered_access_records,
-        "current_storage_access_coverage_diagnostic": current_storage_access_coverage,
-        "current_all_storage_access_coverage_diagnostic": current_storage_access_coverage,
+        "current_storage_access_coverage": current_storage_access_coverage,
+        "current_storage_access_coverage_diagnostic": current_storage_access_coverage,  # compatibility alias
+        "current_all_storage_access_coverage_diagnostic": current_storage_access_coverage,  # compatibility alias
         "total_conflict_relevant_access_records": total_conflict_relevant_access_records,
         "currently_mapped_conflict_relevant_access_records": currently_covered_conflict_relevant_access_records,
         "current_conflict_relevant_access_coverage": current_conflict_relevant_access_coverage,
@@ -605,9 +632,14 @@ def main() -> int:
         "current_conflict_coverage": current_conflict_coverage,
         "total_conflict_pairs": total_conflict_pairs,
         "current_covered_conflict_pairs": currently_covered_conflict_pairs,
-        "remaining_conflict_relevant_access_deficit_records": max(target_access_records - currently_covered_conflict_relevant_access_records, 0.0),
-        "remaining_storage_access_deficit_records": max(target_access_records - currently_covered_conflict_relevant_access_records, 0.0),  # legacy alias
-        "remaining_conflict_deficit_pairs": max(target_conflict_pairs - currently_covered_conflict_pairs, 0.0),
+        "remaining_storage_access_deficit_records": max(target_storage_access_records - currently_covered_access_records, 0),
+        "remaining_conflict_relevant_access_deficit_records_diagnostic": max(
+            target_conflict_relevant_access_records - currently_covered_conflict_relevant_access_records, 0
+        ),
+        "remaining_conflict_relevant_access_deficit_records": max(
+            target_conflict_relevant_access_records - currently_covered_conflict_relevant_access_records, 0
+        ),  # compatibility alias
+        "remaining_conflict_deficit_pairs": max(target_conflict_pairs - currently_covered_conflict_pairs, 0),
         "balanced_plan": balanced_plan,
         "access_first_plan": access_plan,
         "conflict_first_plan": conflict_plan,
@@ -615,13 +647,13 @@ def main() -> int:
         # Backward-compatible alias: existing scripts that read greedy_steps now receive
         # the balanced planning-reference plan.
         "greedy_steps": balanced_plan["steps"],
+        "projected_storage_access_coverage_after_steps": balanced_plan["projected_storage_access_coverage"],
+        "projected_all_storage_access_coverage_after_steps_diagnostic": balanced_plan["projected_storage_access_coverage"],  # compatibility alias
         "projected_conflict_relevant_access_coverage_after_steps": balanced_plan["projected_conflict_relevant_access_coverage"],
-        "projected_storage_access_coverage_after_steps": balanced_plan["projected_conflict_relevant_access_coverage"],  # legacy alias
-        "projected_all_storage_access_coverage_after_steps_diagnostic": balanced_plan["projected_all_storage_access_coverage_diagnostic"],
         "projected_conflict_coverage_after_steps": balanced_plan["projected_conflict_coverage"],
         "projected_state_gas_coverage_after_steps_diagnostic": balanced_plan["projected_fully_mapped_state_gas_coverage_diagnostic"],
-        "target_reached_by_plan": balanced_plan["conflict_target_reached"],
-        "all_planning_references_reached_by_plan": balanced_plan["both_targets_reached"],
+        "target_reached_by_plan": balanced_plan["both_targets_reached"],
+        "all_publication_gates_reached_by_plan": balanced_plan["both_targets_reached"],
         "top_blockers_by_attributed_gas": family_rows[: ns.top_families],
     }
     if ns.coverage and ns.coverage.exists():
@@ -637,8 +669,10 @@ def main() -> int:
             "conflict_relevant_access_absolute_difference": (
                 abs(float(reported_access) - current_conflict_relevant_access_coverage) if reported_access is not None else None
             ),
-            "reported_all_storage_access_coverage_diagnostic": reported_all_access,
-            "planner_all_storage_access_coverage_diagnostic": current_storage_access_coverage,
+            "reported_storage_access_coverage": reported_all_access,
+            "planner_storage_access_coverage": current_storage_access_coverage,
+            "reported_all_storage_access_coverage_diagnostic": reported_all_access,  # compatibility alias
+            "planner_all_storage_access_coverage_diagnostic": current_storage_access_coverage,  # compatibility alias
             "reported_state_gas_coverage_diagnostic": reported_gas,
             "planner_state_gas_coverage_diagnostic": current_gas_coverage,
             "state_gas_absolute_difference": (
@@ -651,12 +685,13 @@ def main() -> int:
     lines = [
         "Vegeta S4 semantic coverage planner",
         "",
-        f"current conflict-relevant storage-access coverage: {currently_covered_conflict_relevant_access_records}/{total_conflict_relevant_access_records} ({100*current_conflict_relevant_access_coverage:.2f}%)",
-        f"current all storage-access coverage (diagnostic): {currently_covered_access_records}/{total_state_access_records} ({100*current_storage_access_coverage:.2f}%)",
+        f"current all storage-access coverage: {currently_covered_access_records}/{total_state_access_records} ({100*current_storage_access_coverage:.2f}%)",
+        f"current conflict-relevant storage-access coverage (diagnostic): {currently_covered_conflict_relevant_access_records}/{total_conflict_relevant_access_records} ({100*current_conflict_relevant_access_coverage:.2f}%)",
         f"current fully mapped state gas (conservative diagnostic): {currently_covered_gas}/{source_state_gas} ({100*current_gas_coverage:.2f}%)",
         f"current conflict coverage: {currently_covered_conflict_pairs}/{total_conflict_pairs} ({100*current_conflict_coverage:.2f}%)",
-        f"remaining conflict-relevant access deficit to {100*ns.target_conflict_relevant_access:.1f}%: {max(target_access_records-currently_covered_conflict_relevant_access_records,0):.0f} records",
-        f"remaining conflict deficit to {100*ns.target_conflict:.1f}%: {max(target_conflict_pairs-currently_covered_conflict_pairs,0):.0f} pairs",
+        f"remaining all-storage access deficit to {100*ns.target_storage_access:.1f}%: {max(target_storage_access_records-currently_covered_access_records,0)} records",
+        f"remaining conflict deficit to {100*ns.target_conflict:.1f}%: {max(target_conflict_pairs-currently_covered_conflict_pairs,0)} pairs",
+        f"conflict-relevant access diagnostic deficit to {100*ns.target_conflict_relevant_access:.1f}%: {max(target_conflict_relevant_access_records-currently_covered_conflict_relevant_access_records,0)} records",
         f"unresolved blocker families/owners: {len(blockers)}",
         f"unresolved transaction blocker clusters: {len(cluster_gas)}",
         "",
@@ -676,23 +711,23 @@ def main() -> int:
             suggestion = row.get("suggested_native_family") or "manual/new"
             lines.append(
                 f"  {row['step']:2d}. {hint} -> {suggestion}: "
-                f"relevant-access+={row['newly_covered_conflict_relevant_access_records']} "
+                f"access+={row['newly_covered_storage_access_records']} "
                 f"conflict+={row['newly_covered_conflict_pairs']} "
-                f"relevant-access-cumulative={100*row['cumulative_projected_conflict_relevant_access_coverage']:.2f}% "
-                f"all-access-diagnostic={100*row['cumulative_projected_all_storage_access_coverage_diagnostic']:.2f}% "
+                f"access-cumulative={100*row['cumulative_projected_storage_access_coverage']:.2f}% "
+                f"relevant-access-diagnostic={100*row['cumulative_projected_conflict_relevant_access_coverage']:.2f}% "
                 f"conflict-cumulative={100*row['cumulative_projected_conflict_coverage']:.2f}% "
                 f"gate-score={row['balanced_gate_score']:.4f} "
                 f"strict-gas-unlock={row['newly_unlocked_gas_diagnostic']}"
             )
         lines.append(
-            f"  projected: relevant-access={100*plan['projected_conflict_relevant_access_coverage']:.2f}% "
-            f"all-access-diagnostic={100*plan['projected_all_storage_access_coverage_diagnostic']:.2f}% "
+            f"  projected: access={100*plan['projected_storage_access_coverage']:.2f}% "
+            f"relevant-access-diagnostic={100*plan['projected_conflict_relevant_access_coverage']:.2f}% "
             f"conflict={100*plan['projected_conflict_coverage']:.2f}% "
             f"strict-gas={100*plan['projected_fully_mapped_state_gas_coverage_diagnostic']:.2f}% "
-            f"both-planning-refs={'YES' if plan['both_targets_reached'] else 'NO'}"
+            f"both-publication-gates={'YES' if plan['both_targets_reached'] else 'NO'}"
         )
 
-    append_plan("Balanced conflict/access planning-reference plan:", balanced_plan)
+    append_plan("Balanced dual-gate plan:", balanced_plan)
     append_plan("Access-first plan:", access_plan, 25)
     append_plan("Conflict-first plan:", conflict_plan, 25)
 
@@ -704,9 +739,10 @@ def main() -> int:
         )
     lines += [
         "",
-        f"balanced conflict-relevant-access planning reference reached: {'YES' if balanced_plan['conflict_relevant_access_target_reached'] else 'NO'}",
+        f"balanced HARD storage-access target reached: {'YES' if balanced_plan['storage_access_target_reached'] else 'NO'}",
         f"balanced HARD conflict target reached: {'YES' if balanced_plan['conflict_target_reached'] else 'NO'}",
-        f"balanced both planning references reached: {'YES' if balanced_plan['both_targets_reached'] else 'NO'}",
+        f"balanced conflict-relevant-access diagnostic reference reached: {'YES' if balanced_plan['conflict_relevant_access_reference_reached'] else 'NO'}",
+        f"balanced both publication gates reached: {'YES' if balanced_plan['both_targets_reached'] else 'NO'}",
         "",
         "Planning only: no family is executable until human review updates the review decisions/base map and the exact review gate passes.",
     ]
