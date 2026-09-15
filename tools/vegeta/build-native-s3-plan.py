@@ -242,8 +242,8 @@ S1_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
 
 # S4-only reviewed selector extensions. These are intentionally separate from the frozen S1/S3
 # tables so later S4 family review cannot mutate the already-published workloads. The Banana Gun
-# router is modeled conservatively as a router-global execution guard; SEEK 0x3bb1ee11 preserves
-# only the mint dependency class (one logical mint event per source call), not exact EVM mint count.
+# router is modeled conservatively as a router-global execution guard. Contract-specific ERC721 mint
+# selectors stay owner/runtime scoped below so calldata semantics cannot leak across cw721 aliases.
 S4_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
     "fiat-token-cw20": {
         "0xa9059cbb": ("execute::transfer", [("recipient", "address"), ("amount", "uint256")]),
@@ -258,9 +258,7 @@ S4_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
         "0x40c10f19": ("execute::mint", [("recipient", "address"), ("amount", "uint256")]),
         "0x42966c68": ("execute::burn", [("amount", "uint256")]),
     },
-    "cw721-drop": {
-        "0x3bb1ee11": ("execute::mint_drop_one", []),
-    },
+    "cw721-drop": {},
     "xen-like": {
         # XEN verified ABI: reviewed mint/stake lifecycle selectors. The native XEN adapter
         # implements the same logical global/user-mint/user-stake dependency classes.
@@ -301,9 +299,34 @@ S4_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
     },
 }
 
+# S4 exact-runtime selector reviews. Unlike family-wide extensions, these apply only when the
+# storage namespace resolves to the frozen Ethereum runtime-code family. This is the right scope
+# for minimal-proxy fleets where the frozen evidence establishes an identical implementation, but
+# the native cw721-drop alias also contains unrelated ERC721 implementations.
+#
+# p16-archetype-erc721 is a 31-owner identical EIP-1167 runtime family. Representative source
+# review (including 0x0d049a...43a46, the lifecycle-preflight regression owner) resolves the same
+# Archetype implementation and its mint(Auth,uint256,address,bytes) entrypoint. The existing native
+# adapter models only the sequential ownership/mint dependency classes; unrelated Archetype admin,
+# payout, metadata and sale behavior remains opaque.
+S4_PROFILE_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
+    "18c16c15c30c2696c7b126c4f4f0964e02d9020c9a09fad2661e218007530e9e": {
+        "0x4a21a2df": (
+            "execute::archetype_mint_drop",
+            [
+                ("auth_offset", "uint256"),
+                ("quantity", "uint256"),
+                ("affiliate", "address"),
+                ("signature", "bytes"),
+            ],
+        ),
+    },
+}
+
 # S4 owner-scoped selector reviews. These selectors are deliberately not family-wide: S4's
 # cw721-drop family aliases several unrelated ERC721 implementations, and a 4-byte selector alone
-# is not evidence that every collection shares the same mint policy/state layout.
+# is not evidence that every collection shares the same mint policy/state layout. Exact-runtime
+# reviews above may deliberately cover multiple owners when the frozen runtime evidence is stronger.
 #
 # 0x45c770... is the 81-82-83-84 ERC721 proxy. Its reviewed Collection implementation exposes
 # mint(bytes16 collectionId,address user,uint16 num,uint32 nonce,bytes signature), selector
@@ -315,7 +338,20 @@ S4_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
 # (0x4a21a2df) mints to msg.sender and accounts per-wallet/per-invite-key state. The nested Auth key
 # is recovered from public calldata by the executable adapter; Merkle/signature verification itself
 # is intentionally outside the scheduler dependency model.
+#
+# 0xc114f8... is the verified Seeker ERC721 contract. Its 0x3bb1ee11 selector is
+# whitelistMint(address,uint8,uint8,bytes): calldata word 0 is the recipient and word 1 is the exact
+# mint quantity. Earlier S4 review deliberately collapsed this to one logical mint per call, which
+# under-advanced the native sequential token cursor and eventually made later transfers target
+# source token IDs that had never been materialized. Decode the public ABI quantity exactly while
+# keeping signature/allowlist verification outside the scheduler dependency model.
 S4_OWNER_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
+    "0xc114f87326c0e07f40e73b6c9fcea54888c2c67f": {
+        "0x3bb1ee11": (
+            "execute::whitelist_mint_drop",
+            [("recipient", "address"), ("quantity", "uint8"), ("mint_limit", "uint8"), ("signature", "bytes")],
+        ),
+    },
     "0x45c77068a17ac94f56b7fd59dca0d4bd50457216": {
         "0xd2e8281f": (
             "execute::collection_mint_drop",
@@ -661,6 +697,19 @@ class FamilyResolver:
             for item in frozen_map.get("profile_mappings", [])
         }
         self.explicit_owner_to_profile: dict[str, str] = {}
+        self.owner_native_family_overrides: dict[str, str] = {}
+        for item in frozen_map.get("storage_owner_native_family_overrides", []):
+            owner = normalize_address(item.get("storage_owner"))
+            family = str(item.get("native_code_family") or "")
+            if owner is None or not family:
+                continue
+            previous = self.owner_native_family_overrides.get(owner)
+            if previous is not None and previous != family:
+                raise ValueError(
+                    f"family map assigns storage owner {owner} multiple native-family overrides: "
+                    f"{previous}, {family}"
+                )
+            self.owner_native_family_overrides[owner] = family
         for item in frozen_map.get("profile_mappings", []):
             profile = str(item.get("ethereum_profile_family") or "")
             for raw_owner in item.get("storage_owner_scope") or []:
@@ -706,8 +755,16 @@ class FamilyResolver:
         return self.direct_profile(address)
 
     def native_family_for_storage_context(self, address: str | None) -> tuple[str | None, str | None]:
-        profile = self.profile_for_storage_context(address)
+        normalized = normalize_address(address)
+        profile = self.profile_for_storage_context(normalized)
+        if normalized is not None:
+            override = self.owner_native_family_overrides.get(normalized)
+            if override is not None:
+                return profile, override
         return profile, self.profile_to_native.get(profile) if profile else None
+
+    def profile_native_family(self, profile: str | None) -> str | None:
+        return self.profile_to_native.get(profile) if profile else None
 
     def runtime_code_status(self, address: str | None) -> str:
         """Return ``empty``, ``nonempty`` or ``unknown`` for a historical address.
@@ -908,6 +965,12 @@ def translate_call_tree(
             entry = S1_OWNER_ENTRYPOINT_EXTENSIONS.get(storage_context or "", {}).get(selector, entry)
         elif resolver.dataset == "vegeta-s4":
             entry = S4_ENTRYPOINT_EXTENSIONS.get(native_family or "", {}).get(selector, entry)
+            # Apply exact-runtime review before owner review. This closes selectors across frozen
+            # identical-runtime fleets without promoting them to every native-family alias. An
+            # exact storage-owner family override deliberately breaks the profile->family default;
+            # in that case do not leak selector semantics from the superseded profile family.
+            if resolver.profile_native_family(profile) == native_family:
+                entry = S4_PROFILE_ENTRYPOINT_EXTENSIONS.get(profile or "", {}).get(selector, entry)
             # As with S1, apply target-specific review only after resolving the storage namespace.
             # This prevents a selector reviewed for one S4 ERC721 implementation from becoming a
             # family-wide claim for unrelated cw721-drop aliases.
@@ -1410,6 +1473,17 @@ def validate_frozen_map(frozen_map: dict) -> None:
     for item in mappings:
         if item.get("native_code_family") not in families:
             raise ValueError(f"mapping rank {item.get('rank')} references unknown native family {item.get('native_code_family')}")
+    override_owners: set[str] = set()
+    for item in frozen_map.get("storage_owner_native_family_overrides", []):
+        owner = normalize_address(item.get("storage_owner"))
+        family = str(item.get("native_code_family") or "")
+        if owner is None:
+            raise ValueError(f"invalid storage-owner native-family override address: {item.get('storage_owner')!r}")
+        if owner in override_owners:
+            raise ValueError(f"duplicate storage-owner native-family override: {owner}")
+        override_owners.add(owner)
+        if family not in families:
+            raise ValueError(f"storage-owner override {owner} references unknown native family {family}")
 
 
 def main() -> int:

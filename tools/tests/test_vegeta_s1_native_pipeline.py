@@ -485,24 +485,48 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         sys.path.insert(0, str(ROOT / "tools/vegeta"))
         spec = importlib.util.spec_from_file_location("vegeta_build_native_s4_cw721_selectors", planner_path)
         planner = importlib.util.module_from_spec(spec); spec.loader.exec_module(planner)
+        seeker = "0xc114f87326c0e07f40e73b6c9fcea54888c2c67f"
         collection = "0x45c77068a17ac94f56b7fd59dca0d4bd50457216"
         archetype_a = "0x1c67d8f07d7ef2d637e61ed3fbc3fa9aaf7a6267"
         archetype_b = "0xc374a204334d4edd4c6a62f0867c752d65e9579c"
+        archetype_profile_rep = "0x0d049ab46e0e04fa155a2f469f296c528ac43a46"
+        archetype_profile = "18c16c15c30c2696c7b126c4f4f0964e02d9020c9a09fad2661e218007530e9e"
         unreviewed = "0x" + "de" * 20
         frozen = {
             "dataset": "vegeta-s4",
             "profile_mappings": [
+                {"ethereum_profile_family": "seeker", "native_code_family": "cw721-drop", "storage_owner_scope": [seeker]},
                 {"ethereum_profile_family": "collection", "native_code_family": "cw721-drop", "storage_owner_scope": [collection]},
                 {"ethereum_profile_family": "archetype-a", "native_code_family": "cw721-drop", "storage_owner_scope": [archetype_a]},
                 {"ethereum_profile_family": "archetype-b", "native_code_family": "cw721-drop", "storage_owner_scope": [archetype_b]},
+                {"ethereum_profile_family": archetype_profile, "native_code_family": "cw721-drop", "storage_owner_scope": []},
                 {"ethereum_profile_family": "other", "native_code_family": "cw721-drop", "storage_owner_scope": [unreviewed]},
             ],
         }
-        cache = {owner: {"code": "0x6000"} for owner in (collection, archetype_a, archetype_b, unreviewed)}
-        resolver = planner.FamilyResolver(frozen, cache, {"resolution_records": []})
+        cache = {owner: {"code": "0x6000"} for owner in (seeker, collection, archetype_a, archetype_b, archetype_profile_rep, unreviewed)}
+        resolver = planner.FamilyResolver(frozen, cache, {
+            "resolution_records": [{
+                "storage_owner": archetype_profile_rep,
+                "recommended_profile_family": archetype_profile,
+            }],
+        })
         def w(n): return int(n).to_bytes(32, "big").hex()
         caller = "0x" + "11" * 20
         recipient = "0x" + "22" * 20
+
+        # Verified Seeker ABI: 0x3bb1ee11 == whitelistMint(address,uint8,uint8,bytes).
+        # Quantity must remain exact; collapsing every call to one token under-advances next_token_id.
+        address_word = (bytes(12) + bytes.fromhex(recipient[2:])).hex()
+        seeker_data = "0x3bb1ee11" + address_word + w(7) + w(9) + w(128) + w(0)
+        action = planner.translate_call_tree({"type":"CALL","from":caller,"to":seeker,"input":seeker_data,"value":"0x0"}, resolver)[0]
+        self.assertEqual(action["dispatch"], "mapped-entrypoint")
+        self.assertEqual(action["native_entrypoint"], "execute::whitelist_mint_drop")
+        self.assertEqual(action["arguments"]["recipient"], recipient)
+        self.assertEqual(action["arguments"]["quantity"], 7)
+        self.assertEqual(action["arguments"]["mint_limit"], 9)
+        self.assertEqual(planner.translate_call_tree({"type":"CALL","from":caller,"to":unreviewed,"input":seeker_data,"value":"0x0"}, resolver)[0]["dispatch"], "mapped-opaque-selector")
+        self.assertNotIn("0x3bb1ee11", planner.S4_ENTRYPOINT_EXTENSIONS["cw721-drop"])
+        self.assertIn("0x3bb1ee11", planner.S4_OWNER_ENTRYPOINT_EXTENSIONS[seeker])
 
         # Collection mint(bytes16,address,uint16,uint32,bytes): collection word, recipient, q, nonce, sig offset.
         collection_word = (bytes.fromhex("ab" * 16) + bytes(16)).hex()
@@ -526,13 +550,32 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
             self.assertEqual(action["dispatch"], "mapped-entrypoint")
             self.assertEqual(action["native_entrypoint"], "execute::archetype_mint_drop")
             self.assertEqual(action["arguments"]["quantity"], 5)
+
+        # Lifecycle-closure regression: 0x0d049... is a representative member of the frozen
+        # 31-owner identical Archetype runtime family, so the reviewed mint selector must resolve
+        # by exact runtime profile even though this owner was never added to the owner allowlist.
+        action = planner.translate_call_tree({"type":"CALL","from":caller,"to":archetype_profile_rep,"input":archetype_data,"value":"0x0"}, resolver)[0]
+        self.assertEqual(action["dispatch"], "mapped-entrypoint")
+        self.assertEqual(action["native_entrypoint"], "execute::archetype_mint_drop")
+        self.assertEqual(action["arguments"]["quantity"], 5)
+
         opaque = planner.translate_call_tree({"type":"CALL","from":caller,"to":unreviewed,"input":archetype_data,"value":"0x0"}, resolver)[0]
         self.assertEqual(opaque["dispatch"], "mapped-opaque-selector")
         self.assertNotIn("0x4a21a2df", planner.S4_ENTRYPOINT_EXTENSIONS["cw721-drop"])
+        self.assertIn("0x4a21a2df", planner.S4_PROFILE_ENTRYPOINT_EXTENSIONS[archetype_profile])
 
         path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
         spec = importlib.util.spec_from_file_location("vegeta_prepare_native_s4_cw721_selectors", path)
         mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        seeker_call = mod.translate("cw721-drop", "execute::whitelist_mint_drop", None, {}, {
+            "ethereum_input": seeker_data,
+            "arguments": {"recipient": recipient, "quantity": 7, "mint_limit": 9, "signature": "0x"},
+            "native_instance_id": "cw721-drop:" + seeker, "action_id": 0,
+        }, caller, mod.TokenIdRemapper())
+        self.assertEqual(seeker_call["msg"]["mint_drop"]["recipient"], recipient)
+        self.assertEqual(seeker_call["msg"]["mint_drop"]["quantity"], 7)
+        self.assertIsNotNone(seeker_call["msg"]["mint_drop"]["stage_key"])
+
         iid = "cw721-drop:" + collection
         call = mod.translate("cw721-drop", "execute::collection_mint_drop", None, {}, {
             "ethereum_input": data,
@@ -556,6 +599,64 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         self.assertEqual(call["msg"]["mint_drop"]["quantity"], 5)
         self.assertEqual(call["msg"]["mint_drop"]["stage_key"], "invite:0x" + key.hex())
         self.assertIsNone(call["msg"]["mint_drop"]["nonce_key"])
+
+    def test_s4_exact_owner_native_family_override_disambiguates_erc20_approve(self):
+        planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
+        sys.path.insert(0, str(ROOT / "tools/vegeta"))
+        spec = importlib.util.spec_from_file_location("vegeta_build_native_s4_owner_family_override", planner_path)
+        planner = importlib.util.module_from_spec(spec); spec.loader.exec_module(planner)
+
+        grace = "0xd91dc4cb15f8e50587b3a168c5caf4101323a7d8"
+        nft = "0x" + "ab" * 20
+        archetype_profile = "18c16c15c30c2696c7b126c4f4f0964e02d9020c9a09fad2661e218007530e9e"
+        frozen = {
+            "dataset": "vegeta-s4",
+            "profile_mappings": [{
+                "ethereum_profile_family": archetype_profile,
+                "native_code_family": "cw721-drop",
+                "storage_owner_scope": [],
+            }],
+            "storage_owner_native_family_overrides": [{
+                "storage_owner": grace,
+                "native_code_family": "cw20-base",
+            }],
+        }
+        cache = {grace: {"code": "0x6000"}, nft: {"code": "0x6000"}}
+        resolution = {"resolution_records": [
+            {"storage_owner": grace, "recommended_profile_family": archetype_profile},
+            {"storage_owner": nft, "recommended_profile_family": archetype_profile},
+        ]}
+        resolver = planner.FamilyResolver(frozen, cache, resolution)
+
+        router = "0x7a250d5630b4cf539739df2c5dacb4c659f2488d"
+        address_word = (bytes(12) + bytes.fromhex(router[2:])).hex()
+        amount_word = (1).to_bytes(32, "big").hex()
+        approve = "0x095ea7b3" + address_word + amount_word
+        caller = "0x" + "11" * 20
+
+        action = planner.translate_call_tree({
+            "type": "CALL", "from": caller, "to": grace, "input": approve, "value": "0x0"
+        }, resolver)[0]
+        self.assertEqual(action["ethereum_profile_family"], archetype_profile)
+        self.assertEqual(action["native_code_family"], "cw20-base")
+        self.assertEqual(action["native_entrypoint"], "execute::increase_allowance_or_approve")
+        self.assertEqual(action["arguments"], {"spender": router, "amount": 1})
+
+        nft_action = planner.translate_call_tree({
+            "type": "CALL", "from": caller, "to": nft, "input": approve, "value": "0x0"
+        }, resolver)[0]
+        self.assertEqual(nft_action["native_code_family"], "cw721-drop")
+        self.assertEqual(nft_action["native_entrypoint"], "execute::approve_nft")
+        self.assertEqual(nft_action["arguments"], {"spender": router, "token_id": 1})
+
+        # The exact-owner family override must also block selector semantics inherited from the
+        # superseded cw721 profile.  0x4a21a2df is the Archetype mint selector, not a cw20 call.
+        archetype_selector = "0x4a21a2df" + (0).to_bytes(32, "big").hex() * 4
+        opaque = planner.translate_call_tree({
+            "type": "CALL", "from": caller, "to": grace, "input": archetype_selector, "value": "0x0"
+        }, resolver)[0]
+        self.assertEqual(opaque["native_code_family"], "cw20-base")
+        self.assertEqual(opaque["dispatch"], "mapped-opaque-selector")
 
     def test_s4_selector_closure_batch2_reviews(self):
         planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"

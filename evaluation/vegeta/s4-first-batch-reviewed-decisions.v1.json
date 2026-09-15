@@ -33,8 +33,8 @@
       "observed_selectors": ["0x3bb1ee11", "0xa22cb465", "0x23b872dd"],
       "review_status": "reviewed",
       "reviewed_native_family": "cw721-drop",
-      "mapping_basis": "Frozen S4 activity combines standard ERC721 approval/transfer paths with selector 0x3bb1ee11, whose public transaction effects are mint-like. The native translation preserves the ERC721 ownership/approval plus sequential-mint dependency classes; exact EVM mint cardinality/cryptographic validation is outside the S4 claim.",
-      "semantic_notes": "0x3bb1ee11 is translated as one logical mint event per source call to preserve the mint-state dependency class; the workload does not claim exact EVM final-state equivalence."
+      "mapping_basis": "Frozen S4 activity combines standard ERC721 approval/transfer paths with verified Seeker whitelistMint(address,uint8,uint8,bytes), selector 0x3bb1ee11. The native translation preserves the ERC721 ownership/approval plus sequential-mint dependency classes and decodes the public calldata recipient/quantity exactly; signature/allowlist validation and exact EVM final-state equivalence remain outside the S4 claim.",
+      "semantic_notes": "0x3bb1ee11 is owner-scoped to Seeker and translated with its verified whitelistMint recipient/uint8 quantity so the native sequential token lifecycle stays aligned; the workload does not claim signature/allowlist or exact EVM final-state equivalence."
     },
     {
       "priority": 4,

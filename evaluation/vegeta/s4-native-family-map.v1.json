@@ -12,6 +12,14 @@
     "provenance_sha256": "7348dfc7b90b6d34f89e19b4e29ed30f46dea03b29123add7a05ccd28014e6f3"
   },
   "methodology_note": "Only identical runtime-code-family mappings already reviewed for the base map are reused automatically. New S4 bytecode families/selectors remain unmapped until explicit review. S4 has no exact SLOAD/SSTORE oracle.",
+  "storage_owner_native_family_overrides": [
+    {
+      "storage_owner": "0xd91dc4cb15f8e50587b3a168c5caf4101323a7d8",
+      "native_code_family": "cw20-base",
+      "mapping_basis": "Frozen S4 transaction 0x22f7958a6f8f110082531663da3af408e920d3da7b0f3a0d184c2df58c33117c at block 18586224 calls approve(address,uint256) on this owner with spender 0x7a250d5630b4cf539739df2c5dacb4c659f2488d (the Ethereum Uniswap V2 Router02) and value 1. Public token indexing identifies the owner as Grace Lending Protocol, a fungible token. The prior profile recommendation aliased this storage owner to cw721-drop, causing the shared ERC20/ERC721 selector 0x095ea7b3 to reinterpret allowance value 1 as NFT token_id 1. This exact-owner override preserves the resolved Ethereum profile for provenance while selecting cw20-base semantics only for this storage namespace; unsupported custom selectors remain opaque.",
+      "s4_semantic_notes": "Exact-owner correction for an ERC20/ERC721 selector collision. Standard transfer/balance/allowance selectors use cw20-base; no runtime-family-wide reclassification is implied."
+    }
+  ],
   "native_code_families": {
     "amp-partition-collateral-lock": {
       "implementation_alias_of": "marketplace-router",
@@ -319,12 +327,12 @@
     {
       "ethereum_contract_identifier": "SEEK ERC721-like family",
       "ethereum_profile_family": "e4774ce981798c23daad3f54c4b86ffc2ca58500d7268e52a4d4e696bf3cd69b",
-      "mapping_basis": "Frozen S4 activity combines standard ERC721 approval/transfer paths with selector 0x3bb1ee11, whose public transaction effects are mint-like. The native translation preserves the ERC721 ownership/approval plus sequential-mint dependency classes; exact EVM mint cardinality/cryptographic validation is outside the S4 claim.",
+      "mapping_basis": "Frozen S4 activity combines standard ERC721 approval/transfer paths with verified Seeker whitelistMint(address,uint8,uint8,bytes), selector 0x3bb1ee11. The native translation preserves the ERC721 ownership/approval plus sequential-mint dependency classes and decodes the public calldata recipient/quantity exactly; signature/allowlist validation and exact EVM final-state equivalence remain outside the S4 claim.",
       "native_code_family": "cw721-drop",
       "rank": 26,
       "s4_family_extension": true,
       "s4_review_priority": 3,
-      "s4_semantic_notes": "0x3bb1ee11 is translated as one logical mint event per source call to preserve the mint-state dependency class; the workload does not claim exact EVM final-state equivalence.",
+      "s4_semantic_notes": "0x3bb1ee11 is owner-scoped to Seeker and translated with its verified whitelistMint recipient/uint8 quantity so the native sequential token lifecycle stays aligned; the workload does not claim signature/allowlist or exact EVM final-state equivalence.",
       "storage_owner_scope": [
         "0xc114f87326c0e07f40e73b6c9fcea54888c2c67f"
       ]

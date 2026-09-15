@@ -4,7 +4,7 @@
   "source": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
   "analysis_provenance": {
     "method": "llm-source-derived",
-    "source_sha256": "b600b29a92d542e540f63fdf9ce035b25b9d31a656e9069307f0216dbc8ac8e9",
+    "source_sha256": "61245cb6f3a08704ce984f7ed6c192d84aa2c61a2593c4a7750d40b138181e71",
     "source_scope": "complete native contract source",
     "historical_trace_keys_used": false,
     "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
@@ -334,8 +334,7 @@
     {
       "entrypoint": "execute::Withdraw",
       "input_parameters": [
-        "info.sender",
-        "env.block.time"
+        "info.sender"
       ],
       "accesses": [
         {
@@ -356,9 +355,35 @@
             "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
             "start_line": 18,
             "end_line": 18,
-            "code": "fn withdraw(deps:DepsMut,env:Env,user:Addr)->Result<Response,ContractError>{let s=USER_STAKES.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;if env.block.time.seconds()<s.maturity{return Err(ContractError::StakeNotMature)};USER_STAKES.remove(deps.storage,user.as_str());credit(deps.storage,user.as_str(),s.amount)?;GLOBAL.update(deps.storage,|mut g|->StdResult<_>{g.total_staked=g.total_staked.checked_sub(s.amount).map_err(StdError::overflow)?;Ok(g)})?;Ok(Response::new())}"
+            "code": "fn withdraw(deps:DepsMut,_env:Env,user:Addr)->Result<Response,ContractError>{let s=USER_STAKES.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;USER_STAKES.remove(deps.storage,user.as_str());credit(deps.storage,user.as_str(),s.amount)?;GLOBAL.update(deps.storage,|mut g|->StdResult<_>{g.total_staked=g.total_staked.checked_sub(s.amount).map_err(StdError::overflow)?;Ok(g)})?;Ok(Response::new())}"
           },
-          "notes": []
+          "notes": [
+            "XEN withdraw closes an existing stake without a maturity rejection; maturity affects reward calculation in the source contract, not withdraw eligibility."
+          ]
+        },
+        {
+          "kind": "write",
+          "resource": "USER_STAKES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "info.sender"
+            }
+          },
+          "guard": {
+            "expression": "stake exists",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 18,
+            "end_line": 18,
+            "code": "fn withdraw(deps:DepsMut,_env:Env,user:Addr)->Result<Response,ContractError>{let s=USER_STAKES.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;USER_STAKES.remove(deps.storage,user.as_str());credit(deps.storage,user.as_str(),s.amount)?;GLOBAL.update(deps.storage,|mut g|->StdResult<_>{g.total_staked=g.total_staked.checked_sub(s.amount).map_err(StdError::overflow)?;Ok(g)})?;Ok(Response::new())}"
+          },
+          "notes": [
+            "Successful withdraw removes the sender stake record."
+          ]
         },
         {
           "kind": "write",
@@ -371,16 +396,58 @@
             }
           },
           "guard": {
-            "expression": "stake mature",
+            "expression": "stake exists",
             "dependency_kind": "input_and_state"
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
-            "start_line": 21,
-            "end_line": 21,
-            "code": "fn credit(s:&mut dyn cosmwasm_std::Storage,a:&str,n:Uint128)->StdResult<()>{let x=BALANCES.may_load(s,a)?.unwrap_or_default();BALANCES.save(s,a,&x.checked_add(n).map_err(StdError::overflow)?) }"
+            "start_line": 18,
+            "end_line": 18,
+            "code": "fn withdraw(deps:DepsMut,_env:Env,user:Addr)->Result<Response,ContractError>{let s=USER_STAKES.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;USER_STAKES.remove(deps.storage,user.as_str());credit(deps.storage,user.as_str(),s.amount)?;GLOBAL.update(deps.storage,|mut g|->StdResult<_>{g.total_staked=g.total_staked.checked_sub(s.amount).map_err(StdError::overflow)?;Ok(g)})?;Ok(Response::new())}"
+          },
+          "notes": [
+            "Native analogue credits at least the staked principal; source XEN additionally computes the reward from stake age."
+          ]
+        },
+        {
+          "kind": "read",
+          "resource": "GLOBAL",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "stake exists",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 18,
+            "end_line": 18,
+            "code": "fn withdraw(deps:DepsMut,_env:Env,user:Addr)->Result<Response,ContractError>{let s=USER_STAKES.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;USER_STAKES.remove(deps.storage,user.as_str());credit(deps.storage,user.as_str(),s.amount)?;GLOBAL.update(deps.storage,|mut g|->StdResult<_>{g.total_staked=g.total_staked.checked_sub(s.amount).map_err(StdError::overflow)?;Ok(g)})?;Ok(Response::new())}"
           },
           "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "GLOBAL",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "stake exists",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 18,
+            "end_line": 18,
+            "code": "fn withdraw(deps:DepsMut,_env:Env,user:Addr)->Result<Response,ContractError>{let s=USER_STAKES.may_load(deps.storage,user.as_str())?.ok_or(ContractError::Missing)?;USER_STAKES.remove(deps.storage,user.as_str());credit(deps.storage,user.as_str(),s.amount)?;GLOBAL.update(deps.storage,|mut g|->StdResult<_>{g.total_staked=g.total_staked.checked_sub(s.amount).map_err(StdError::overflow)?;Ok(g)})?;Ok(Response::new())}"
+          },
+          "notes": [
+            "Successful withdraw decrements total_staked."
+          ]
         }
       ]
     },
