@@ -1229,6 +1229,61 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
             stats=mod.validate_cw721_authorization_lifecycle(execution,manifest,prime,progress_every=999)
             self.assertEqual(stats["blocks"],1)
 
+    def test_s4_usdc_allowance_delta_selectors_are_exact_owner_scoped(self):
+        planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
+        sys.path.insert(0, str(ROOT / "tools/vegeta"))
+        spec = importlib.util.spec_from_file_location("vegeta_build_native_s4_usdc_allowance_delta", planner_path)
+        planner = importlib.util.module_from_spec(spec); spec.loader.exec_module(planner)
+        usdc="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"; other="0x"+"ab"*20
+        frozen={"dataset":"vegeta-s4","profile_mappings":[
+            {"ethereum_profile_family":"usdc-profile","native_code_family":"fiat-token-cw20","storage_owner_scope":[usdc]},
+            {"ethereum_profile_family":"other-profile","native_code_family":"fiat-token-cw20","storage_owner_scope":[other]},
+        ]}
+        resolver=planner.FamilyResolver(frozen,{usdc:{"code":"0x6000"},other:{"code":"0x6000"}},{"resolution_records":[]})
+        caller="0x"+"11"*20; spender="0x"+"22"*20
+        aw=(bytes(12)+bytes.fromhex(spender[2:])).hex(); n=(7).to_bytes(32,"big").hex()
+        inc=planner.translate_call_tree({"type":"CALL","from":caller,"to":usdc,"input":"0x39509351"+aw+n,"value":"0x0"},resolver)[0]
+        dec=planner.translate_call_tree({"type":"CALL","from":caller,"to":usdc,"input":"0xa457c2d7"+aw+n,"value":"0x0"},resolver)[0]
+        self.assertEqual(inc["native_entrypoint"],"execute::increase_allowance")
+        self.assertEqual(dec["native_entrypoint"],"execute::decrease_allowance")
+        self.assertEqual(inc["arguments"],{"spender":spender,"amount":7})
+        self.assertEqual(planner.translate_call_tree({"type":"CALL","from":caller,"to":other,"input":"0x39509351"+aw+n,"value":"0x0"},resolver)[0]["dispatch"],"mapped-opaque-selector")
+
+    def test_s4_usdc_allowance_delta_translation_and_preflight(self):
+        path=ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec=importlib.util.spec_from_file_location("vegeta_prepare_s4_usdc_allowance_delta",path)
+        mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        owner="0x"+"11"*20; spender="0x"+"22"*20; recipient="0x"+"33"*20
+        iid="fiat-token-cw20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        def word_addr(a): return (bytes(12)+bytes.fromhex(a[2:])).hex()
+        inc=mod.translate("fiat-token-cw20","execute::increase_allowance",None,{}, {
+            "ethereum_input":"0x39509351"+word_addr(spender)+(7).to_bytes(32,"big").hex(),
+            "arguments":{"spender":spender,"amount":7},"native_instance_id":iid,"action_id":1,
+        },owner,mod.TokenIdRemapper())
+        self.assertEqual(inc["msg"]["increase_allowance"]["amount"],str(mod.SEED))
+        dec=mod.translate("fiat-token-cw20","execute::decrease_allowance",None,{}, {
+            "ethereum_input":"0xa457c2d7"+word_addr(spender)+(7).to_bytes(32,"big").hex(),
+            "arguments":{"spender":spender,"amount":7},"native_instance_id":iid,"action_id":2,
+        },owner,mod.TokenIdRemapper())
+        self.assertEqual(dec["msg"]["decrease_allowance"]["amount"],"8")
+        manifest=[{"instance_id":iid,"family":"fiat-token-cw20","instantiate_msg":{}}]
+        prime=[{"kind":"execute","family":"fiat-token-cw20","instance_id":iid,"sender":owner,
+                "msg":{"approve":{"spender":spender,"amount":str(mod.SEED)}}}]
+        with tempfile.TemporaryDirectory() as td:
+            execution=Path(td)/"execution.jsonl"
+            calls=[
+                {"kind":"execute","family":"fiat-token-cw20","instance_id":iid,"sender":owner,"msg":{"approve":{"spender":spender,"amount":"0"}}},
+                inc,
+                {"kind":"execute","family":"fiat-token-cw20","instance_id":iid,"sender":spender,
+                 "msg":{"transfer_from":{"owner":owner,"recipient":recipient,"amount":"1"}}},
+            ]
+            execution.write_text(json.dumps({"block_number":18584822,"transactions":[{"tx_index":114,"tx_hash":"0x"+"44"*32,"source_failed":False,"calls":calls}]})+"\n")
+            stats=mod.validate_cw20_allowance_lifecycle(execution,manifest,prime,progress_every=999)
+            self.assertEqual(stats["blocks"],1)
+            execution.write_text(json.dumps({"block_number":18584822,"transactions":[{"tx_index":114,"tx_hash":"0x"+"55"*32,"source_failed":False,"calls":[calls[0],calls[2]]}]})+"\n")
+            with self.assertRaisesRegex(RuntimeError,"insufficient normalized allowance"):
+                mod.validate_cw20_allowance_lifecycle(execution,manifest,prime,progress_every=999)
+
     def test_prepare_wrapper_collects_and_reuses_cw721_mint_audit(self):
         prepare = (ROOT / "tools/legacy-scripts/run-vegeta-s1-prepare-native.sh").read_text()
         audit = (ROOT / "tools/legacy-scripts/run-vegeta-s1-cw721-mint-audit.sh").read_text()

@@ -346,6 +346,12 @@ S4_PROFILE_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str,
 # source token IDs that had never been materialized. Decode the public ABI quantity exactly while
 # keeping signature/allowlist verification outside the scheduler dependency model.
 S4_OWNER_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
+    # Circle FiatTokenV2 exposes allowance delta mutators in addition to approve/permit. Keep these
+    # exact-owner scoped so a selector reviewed for USDC cannot leak into unrelated fiat-token aliases.
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+        "0x39509351": ("execute::increase_allowance", [("spender", "address"), ("amount", "uint256")]),
+        "0xa457c2d7": ("execute::decrease_allowance", [("spender", "address"), ("amount", "uint256")]),
+    },
     "0xc114f87326c0e07f40e73b6c9fcea54888c2c67f": {
         "0x3bb1ee11": (
             "execute::whitelist_mint_drop",

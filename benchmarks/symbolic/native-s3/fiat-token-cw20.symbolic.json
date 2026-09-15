@@ -4,7 +4,7 @@
   "source": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
   "analysis_provenance": {
     "method": "llm-source-derived",
-    "source_sha256": "23df22d7d88a5652141f356e02497d2006bf2fcb99f6378c32f0c02ba2bee5f0",
+    "source_sha256": "96e2845af15679cc5712d8b25a8d51492b7a32e1ed2e515b3f5bca36a7903357",
     "source_scope": "complete native contract source",
     "historical_trace_keys_used": false,
     "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
@@ -742,6 +742,118 @@
             "code": "TOTAL_SUPPLY.update(deps.storage,|x|x.checked_sub(amount)"
           },
           "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::IncreaseAllowance",
+      "input_parameters": [
+        "info.sender",
+        "spender",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, spender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+            "start_line": 25,
+            "end_line": 25,
+            "code": "fn increase_allowance(deps:DepsMut,owner:Addr,spender:String,amount:Uint128)->Result<Response,ContractError>{ensure_active(deps.as_ref(),owner.as_str())?;let s=deps.api.addr_validate(&spender)?;let a=ALLOWANCES.may_load(deps.storage,(owner.as_str(),s.as_str()))?.unwrap_or_default();ALLOWANCES.save(deps.storage,(owner.as_str(),s.as_str()),&a.checked_add(amount).map_err(StdError::overflow)?)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, spender)"
+            }
+          },
+          "guard": {
+            "expression": "ALLOWANCES + amount fits Uint128",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+            "start_line": 25,
+            "end_line": 25,
+            "code": "fn increase_allowance(deps:DepsMut,owner:Addr,spender:String,amount:Uint128)->Result<Response,ContractError>{ensure_active(deps.as_ref(),owner.as_str())?;let s=deps.api.addr_validate(&spender)?;let a=ALLOWANCES.may_load(deps.storage,(owner.as_str(),s.as_str()))?.unwrap_or_default();ALLOWANCES.save(deps.storage,(owner.as_str(),s.as_str()),&a.checked_add(amount).map_err(StdError::overflow)?)?;Ok(Response::new())}"
+          },
+          "notes": [
+            "S4 FiatToken allowance-delta adapter uses normalized amounts while preserving the source owner/spender dependency key."
+          ]
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::DecreaseAllowance",
+      "input_parameters": [
+        "info.sender",
+        "spender",
+        "amount"
+      ],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, spender)"
+            }
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+            "start_line": 26,
+            "end_line": 26,
+            "code": "fn decrease_allowance(deps:DepsMut,owner:Addr,spender:String,amount:Uint128)->Result<Response,ContractError>{ensure_active(deps.as_ref(),owner.as_str())?;let s=deps.api.addr_validate(&spender)?;let a=ALLOWANCES.may_load(deps.storage,(owner.as_str(),s.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(owner.as_str(),s.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;Ok(Response::new())}"
+          },
+          "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "ALLOWANCES",
+          "key": {
+            "semantic_name": "owner_spender",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "(info.sender, spender)"
+            }
+          },
+          "guard": {
+            "expression": "ALLOWANCES >= amount",
+            "dependency_kind": "input_and_state"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+            "start_line": 26,
+            "end_line": 26,
+            "code": "fn decrease_allowance(deps:DepsMut,owner:Addr,spender:String,amount:Uint128)->Result<Response,ContractError>{ensure_active(deps.as_ref(),owner.as_str())?;let s=deps.api.addr_validate(&spender)?;let a=ALLOWANCES.may_load(deps.storage,(owner.as_str(),s.as_str()))?.unwrap_or_default();if a<amount{return Err(ContractError::InsufficientAllowance)};ALLOWANCES.save(deps.storage,(owner.as_str(),s.as_str()),&a.checked_sub(amount).map_err(StdError::overflow)?)?;Ok(Response::new())}"
+          },
+          "notes": [
+            "S4 FiatToken allowance-delta adapter uses normalized amounts while preserving the source owner/spender dependency key."
+          ]
         }
       ]
     }

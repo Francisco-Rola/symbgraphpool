@@ -916,9 +916,19 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         recipient,raw_amount=stargate_receive_payload(data)
         if not recipient or raw_amount<=0: return None
         return contract_call('execute',family,iid,caller,{'bridge_receive':{'recipient':recipient,'amount':str(max(amount(raw_amount),1))}},a)
-    # Reviewed FiatToken/USDC extensions. Permit updates allowance + owner nonce; burn debits the
-    # caller and total supply. Signature verification itself is public-input validation, not a
-    # historical-storage dependency, so the native model preserves only the state dependencies.
+    # Reviewed FiatToken/USDC extensions. Circle FiatTokenV2 also exposes increaseAllowance and
+    # decreaseAllowance. Preserve those allowance-key mutations explicitly: positive increases use
+    # the same large sentinel as positive approvals so amount folding cannot turn a source-successful
+    # future transferFrom into a native failure; decreases use the bounded amount fold and therefore
+    # preserve the positive-vs-zero scheduler state conservatively.
+    if family == 'fiat-token-cw20' and 'increaseallowance' in ec:
+        spender=args.get('spender') or abi_addr(data,0); n=approval_amount(args.get('amount',abi_uint(data,1)))
+        return contract_call('execute',family,iid,caller,{'increase_allowance':{'spender':spender,'amount':str(n)}},a)
+    if family == 'fiat-token-cw20' and 'decreaseallowance' in ec:
+        spender=args.get('spender') or abi_addr(data,0); n=amount(args.get('amount',abi_uint(data,1)))
+        return contract_call('execute',family,iid,caller,{'decrease_allowance':{'spender':spender,'amount':str(n)}},a)
+    # Permit updates allowance + owner nonce; burn debits the caller and total supply. Signature
+    # verification itself is public-input validation, not a historical-storage dependency.
     if family == 'fiat-token-cw20' and 'permit' in ec:
         owner=args.get('owner') or abi_addr(data,0); spender=args.get('spender') or abi_addr(data,1); n=approval_amount(args.get('amount',abi_uint(data,2)))
         return contract_call('execute',family,iid,owner,{'permit':{'owner':owner,'spender':spender,'amount':str(n)}},a)
@@ -1648,6 +1658,93 @@ def validate_cw721_authorization_lifecycle(
     return dict(stats)
 
 
+def validate_cw20_allowance_lifecycle(
+    execution_path: Path,
+    manifest_instances: list[dict[str,Any]],
+    priming_calls: list[dict[str,Any]],
+    *,
+    progress_every: int = 500,
+) -> dict[str,int]:
+    """Replay normalized fungible-token allowance state before Wasmd setup.
+
+    S4 deliberately folds ERC20 amounts, so this is not a source-value equivalence oracle. It
+    verifies the stronger property needed by execution: predecessor priming plus every represented
+    allowance mutation must leave each committed native transferFrom with sufficient allowance.
+    Source-failed transactions and explicitly reverted internal scopes are discarded by Wasmd and
+    therefore do not commit allowance state here either.
+    """
+    fungible={'cw20-base','controlled-cw20','fiat-token-cw20','fee-token-cw20','wrapped-native-token','stargate-cw20'}
+    families={str(row['instance_id']):str(row['family']) for row in manifest_instances}
+    allowances_state: dict[tuple[str,str,str],int] = {}
+
+    def addr(value: Any) -> str:
+        return str(norm_addr(value) or value or '').lower()
+
+    def apply(call: dict[str,Any], state: dict[tuple[str,str,str],int], *, block: dict[str,Any] | None, tx: dict[str,Any] | None, index: int, validate: bool) -> None:
+        if call.get('kind')!='execute': return
+        iid=str(call.get('instance_id') or ''); fam=families.get(iid)
+        if fam not in fungible: return
+        sender=addr(call.get('sender')); msg=call.get('msg') or {}
+        if 'approve' in msg:
+            z=msg['approve']; state[(iid,sender,addr(z.get('spender')))]=intv(z.get('amount')); return
+        if 'permit' in msg:
+            z=msg['permit']; state[(iid,addr(z.get('owner')),addr(z.get('spender')))]=intv(z.get('amount')); return
+        if 'increase_allowance' in msg:
+            z=msg['increase_allowance']; key=(iid,sender,addr(z.get('spender')))
+            state[key]=state.get(key,0)+intv(z.get('amount')); return
+        if 'decrease_allowance' in msg:
+            z=msg['decrease_allowance']; key=(iid,sender,addr(z.get('spender'))); n=intv(z.get('amount')); have=state.get(key,0)
+            if validate and have<n:
+                raise RuntimeError(
+                    'CW20 allowance-lifecycle preflight failed before Wasmd setup: '
+                    f"block={None if block is None else block.get('block_number')} tx_index={None if tx is None else tx.get('tx_index')} "
+                    f"tx_hash={None if tx is None else tx.get('tx_hash')} call={index} instance={iid} family={fam} "
+                    f"owner={sender} spender={addr(z.get('spender'))} allowance={have} decrement={n} "
+                    f"reason=decrease exceeds normalized allowance msg={json.dumps(msg,sort_keys=True)}"
+                )
+            state[key]=max(have-n,0); return
+        if 'transfer_from' in msg:
+            z=msg['transfer_from']; owner=addr(z.get('owner')); key=(iid,owner,sender); n=intv(z.get('amount')); have=state.get(key,0)
+            if validate and have<n:
+                raise RuntimeError(
+                    'CW20 allowance-lifecycle preflight failed before Wasmd setup: '
+                    f"block={None if block is None else block.get('block_number')} tx_index={None if tx is None else tx.get('tx_index')} "
+                    f"tx_hash={None if tx is None else tx.get('tx_hash')} call={index} instance={iid} family={fam} "
+                    f"owner={owner} spender={sender} allowance={have} spend={n} "
+                    f"reason=insufficient normalized allowance msg={json.dumps(msg,sort_keys=True)}"
+                )
+            state[key]=max(have-n,0)
+
+    for index,call in enumerate(priming_calls):
+        apply(call,allowances_state,block=None,tx=None,index=index,validate=False)
+
+    stats=defaultdict(int); blocks=0
+    with execution_path.open(encoding='utf-8') as fh:
+        for line in fh:
+            if not line.strip(): continue
+            block=json.loads(line); blocks+=1
+            for tx in block.get('transactions',[]):
+                if bool(tx.get('source_failed')):
+                    stats['source_failed_transactions']+=1; stats['transactions']+=1; continue
+                tx_state=dict(allowances_state)
+                for index,call in enumerate(tx.get('calls') or []):
+                    if call.get('source_revert_scope_action_id') is not None:
+                        stats['reverted_calls_ignored']+=1; continue
+                    apply(call,tx_state,block=block,tx=tx,index=index,validate=True)
+                allowances_state=tx_state; stats['transactions']+=1
+            if blocks % progress_every==0:
+                print(
+                    f"CW20 allowance-lifecycle preflight: blocks={blocks} tx={stats['transactions']} tracked_allowances={len(allowances_state)}",
+                    flush=True,
+                )
+    stats['blocks']=blocks; stats['tracked_allowances']=len(allowances_state)
+    print(
+        f"CW20 allowance-lifecycle preflight PASS: blocks={blocks} tx={stats['transactions']} tracked_allowances={len(allowances_state)}",
+        flush=True,
+    )
+    return dict(stats)
+
+
 def build(argv=None):
     ap=argparse.ArgumentParser()
     ap.add_argument('--plan',type=Path,default=DEFAULT_PLAN); ap.add_argument('--selector-map',type=Path,default=DEFAULT_SELECTOR)
@@ -1874,8 +1971,10 @@ def build(argv=None):
             prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'claim_mint_reward':{}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'stake':{'amount':'1','term_days':0}},{'action_id':None}))
     lifecycle_stats=validate_cw721_token_lifecycle(execution_work_path,manifest_instances,prime)
     authorization_lifecycle_stats=validate_cw721_authorization_lifecycle(execution_work_path,manifest_instances,prime)
+    allowance_lifecycle_stats=validate_cw20_allowance_lifecycle(execution_work_path,manifest_instances,prime)
     initial_state_meta['cw721_token_lifecycle_preflight']=lifecycle_stats
     initial_state_meta['cw721_authorization_lifecycle_preflight']=authorization_lifecycle_stats
+    initial_state_meta['cw20_allowance_lifecycle_preflight']=allowance_lifecycle_stats
     final_execution=out/'execution-plan.jsonl'
     if execution_work_path != final_execution:
         execution_work_path.replace(final_execution)
