@@ -21,6 +21,7 @@ DEFAULT_OUT = ROOT / "benchmarks/corpora/vegeta-ethereum/s3/native-execution"
 SEED = 10**24
 PAIR_RESERVE = 10**15
 U64_MAX = (1 << 64) - 1
+SEEKER_CW721_OWNER = "0xc114f87326c0e07f40e73b6c9fcea54888c2c67f"
 
 
 class TokenIdRemapper:
@@ -1159,8 +1160,13 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
             fingerprint=calldata_fingerprint(data)
             # Preserve reviewed state-key semantics where the source ABI exposes them. Seizon's
             # multiStageMint stage is ABI word 2; signed mint nonce is decoded as argument `nonce`.
-            # Whitelist signatures lack an explicit nonce/stage in the reviewed ABI, so their public
-            # calldata fingerprint remains the conservative replay-key surrogate.
+            # Do not manufacture state keys from signature/calldata bytes. In particular Seeker's
+            # verified whitelistMint(address,uint8,uint8,bytes) has per-caller mint accounting but
+            # no nonce/stage argument; reusing the same signed authorization is not a native nonce.
+            seeker_whitelist = (
+                iid == f"cw721-drop:{SEEKER_CW721_OWNER}"
+                and 'whitelist' in ec
+            )
             stage_key=None
             if 'archetypemintdrop' in ec:
                 # Archetype mint(Auth,uint256,address,bytes) stores mint limits by
@@ -1182,14 +1188,14 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
                 stage_key=f"batch:{fingerprint[16:40]}"
             elif 'mintphase' in ec:
                 stage_key=f"phase:{intv(args.get('phase_index',abi_uint(data,0)))}"
-            elif 'whitelist' in ec:
+            elif 'whitelist' in ec and not seeker_whitelist:
                 stage_key=fingerprint[16:40]
             nonce_key=None
             if 'collectionmintdrop' in ec:
                 nonce_key=None
             elif 'signed' in ec:
                 nonce_key=f"nonce:{intv(args.get('nonce',abi_uint(data,1)))}"
-            elif 'whitelist' in ec:
+            elif 'whitelist' in ec and not seeker_whitelist:
                 nonce_key=fingerprint[40:64]
             call=contract_call('execute',family,iid,caller,{'mint_drop':{'recipient':recipient,'quantity':q,'stage_key':stage_key,'nonce_key':nonce_key}},a)
             if requested_q is not None:
@@ -1658,6 +1664,73 @@ def validate_cw721_authorization_lifecycle(
     return dict(stats)
 
 
+def validate_cw721_mint_constraint_lifecycle(
+    execution_path: Path,
+    manifest_instances: list[dict[str,Any]],
+    priming_calls: list[dict[str,Any]],
+    *,
+    progress_every: int = 500,
+) -> dict[str,int]:
+    """Fail before Wasmd if the translated cw721-drop nonce model rejects a committed mint.
+
+    `MintDrop.nonce_key` is an optional native constraint used only where a reviewed source ABI
+    exposes a genuine one-shot nonce.  This pass mirrors that native state machine so an invented
+    or duplicated nonce can never survive preparation and fail minutes later in Wasmd.
+    """
+    families={str(row['instance_id']):str(row['family']) for row in manifest_instances}
+    used: set[tuple[str,str,str]] = set()
+
+    def apply(call: dict[str,Any], state: set[tuple[str,str,str]], *, block: dict[str,Any] | None, tx: dict[str,Any] | None, index: int, validate: bool) -> None:
+        if call.get('kind')!='execute': return
+        iid=str(call.get('instance_id') or '')
+        if families.get(iid)!='cw721-drop': return
+        msg=call.get('msg') or {}
+        if 'mint_drop' not in msg: return
+        z=msg['mint_drop'] or {}; nonce=z.get('nonce_key')
+        if nonce is None: return
+        sender=str(norm_addr(call.get('sender')) or call.get('sender') or '').lower()
+        key=(iid,sender,str(nonce))
+        if validate and key in state:
+            raise RuntimeError(
+                'CW721 mint-constraint preflight failed before Wasmd setup: '
+                f"block={None if block is None else block.get('block_number')} "
+                f"tx_index={None if tx is None else tx.get('tx_index')} "
+                f"tx_hash={None if tx is None else tx.get('tx_hash')} call={index} instance={iid} "
+                f"family=cw721-drop sender={sender} nonce_key={nonce} reason=native nonce already used "
+                f"msg={json.dumps(msg,sort_keys=True)}"
+            )
+        state.add(key)
+
+    for index,call in enumerate(priming_calls):
+        apply(call,used,block=None,tx=None,index=index,validate=False)
+
+    stats=defaultdict(int); blocks=0
+    with execution_path.open(encoding='utf-8') as fh:
+        for line in fh:
+            if not line.strip(): continue
+            block=json.loads(line); blocks+=1
+            for tx in block.get('transactions',[]):
+                if bool(tx.get('source_failed')):
+                    stats['source_failed_transactions']+=1; stats['transactions']+=1; continue
+                tx_state=set(used)
+                for index,call in enumerate(tx.get('calls') or []):
+                    if call.get('source_revert_scope_action_id') is not None:
+                        stats['reverted_calls_ignored']+=1; continue
+                    apply(call,tx_state,block=block,tx=tx,index=index,validate=True)
+                used=tx_state; stats['transactions']+=1
+            if blocks % progress_every==0:
+                print(
+                    f"CW721 mint-constraint preflight: blocks={blocks} tx={stats['transactions']} used_nonces={len(used)}",
+                    flush=True,
+                )
+    stats['blocks']=blocks; stats['used_nonces']=len(used)
+    print(
+        f"CW721 mint-constraint preflight PASS: blocks={blocks} tx={stats['transactions']} used_nonces={len(used)}",
+        flush=True,
+    )
+    return dict(stats)
+
+
 def validate_cw20_allowance_lifecycle(
     execution_path: Path,
     manifest_instances: list[dict[str,Any]],
@@ -1971,9 +2044,11 @@ def build(argv=None):
             prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'claim_mint_reward':{}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'stake':{'amount':'1','term_days':0}},{'action_id':None}))
     lifecycle_stats=validate_cw721_token_lifecycle(execution_work_path,manifest_instances,prime)
     authorization_lifecycle_stats=validate_cw721_authorization_lifecycle(execution_work_path,manifest_instances,prime)
+    mint_constraint_stats=validate_cw721_mint_constraint_lifecycle(execution_work_path,manifest_instances,prime)
     allowance_lifecycle_stats=validate_cw20_allowance_lifecycle(execution_work_path,manifest_instances,prime)
     initial_state_meta['cw721_token_lifecycle_preflight']=lifecycle_stats
     initial_state_meta['cw721_authorization_lifecycle_preflight']=authorization_lifecycle_stats
+    initial_state_meta['cw721_mint_constraint_preflight']=mint_constraint_stats
     initial_state_meta['cw20_allowance_lifecycle_preflight']=allowance_lifecycle_stats
     final_execution=out/'execution-plan.jsonl'
     if execution_work_path != final_execution:

@@ -574,7 +574,10 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         }, caller, mod.TokenIdRemapper())
         self.assertEqual(seeker_call["msg"]["mint_drop"]["recipient"], recipient)
         self.assertEqual(seeker_call["msg"]["mint_drop"]["quantity"], 7)
-        self.assertIsNotNone(seeker_call["msg"]["mint_drop"]["stage_key"])
+        # Seeker whitelistMint has no source nonce/stage key. Reusing the same valid signed
+        # authorization must not become a synthetic one-shot nonce in the native model.
+        self.assertIsNone(seeker_call["msg"]["mint_drop"]["stage_key"])
+        self.assertIsNone(seeker_call["msg"]["mint_drop"]["nonce_key"])
 
         iid = "cw721-drop:" + collection
         call = mod.translate("cw721-drop", "execute::collection_mint_drop", None, {}, {
@@ -743,6 +746,7 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         self.assertEqual(whitelist["msg"]["mint_drop"]["recipient"], caller)
         self.assertEqual(whitelist["msg"]["mint_drop"]["quantity"], 3)
         self.assertIsNotNone(whitelist["msg"]["mint_drop"]["stage_key"])
+        self.assertIsNotNone(whitelist["msg"]["mint_drop"]["nonce_key"])
 
         xen_call = mod.translate("xen-like", "execute::claim_mint_reward", None, {}, {
             "ethereum_input":"0x52c7f8dc", "arguments":{}, "native_instance_id":"xen-like:"+xen, "action_id":3,
@@ -1283,6 +1287,39 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
             execution.write_text(json.dumps({"block_number":18584822,"transactions":[{"tx_index":114,"tx_hash":"0x"+"55"*32,"source_failed":False,"calls":[calls[0],calls[2]]}]})+"\n")
             with self.assertRaisesRegex(RuntimeError,"insufficient normalized allowance"):
                 mod.validate_cw20_allowance_lifecycle(execution,manifest,prime,progress_every=999)
+
+    def test_s4_cw721_mint_constraint_preflight_catches_duplicate_native_nonce(self):
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_s4_mint_constraints", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); execution = td / "execution.jsonl"
+            iid = "cw721-drop:0x" + "ab" * 20
+            sender = "0x" + "11" * 20
+            manifest = [{"instance_id": iid, "family": "cw721-drop", "instantiate_msg": {"next_token_id": 1}}]
+            def mint(token_id, nonce):
+                return {
+                    "kind": "execute", "family": "cw721-drop", "instance_id": iid, "sender": sender,
+                    "msg": {"mint_drop": {"recipient": sender, "quantity": 1, "token_ids": [token_id],
+                                             "stage_key": None, "nonce_key": nonce}},
+                }
+            execution.write_text(json.dumps({
+                "block_number": 18584913, "transactions": [{
+                    "tx_index": 124, "tx_hash": "0x" + "66" * 32, "source_failed": False,
+                    "calls": [mint(1992, "nonce:7"), mint(1993, "nonce:7")],
+                }],
+            }) + "\n")
+            with self.assertRaisesRegex(RuntimeError, "native nonce already used"):
+                mod.validate_cw721_mint_constraint_lifecycle(execution, manifest, [], progress_every=999)
+
+            execution.write_text(json.dumps({
+                "block_number": 18584913, "transactions": [{
+                    "tx_index": 124, "tx_hash": "0x" + "77" * 32, "source_failed": False,
+                    "calls": [mint(1992, None), mint(1993, None)],
+                }],
+            }) + "\n")
+            stats = mod.validate_cw721_mint_constraint_lifecycle(execution, manifest, [], progress_every=999)
+            self.assertEqual(stats["used_nonces"], 0)
 
     def test_prepare_wrapper_collects_and_reuses_cw721_mint_audit(self):
         prepare = (ROOT / "tools/legacy-scripts/run-vegeta-s1-prepare-native.sh").read_text()
