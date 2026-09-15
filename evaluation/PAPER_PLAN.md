@@ -92,3 +92,20 @@ Before final numbers, rerun the zero-conflict experiment on native Linux on the 
 ## Suggested paper layout
 
 Main paper: Fig. 1 S1/S4 replay plus fixed-300ms overlap-aware headline; one separate S1 consensus-window sensitivity figure validates the 300ms design point; Fig. 2 native workloads; Fig. 3 zero-conflict ceiling; Fig. 4 contention plus the S1-derived workload-parallelism diagnostic; Fig. 5 S3 phases/oracle headroom; Fig. 6 implementation ablation; Fig. 7 block-size break-even; Fig. 8 prediction precision; Fig. 9 adaptation; Fig. 10 consensus divergence; Fig. 11 compaction if space. Put semantic coverage, detailed baseline-fidelity counters and secondary phase tables in the appendix/supplement if page pressure is high. No original-EVM executor is required by this artifact.
+
+## EuroSys consolidated publication layout
+
+The artifact-facing `evaluation/eurosys/run.sh` consolidates the mechanism suite above into six main figures and two tables.  The older per-claim PDFs remain useful appendix diagnostics; they are no longer the proposed main-paper layout.
+
+| Main item | Evidence |
+|---|---|
+| Table 1 -- Workloads/fidelity | S1/S3/S4 provenance, executed size, scheduler-facing reviewed coverage, stronger all-transaction semantic coverage, exact-oracle scope |
+| Fig. 1 -- Real-workload headline | S1/S4 replay speedup plus canonical 300-ms tail and modeled commit speedups |
+| Fig. 2 -- Scalability/distribution | S1/S4 worker scaling and per-block tail CDFs |
+| Fig. 3 -- Generality/contention | MiniWarehouse hotness sweep, NativeMix, ConflictLab lane sweep, zero-conflict ceiling |
+| Fig. 4 -- Cost of ACG | S3 phase breakdown, P+R local elapsed cost, isolated-process peak RSS, block-size break-even |
+| Fig. 5 -- Prediction/adaptation | exact-access oracle, precision/performance Pareto, prediction-fault recovery, regime adaptation |
+| Fig. 6 -- Consensus robustness | consensus-window sensitivity and candidate/decided divergence |
+| Table 2 -- Correctness/semantics | accepted non-point semantic matrix, including losing regimes rather than hiding them |
+
+Additional reviewer defenses are collected by `15_compute_sensitivity.sh` (source-gas-weighted synthetic CPU sensitivity), `16_translation_fidelity.sh` (exact S3 source/native topology and cost fidelity), and optional `17_iavl_sensitivity.sh` (state-backend sensitivity).  `evaluation/eurosys/capture_machine.py` freezes machine/toolchain provenance so the six-core development campaign and the later Vegeta-class publication campaign remain separate and reproducible.

@@ -16,7 +16,7 @@ pub struct InstantiateMsg { pub admin: String, pub name: String, pub symbol: Str
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
     SeedMint { owner: String, token_id: u64 },
-    MintDrop { recipient: String, quantity: u32, stage_key: Option<String>, nonce_key: Option<String> },
+    MintDrop { recipient: String, quantity: u32, #[serde(default)] token_ids: Option<Vec<u64>>, stage_key: Option<String>, nonce_key: Option<String> },
     TransferNft { recipient: String, token_id: u64 },
     ApproveNft { spender: String, token_id: u64 },
     ApproveAll { operator: String, approved: bool },
@@ -67,7 +67,7 @@ pub fn instantiate(deps: DepsMut, _env: Env, _info: MessageInfo, msg: Instantiat
 pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> Result<Response, ContractError> {
     match msg {
         ExecuteMsg::SeedMint { owner, token_id } => seed_mint(deps, info.sender, owner, token_id),
-        ExecuteMsg::MintDrop { recipient, quantity, stage_key, nonce_key } => mint_drop(deps, info.sender, recipient, quantity, stage_key, nonce_key),
+        ExecuteMsg::MintDrop { recipient, quantity, token_ids, stage_key, nonce_key } => mint_drop(deps, info.sender, recipient, quantity, token_ids, stage_key, nonce_key),
         ExecuteMsg::TransferNft { recipient, token_id } => transfer(deps, info.sender, recipient, token_id),
         ExecuteMsg::ApproveNft { spender, token_id } => approve(deps, info.sender, spender, token_id),
         ExecuteMsg::ApproveAll { operator, approved } => {
@@ -90,19 +90,28 @@ fn seed_mint(deps: DepsMut, sender: Addr, owner: String, token_id: u64) -> Resul
     Ok(Response::new())
 }
 
-fn mint_drop(deps: DepsMut, minter: Addr, recipient: String, quantity: u32, stage_key: Option<String>, nonce_key: Option<String>) -> Result<Response, ContractError> {
+fn mint_drop(deps: DepsMut, minter: Addr, recipient: String, quantity: u32, token_ids: Option<Vec<u64>>, stage_key: Option<String>, nonce_key: Option<String>) -> Result<Response, ContractError> {
     if quantity == 0 || quantity > 10_000 { return Err(ContractError::InvalidQuantity); }
+    if let Some(ids) = token_ids.as_ref() { if ids.len() != quantity as usize { return Err(ContractError::InvalidQuantity); } }
     let recipient = deps.api.addr_validate(&recipient)?;
     if let Some(nonce) = nonce_key.as_deref() {
         if USED_NONCES.may_load(deps.storage, (minter.as_str(), nonce))?.unwrap_or(false) { return Err(ContractError::NonceUsed); }
         USED_NONCES.save(deps.storage, (minter.as_str(), nonce), &true)?;
     }
     let mut config = CONFIG.load(deps.storage)?;
-    for _ in 0..quantity {
-        let token_id = config.next_token_id;
-        OWNER.save(deps.storage, token_id, &recipient)?;
-        config.next_token_id = config.next_token_id.saturating_add(1);
-        config.total_supply = config.total_supply.saturating_add(1);
+    if let Some(token_ids) = token_ids {
+        for token_id in token_ids {
+            OWNER.save(deps.storage, token_id, &recipient)?;
+            config.next_token_id = config.next_token_id.max(token_id.saturating_add(1));
+            config.total_supply = config.total_supply.saturating_add(1);
+        }
+    } else {
+        for _ in 0..quantity {
+            let token_id = config.next_token_id;
+            OWNER.save(deps.storage, token_id, &recipient)?;
+            config.next_token_id = config.next_token_id.saturating_add(1);
+            config.total_supply = config.total_supply.saturating_add(1);
+        }
     }
     CONFIG.save(deps.storage, &config)?;
     OWNER_COUNT.update(deps.storage, recipient.as_str(), |value| -> StdResult<_> { Ok(value.unwrap_or_default() + u64::from(quantity)) })?;
@@ -158,9 +167,22 @@ mod tests {
     fn public_mint_tracks_supply_wallet_and_owner() {
         let mut deps = mock_dependencies();
         instantiate(deps.as_mut(), mock_env(), mock_info("x", &[]), InstantiateMsg { admin: "admin".into(), name: "Drop".into(), symbol: "DROP".into(), next_token_id: 10 }).unwrap();
-        execute(deps.as_mut(), mock_env(), mock_info("alice", &[]), ExecuteMsg::MintDrop { recipient: "alice".into(), quantity: 2, stage_key: Some("public".into()), nonce_key: None }).unwrap();
+        execute(deps.as_mut(), mock_env(), mock_info("alice", &[]), ExecuteMsg::MintDrop { recipient: "alice".into(), quantity: 2, token_ids: None, stage_key: Some("public".into()), nonce_key: None }).unwrap();
         assert_eq!(OWNER.load(deps.as_ref().storage, 10).unwrap(), Addr::unchecked("alice"));
         assert_eq!(CONFIG.load(deps.as_ref().storage).unwrap().total_supply, 2);
         assert_eq!(MINTED_BY_WALLET.load(deps.as_ref().storage, "alice").unwrap(), 2);
+    }
+
+    #[test]
+    fn event_backed_mint_can_preserve_exact_source_token_ids_with_gaps() {
+        let mut deps = mock_dependencies();
+        instantiate(deps.as_mut(), mock_env(), mock_info("x", &[]), InstantiateMsg { admin: "admin".into(), name: "Drop".into(), symbol: "DROP".into(), next_token_id: 10 }).unwrap();
+        execute(deps.as_mut(), mock_env(), mock_info("alice", &[]), ExecuteMsg::MintDrop {
+            recipient: "alice".into(), quantity: 2, token_ids: Some(vec![25, 26]), stage_key: None, nonce_key: None,
+        }).unwrap();
+        assert_eq!(OWNER.load(deps.as_ref().storage, 25).unwrap(), Addr::unchecked("alice"));
+        assert_eq!(OWNER.load(deps.as_ref().storage, 26).unwrap(), Addr::unchecked("alice"));
+        assert!(OWNER.may_load(deps.as_ref().storage, 10).unwrap().is_none());
+        assert_eq!(CONFIG.load(deps.as_ref().storage).unwrap().next_token_id, 27);
     }
 }

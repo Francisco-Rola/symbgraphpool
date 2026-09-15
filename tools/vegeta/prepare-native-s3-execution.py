@@ -478,10 +478,12 @@ class Cw721DropMintSequence:
         self.path = path
         self.data: dict[str, Any] = {}
         self.owners: dict[str, dict] = {}
+        self.dataset = ""
         if path is None:
             return
         self.data = read_json(path)
-        if self.data.get("dataset") != "vegeta-s1":
+        self.dataset = str(self.data.get("dataset") or "")
+        if self.dataset not in {"vegeta-s1", "vegeta-s4"}:
             raise ValueError(f"unexpected cw721-drop mint-sequence dataset in {path}: {self.data.get('dataset')!r}")
         summary = self.data.get("summary") or {}
         if not bool(summary.get("all_observed_sequences_plus_one", False)):
@@ -671,44 +673,117 @@ def validate_drop_mint_translation(
     sequence: Cw721DropMintSequence,
     translated: dict[tuple[str, str], int],
 ) -> dict[str, Any]:
-    """Require every observed reviewed-owner mint tx to have the same translated mint quantity.
+    """Validate every translated sequential-drop mint against committed public mint events.
 
-    A missing source mint would advance the source contract's sequential token ID without advancing
-    native state, corrupting every later mint/transfer token key.  Therefore full S1 preparation is
-    intentionally stricter than the 95% scheduler coverage gate for these reviewed sequential-drop
-    owners: all in-window zero-address Transfer mint events must be accounted for exactly.
+    The source event audit can contain mint transactions that are intentionally outside the retained
+    native call set. Exact event token IDs make those omitted transactions harmless gaps for later
+    represented mints, so they are reported rather than treated as translation failures. Conversely,
+    every translated committed mint must have a matching source event row and exact cardinality.
     """
     if sequence.path is None:
         return {"mode": "not-provided", "validated": False}
     expected = sequence.expected_mints()
     mismatches = []
-    for key, row in sorted(expected.items()):
-        actual = int(translated.get(key, 0))
+    unexpected = []
+    for key, actual_value in sorted(translated.items()):
+        actual = int(actual_value)
+        row = expected.get(key)
+        if row is None:
+            unexpected.append({"owner": key[0], "tx_hash": key[1], "translated_quantity": actual})
+            continue
         wanted = int(row.get("mint_count", 0))
         if actual != wanted:
             mismatches.append({
                 "owner": key[0], "tx_hash": key[1], "expected_mint_events": wanted,
                 "translated_quantity": actual, "token_ids": row.get("token_ids") or [],
             })
-    unexpected = []
-    for key, actual in sorted(translated.items()):
-        if key not in expected:
-            unexpected.append({"owner": key[0], "tx_hash": key[1], "translated_quantity": int(actual)})
     if mismatches or unexpected:
         sample = (mismatches + unexpected)[:10]
         raise ValueError(
-            "cw721-drop mint-event/translation mismatch; reviewed sequential mint state would diverge. "
+            "cw721-drop mint-event/translation mismatch; translated sequential mint state would diverge. "
             f"mismatches={len(mismatches)} unexpected={len(unexpected)} sample={sample}"
         )
+    omitted = sorted(set(expected) - set(translated))
     return {
-        "mode": "strict-all-reviewed-owner-mint-events",
+        "mode": "strict-translated-mints-exact-token-ids",
         "validated": True,
-        "mint_transactions": len(expected),
+        "observed_mint_transactions": len(expected),
         "translated_mint_transactions": len(translated),
-        "mint_events": sum(int(row.get("mint_count", 0)) for row in expected.values()),
+        "observed_mint_events": sum(int(row.get("mint_count", 0)) for row in expected.values()),
+        "translated_mint_events": sum(int(v) for v in translated.values()),
+        "omitted_source_mint_transactions": len(omitted),
+        "omitted_source_mint_events": sum(int(expected[key].get("mint_count", 0)) for key in omitted),
         "mismatches": 0,
         "unexpected_translated_mints": 0,
     }
+
+
+def reconcile_s4_drop_mint_calls(tx: dict, calls: list[dict], sequence: Cw721DropMintSequence) -> None:
+    """Bind S4 translated mint calls to exact public Transfer(from=0) token IDs.
+
+    One Ethereum transaction can expose several reviewed nested mint frames. Public mint events are
+    transaction-scoped, so applying the full event count independently to every frame multiplies the
+    mint cardinality. Instead, reconcile all committed native mint calls for one owner/transaction as
+    a group. A transaction-wide integer scale captures Archetype invite unitSize while preserving the
+    relative calldata quantities of nested calls; each call receives its exact consecutive event IDs.
+    """
+    if sequence.path is None or sequence.dataset != "vegeta-s4" or bool(tx.get("source_failed")):
+        return
+    tx_hash = str(tx.get("tx_hash") or "").lower()
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for call in calls:
+        if call.get("source_revert_scope_action_id") is not None:
+            continue
+        if call.get("kind") != "execute" or call.get("family") != "cw721-drop":
+            continue
+        msg = call.get("msg") or {}
+        if "mint_drop" not in msg:
+            continue
+        owner = sequence.owner_for_instance(str(call.get("instance_id") or ""))
+        if owner:
+            grouped[owner].append(call)
+    for owner, mint_calls in grouped.items():
+        row = ((sequence.owners.get(owner) or {}).get("transactions") or {}).get(tx_hash)
+        if row is None:
+            # validate_drop_mint_translation reports this as an unexpected translated mint.
+            continue
+        event_ids = [int(v) for v in (row.get("token_ids") or [])]
+        event_recipients = [norm_addr(v) for v in (row.get("recipients") or [])]
+        if event_recipients and (len(event_recipients) != len(event_ids) or any(v is None for v in event_recipients)):
+            raise ValueError(f"invalid S4 cw721 mint recipient audit for {owner} {tx_hash}")
+        requested = [intv((call.get("msg") or {})["mint_drop"].get("quantity")) for call in mint_calls]
+        requested_total = sum(requested)
+        expected_total = len(event_ids)
+        if requested_total <= 0 or expected_total <= 0 or expected_total % requested_total:
+            raise ValueError(
+                "cw721-drop S4 mint-event allocation is not an integer expansion of translated calldata; "
+                f"owner={owner} tx_hash={tx_hash} calls={len(mint_calls)} requested={requested} "
+                f"expected_mint_events={expected_total} token_ids={event_ids[:16]}"
+            )
+        scale = expected_total // requested_total
+        offset = 0
+        for call, raw_q in zip(mint_calls, requested):
+            committed_q = raw_q * scale
+            ids = event_ids[offset:offset + committed_q]
+            recipients = event_recipients[offset:offset + committed_q] if event_recipients else []
+            recipient = norm_addr(((call.get("msg") or {}).get("mint_drop") or {}).get("recipient"))
+            if len(ids) != committed_q:
+                raise ValueError(f"cw721-drop S4 mint-event allocation underflow for {owner} {tx_hash}")
+            if recipients and recipient and any(v != recipient for v in recipients):
+                raise ValueError(
+                    "cw721-drop S4 mint-event recipient does not match translated call; "
+                    f"owner={owner} tx_hash={tx_hash} action={call.get('origin_action_id')} "
+                    f"recipient={recipient} event_recipients={sorted(set(recipients))}"
+                )
+            mint = call["msg"]["mint_drop"]
+            mint["quantity"] = committed_q
+            mint["token_ids"] = ids
+            call["source_requested_mint_quantity"] = raw_q
+            call["source_committed_mint_quantity"] = committed_q
+            call["source_exact_mint_token_ids"] = True
+            offset += committed_q
+        if offset != expected_total:
+            raise ValueError(f"cw721-drop S4 mint-event allocation did not consume all events for {owner} {tx_hash}")
 
 
 def caller_for(tx: dict, action: dict, by_id: dict[int,dict], mode: str='exact') -> str:
@@ -1043,6 +1118,13 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
             else:
                 q=intv(args.get('quantity',abi_uint(data,0)))
             if 'mintdropone' in ec or 'allowlistmintdropone' in ec: q=1
+            if 'archetypemintdrop' in ec and event_effect is not None:
+                requested_q=int(q)
+                # S1 has one reviewed mint frame per transaction and can bind directly here. S4 can
+                # expose several nested reviewed frames in one transaction; its event allocation is
+                # reconciled transaction-wide after translation to avoid multiplying event cardinality.
+                if drop_mint_sequence is None or drop_mint_sequence.dataset != 'vegeta-s4':
+                    q=int(event_effect['quantity'])
             if 'signedmintdrop' in ec:
                 requested_q=int(q)
                 # This signed ABI exposes the requested numberOfTokens, but 18 committed S1 calls
@@ -1373,10 +1455,14 @@ def validate_cw721_token_lifecycle(
             tid=intv(msg['seed_mint'].get('token_id')); additions[iid].add(tid)
             cursors[iid]=max(cursors.get(iid,1),tid+1)
         elif fam=='cw721-drop' and 'mint_drop' in msg:
-            q=intv(msg['mint_drop'].get('quantity'))
-            start=cursors.get(iid,1)
-            if q>0:
-                additions[iid].update(range(start,start+q)); cursors[iid]=start+q
+            z=msg['mint_drop']; q=intv(z.get('quantity')); exact=[intv(v) for v in (z.get('token_ids') or [])]
+            if exact:
+                if len(exact)!=q: raise RuntimeError(f"CW721 mint_drop exact token_ids/quantity mismatch for {iid}")
+                additions[iid].update(exact); cursors[iid]=max(cursors.get(iid,1),max(exact)+1)
+            else:
+                start=cursors.get(iid,1)
+                if q>0:
+                    additions[iid].update(range(start,start+q)); cursors[iid]=start+q
         elif fam=='cw721-mintable' and 'mint' in msg:
             tid=msg['mint'].get('token_id')
             if tid is not None: additions[iid].add(intv(tid))
@@ -1440,6 +1526,123 @@ def validate_cw721_token_lifecycle(
         f"CW721 token-lifecycle preflight PASS: blocks={blocks} tx={stats['transactions']} "
         f"tracked_tokens={stats['tracked_tokens']} reverted_missing={stats['reverted_missing_tokens']} "
         f"failed_tx_missing={stats['source_failed_missing_tokens']}",
+        flush=True,
+    )
+    return dict(stats)
+
+
+def validate_cw721_authorization_lifecycle(
+    execution_path: Path,
+    manifest_instances: list[dict[str,Any]],
+    priming_calls: list[dict[str,Any]],
+    *,
+    progress_every: int = 500,
+) -> dict[str,int]:
+    """Replay committed CW721 ownership/approval state before Wasmd setup.
+
+    The token-existence preflight catches missing mints, but an incorrect mint cardinality or omitted
+    ownership transition can still create the right token ID under the wrong owner and later fail as
+    `unauthorized` in Wasmd.  This pass models only public ERC-721 semantics represented by the native
+    calls: owner, per-token approval, and operator approval. Failed source transactions and explicitly
+    reverted internal scopes are ignored because their state is discarded by the benchmark runtime.
+    """
+    families={str(row['instance_id']):str(row['family']) for row in manifest_instances}
+    owners: dict[tuple[str,int],str] = {}
+    approvals: dict[tuple[str,int],str] = {}
+    operators: set[tuple[str,str,str]] = set()
+    next_id: dict[str,int] = {}
+    for row in manifest_instances:
+        iid=str(row['instance_id']); fam=str(row['family']); msg=row.get('instantiate_msg') or {}
+        if fam=='cw721-drop': next_id[iid]=intv(msg.get('next_token_id',1))
+
+    def fail(block: dict[str,Any] | None, tx: dict[str,Any] | None, index: int, call: dict[str,Any], reason: str, tid: int | None = None) -> None:
+        iid=str(call.get('instance_id') or ''); sender=norm_addr(call.get('sender'))
+        owner=owners.get((iid,tid)) if tid is not None else None
+        approval=approvals.get((iid,tid)) if tid is not None else None
+        operator=(iid,owner,sender) in operators if owner and sender else False
+        raise RuntimeError(
+            'CW721 authorization-lifecycle preflight failed before Wasmd setup: '
+            f"block={None if block is None else block.get('block_number')} "
+            f"tx_index={None if tx is None else tx.get('tx_index')} "
+            f"tx_hash={None if tx is None else tx.get('tx_hash')} call={index} instance={iid} "
+            f"family={families.get(iid)} token_id={tid} sender={sender} native_owner={owner} "
+            f"source_owner={norm_addr(call.get('source_owner'))} token_approval={approval} "
+            f"operator_approved={operator} reason={reason} msg={json.dumps(call.get('msg'),sort_keys=True)}"
+        )
+
+    def authorized(iid: str, tid: int, sender: str | None) -> bool:
+        if sender is None: return False
+        owner=owners.get((iid,tid))
+        return bool(owner and (sender==owner or approvals.get((iid,tid))==sender or (iid,owner,sender) in operators))
+
+    def apply(call: dict[str,Any], *, block: dict[str,Any] | None, tx: dict[str,Any] | None, index: int, validate: bool) -> None:
+        iid=str(call.get('instance_id') or ''); fam=families.get(iid); msg=call.get('msg') or {}
+        if fam not in {'cw721-drop','cw721-mintable'} or call.get('kind')!='execute': return
+        sender=norm_addr(call.get('sender'))
+        if fam=='cw721-drop' and 'seed_mint' in msg:
+            z=msg['seed_mint']; tid=intv(z.get('token_id')); owner=norm_addr(z.get('owner'))
+            if owner: owners[(iid,tid)]=owner
+            approvals.pop((iid,tid),None); next_id[iid]=max(next_id.get(iid,1),tid+1); return
+        if fam=='cw721-mintable' and 'mint' in msg:
+            z=msg['mint']; tid=intv(z.get('token_id')); owner=norm_addr(z.get('owner'))
+            if owner: owners[(iid,tid)]=owner
+            approvals.pop((iid,tid),None); return
+        if fam=='cw721-drop' and 'mint_drop' in msg:
+            z=msg['mint_drop']; q=intv(z.get('quantity')); recipient=norm_addr(z.get('recipient')); exact=[intv(v) for v in (z.get('token_ids') or [])]
+            if recipient and q>0:
+                tids=exact if exact else list(range(next_id.get(iid,1),next_id.get(iid,1)+q))
+                if len(tids)!=q: fail(block,tx,index,call,'mint token_ids/quantity mismatch')
+                for tid in tids:
+                    owners[(iid,tid)]=recipient; approvals.pop((iid,tid),None)
+                if tids: next_id[iid]=max(next_id.get(iid,1),max(tids)+1)
+            return
+        if 'approve_all' in msg:
+            z=msg['approve_all']; operator=norm_addr(z.get('operator'))
+            if sender and operator:
+                key=(iid,sender,operator)
+                if bool(z.get('approved')): operators.add(key)
+                else: operators.discard(key)
+            return
+        if 'approve_nft' in msg:
+            z=msg['approve_nft']; tid=intv(z.get('token_id')); spender=norm_addr(z.get('spender'))
+            if validate and not authorized(iid,tid,sender): fail(block,tx,index,call,'approve sender is neither owner nor operator',tid)
+            if spender: approvals[(iid,tid)]=spender
+            return
+        if 'transfer_nft' in msg or 'send_or_safe_transfer_nft' in msg:
+            z=msg.get('transfer_nft') or msg.get('send_or_safe_transfer_nft') or {}; tid=intv(z.get('token_id'))
+            native_owner=owners.get((iid,tid)); source_owner=norm_addr(call.get('source_owner'))
+            if validate and source_owner and native_owner != source_owner:
+                fail(block,tx,index,call,'source/native owner mismatch before transfer',tid)
+            if validate and not authorized(iid,tid,sender): fail(block,tx,index,call,'transfer sender unauthorized',tid)
+            recipient=norm_addr(z.get('recipient'))
+            if recipient: owners[(iid,tid)]=recipient
+            approvals.pop((iid,tid),None)
+
+    for index,call in enumerate(priming_calls): apply(call,block=None,tx=None,index=index,validate=False)
+
+    stats=defaultdict(int); blocks=0
+    with execution_path.open(encoding='utf-8') as fh:
+        for line in fh:
+            if not line.strip(): continue
+            block=json.loads(line); blocks+=1
+            for tx in block.get('transactions',[]):
+                if bool(tx.get('source_failed')):
+                    stats['source_failed_transactions']+=1; stats['transactions']+=1; continue
+                for index,call in enumerate(tx.get('calls') or []):
+                    if call.get('source_revert_scope_action_id') is not None:
+                        stats['reverted_calls_ignored']+=1; continue
+                    apply(call,block=block,tx=tx,index=index,validate=True)
+                stats['transactions']+=1
+            if blocks % progress_every==0:
+                print(
+                    f"CW721 authorization-lifecycle preflight: blocks={blocks} tx={stats['transactions']} "
+                    f"owners={len(owners)} approvals={len(approvals)} operators={len(operators)}",
+                    flush=True,
+                )
+    stats['blocks']=blocks; stats['tracked_owners']=len(owners); stats['token_approvals']=len(approvals); stats['operator_approvals']=len(operators)
+    print(
+        f"CW721 authorization-lifecycle preflight PASS: blocks={blocks} tx={stats['transactions']} "
+        f"owners={len(owners)} approvals={len(approvals)} operators={len(operators)}",
         flush=True,
     )
     return dict(stats)
@@ -1540,13 +1743,6 @@ def build(argv=None):
                     iid=register_translated_instance(c,str(fam),instances,stats)
                     if iid is None:
                         continue
-                    if (
-                        str(fam)=='cw721-drop' and c['kind']=='execute' and 'mint_drop' in c.get('msg',{})
-                        and counts_for_drop_mint_event_validation(tx,c)
-                    ):
-                        owner=drop_mint_sequence.owner_for_instance(iid)
-                        if owner:
-                            drop_translated_mints[(owner,str(tx.get('tx_hash') or '').lower())] += int(c['msg']['mint_drop']['quantity'])
                     if c['kind']=='execute':
                         m=c['msg']; participant[iid].add(c.get('sender',caller))
                         if 'transfer' in m: participant[iid].add(m['transfer']['recipient'])
@@ -1574,7 +1770,14 @@ def build(argv=None):
                         if fam=='xen-like': xen_first.setdefault((iid,c.get('sender',caller)), next(iter(m)))
                     elif c['kind']=='query' and fam in {'cw721-mintable','cw721-drop'} and 'owner_of' in c['msg']:
                         tid=int(c['msg']['owner_of']['token_id']); nft_source_tokens[iid][tid]=intv(c.get('source_token_id')); note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,'native-s3-seed-owner',1)
+                reconcile_s4_drop_mint_calls(tx,calls,drop_mint_sequence)
                 for prepared_call in calls:
+                    if (prepared_call.get('family')=='cw721-drop' and prepared_call.get('kind')=='execute'
+                        and 'mint_drop' in (prepared_call.get('msg') or {})
+                        and counts_for_drop_mint_event_validation(tx,prepared_call)):
+                        owner=drop_mint_sequence.owner_for_instance(str(prepared_call.get('instance_id') or ''))
+                        if owner:
+                            drop_translated_mints[(owner,str(tx.get('tx_hash') or '').lower())] += intv(prepared_call['msg']['mint_drop'].get('quantity'))
                     for key in ('sender','from','to'):
                         value=prepared_call.get(key)
                         if isinstance(value,str): workload_logical_addresses.add(value)
@@ -1670,7 +1873,9 @@ def build(argv=None):
         elif first=='withdraw':
             prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'claim_mint_reward':{}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'stake':{'amount':'1','term_days':0}},{'action_id':None}))
     lifecycle_stats=validate_cw721_token_lifecycle(execution_work_path,manifest_instances,prime)
+    authorization_lifecycle_stats=validate_cw721_authorization_lifecycle(execution_work_path,manifest_instances,prime)
     initial_state_meta['cw721_token_lifecycle_preflight']=lifecycle_stats
+    initial_state_meta['cw721_authorization_lifecycle_preflight']=authorization_lifecycle_stats
     final_execution=out/'execution-plan.jsonl'
     if execution_work_path != final_execution:
         execution_work_path.replace(final_execution)

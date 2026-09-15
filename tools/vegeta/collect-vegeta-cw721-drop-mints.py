@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Collect and validate ERC-721 mint events for reviewed Vegeta S1 cw721-drop owners.
+"""Collect and validate public ERC-721 mint events for reviewed sequential cw721-drop owners.
 
-This is a narrow publication-fidelity input, not an access oracle.  It reads only public ERC-721
-Transfer logs with `from == address(0)` for owners already admitted by the reviewed family map.  The
-result is used to verify sequential token allocation and source mint quantities before native Wasmd
-preparation.  No concrete storage slots or SLOAD/SSTORE traces are queried or persisted.
+This is a narrow publication-fidelity input, not an access oracle. It reads only public ERC-721
+Transfer logs with `from == address(0)`. With --native-plan, the owner set is restricted to instances
+that actually use a reviewed sequential mint adapter and the block range is derived from that plan.
+No concrete storage slots or SLOAD/SSTORE traces are queried or persisted.
 """
 from __future__ import annotations
 
@@ -49,6 +49,31 @@ def reviewed_drop_owners(family_map: dict) -> list[str]:
     return sorted(owners)
 
 
+
+
+def sequential_drop_owners_from_plan(path: Path) -> tuple[list[str], int, int]:
+    owners: set[str] = set()
+    first: int | None = None
+    last: int | None = None
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            block=json.loads(line); bn=int(block["block_number"])
+            first=bn if first is None else min(first,bn); last=bn if last is None else max(last,bn)
+            for tx in block.get("transactions", []):
+                for action in tx.get("native_actions", []):
+                    if action.get("native_code_family") != "cw721-drop":
+                        continue
+                    ep=str(action.get("native_entrypoint") or "").lower().replace("_", "")
+                    if not ep.startswith("execute::") or not any(x in ep for x in ("mint","purchase","airdrop","reservedrop")):
+                        continue
+                    owner=norm_addr(action.get("storage_context_address") or action.get("ethereum_code_address"))
+                    if owner: owners.add(owner)
+    if first is None or last is None:
+        raise SystemExit(f"native plan contains no blocks: {path}")
+    return sorted(owners), first, last
+
 def int_hex(value: Any) -> int:
     if isinstance(value, int):
         return value
@@ -91,24 +116,32 @@ def fetch_logs(client: RpcClient, owners: list[str], start: int, end: int, chunk
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--family-map", type=Path, required=True)
+    ap.add_argument("--native-plan", type=Path, default=None, help="restrict to reviewed sequential-mint owners and derive block range")
+    ap.add_argument("--dataset-label", default="vegeta-s1")
     ap.add_argument("--rpc-url", default=os.environ.get("ETH_RPC_URL"))
-    ap.add_argument("--start-block", type=int, default=16_774_645)
-    ap.add_argument("--end-block", type=int, default=16_779_644)
-    ap.add_argument("--chunk-blocks", type=int, default=int(os.environ.get("VEGETA_S1_MINT_LOG_CHUNK_BLOCKS", "250")))
+    ap.add_argument("--start-block", type=int, default=None)
+    ap.add_argument("--end-block", type=int, default=None)
+    ap.add_argument("--chunk-blocks", type=int, default=int(os.environ.get("VEGETA_MINT_LOG_CHUNK_BLOCKS", os.environ.get("VEGETA_S1_MINT_LOG_CHUNK_BLOCKS", "250"))))
     ap.add_argument("--output", type=Path, required=True)
     ns = ap.parse_args()
     if not ns.rpc_url:
         raise SystemExit("ETH_RPC_URL/--rpc-url is required to collect ERC721 mint logs")
-    if ns.end_block < ns.start_block or ns.chunk_blocks <= 0:
-        raise SystemExit("invalid block range/chunk size")
-
     family_map = json.loads(ns.family_map.read_text())
-    owners = reviewed_drop_owners(family_map)
+    if ns.native_plan is not None:
+        owners, plan_start, plan_end = sequential_drop_owners_from_plan(ns.native_plan)
+        start = plan_start if ns.start_block is None else ns.start_block
+        end = plan_end if ns.end_block is None else ns.end_block
+    else:
+        owners = reviewed_drop_owners(family_map)
+        start = 16_774_645 if ns.start_block is None else ns.start_block
+        end = 16_779_644 if ns.end_block is None else ns.end_block
+    if end < start or ns.chunk_blocks <= 0:
+        raise SystemExit("invalid block range/chunk size")
     if not owners:
-        raise SystemExit("reviewed family map contains no cw721-drop storage owners")
+        raise SystemExit("reviewed input contains no sequential cw721-drop storage owners")
 
     client = RpcClient(ns.rpc_url, timeout=60, retries=5, backoff=1.0)
-    logs = fetch_logs(client, owners, ns.start_block, ns.end_block, ns.chunk_blocks)
+    logs = fetch_logs(client, owners, start, end, ns.chunk_blocks)
     by_owner: dict[str, list[dict]] = defaultdict(list)
     ignored = 0
     for row in logs:
@@ -178,9 +211,9 @@ def main() -> int:
 
     report = {
         "schema_version": 2,
-        "dataset": "vegeta-s1",
+        "dataset": ns.dataset_label,
         "definition": "ERC721 Transfer(address,address,uint256) logs with indexed from == address(0) for reviewed cw721-drop storage owners; includes indexed recipient for execution-effect reconciliation",
-        "block_range": [ns.start_block, ns.end_block],
+        "block_range": [start, end],
         "reviewed_owners": owners,
         "owners": owner_reports,
         "summary": {

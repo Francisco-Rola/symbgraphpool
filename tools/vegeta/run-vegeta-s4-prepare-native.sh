@@ -126,6 +126,24 @@ if [[ "$INITIAL_STATE_MODE" == "rpc" && -z "${ETH_RPC_URL:-}" && ! -s "$EXEC_DIR
   echo "Set ETH_RPC_URL once, or reuse $EXEC_DIR/evm-initial-state-cache.json." >&2
   exit 2
 fi
+MINT_SEQUENCE="${VEGETA_S4_CW721_MINT_SEQUENCE:-$PLAN_DIR/cw721-drop-mint-sequence.json}"
+if [[ ! -s "$MINT_SEQUENCE" ]]; then
+  if [[ -z "${ETH_RPC_URL:-}" ]]; then
+    echo "S4 sequential CW721 mint-cardinality audit is missing: $MINT_SEQUENCE" >&2
+    echo "Set ETH_RPC_URL once to collect public Transfer(from=0) logs, then later rebuilds can reuse the frozen audit." >&2
+    exit 2
+  fi
+  echo "Collecting S4 public CW721 mint sequence for reviewed sequential-mint instances..."
+  python3 tools/vegeta/collect-vegeta-cw721-drop-mints.py \
+    --family-map "$FAMILY_MAP" \
+    --native-plan "$PLAN_DIR/native-plan.jsonl" \
+    --dataset-label vegeta-s4 \
+    --rpc-url "$ETH_RPC_URL" \
+    --output "$MINT_SEQUENCE"
+else
+  echo "Reusing S4 public CW721 mint sequence: $MINT_SEQUENCE"
+fi
+
 PREP=(
   --plan "$PLAN_DIR/native-plan.jsonl"
   --selector-map "$PLAN_DIR/selector-semantic-map.json"
@@ -137,7 +155,7 @@ PREP=(
   --dataset-label vegeta-s4-native
 )
 if [[ -n "${ETH_RPC_URL:-}" ]]; then PREP+=(--rpc-url "$ETH_RPC_URL"); fi
-if [[ -n "${VEGETA_S4_CW721_MINT_SEQUENCE:-}" ]]; then PREP+=(--cw721-drop-mint-sequence "$VEGETA_S4_CW721_MINT_SEQUENCE"); fi
+PREP+=(--cw721-drop-mint-sequence "$MINT_SEQUENCE")
 if [[ -n "${VEGETA_S4_ERC721_SELECTOR_MINT_AUDIT:-}" ]]; then PREP+=(--erc721-selector-mint-audit "$VEGETA_S4_ERC721_SELECTOR_MINT_AUDIT"); fi
 python3 tools/vegeta/prepare-native-s3-execution.py "${PREP[@]}"
 python3 tools/vegeta/validate-native-s3-execution.py --output-dir "$EXEC_DIR" --prepared-only

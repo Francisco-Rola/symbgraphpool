@@ -1119,6 +1119,116 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 mod.validate_drop_mint_translation(sequence, {(owner, tx_hash): 1})
 
+    def test_s4_archetype_mint_uses_committed_transfer_event_cardinality(self):
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_s4_archetype_events", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as td:
+            td=Path(td); report=td / "mints.json"
+            owner="0x1c67d8f07d7ef2d637e61ed3fbc3fa9aaf7a6267"
+            caller="0x" + "12" * 20; tx_hash="0x" + "34" * 32; key=bytes.fromhex("56" * 32)
+            report.write_text(json.dumps({
+                "schema_version":2, "dataset":"vegeta-s4",
+                "summary":{"all_observed_sequences_plus_one":True,"all_token_ids_fit_u64":True},
+                "owners":{owner:{"first_token_id":2732,"transactions":{tx_hash:{
+                    "mint_count":6,"token_ids":[2732,2733,2734,2735,2736,2737],"recipients":[caller]*6,
+                }}}},
+            }) + "\n")
+            sequence=mod.Cw721DropMintSequence(report)
+            def w(n): return int(n).to_bytes(32,"big").hex()
+            data="0x4a21a2df" + w(128) + w(1) + ("00"*32) + w(224) + key.hex() + w(64) + w(0) + w(0)
+            action={
+                "storage_context_address":owner,"ethereum_input":data,
+                "arguments":{"auth_offset":128,"quantity":1,"affiliate":"0x"+"00"*20,"signature":"0x"},
+                "native_instance_id":"cw721-drop:"+owner,"action_id":0,
+            }
+            call=mod.translate(
+                "cw721-drop","execute::archetype_mint_drop",None,{"tx_hash":tx_hash},action,caller,
+                mod.TokenIdRemapper(),drop_mint_sequence=sequence,
+                sequential_drop_instances={"cw721-drop:"+owner},
+            )
+            self.assertEqual(call["msg"]["mint_drop"]["quantity"],1)
+            mod.reconcile_s4_drop_mint_calls({"tx_hash":tx_hash,"source_failed":False},[call],sequence)
+            self.assertEqual(call["msg"]["mint_drop"]["quantity"],6)
+            self.assertEqual(call["msg"]["mint_drop"]["token_ids"],[2732,2733,2734,2735,2736,2737])
+            self.assertEqual(call["source_requested_mint_quantity"],1)
+            self.assertEqual(call["source_committed_mint_quantity"],6)
+
+    def test_s4_mint_event_reconciliation_is_transaction_scoped_not_per_nested_frame(self):
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_s4_nested_events", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as td:
+            td=Path(td); report=td / "mints.json"
+            owner="0x1c67d8f07d7ef2d637e61ed3fbc3fa9aaf7a6267"; caller="0x"+"12"*20; tx_hash="0x"+"78"*32
+            ids=list(range(4404,4429))
+            report.write_text(json.dumps({
+                "schema_version":2,"dataset":"vegeta-s4",
+                "summary":{"all_observed_sequences_plus_one":True,"all_token_ids_fit_u64":True},
+                "owners":{owner:{"first_token_id":2732,"transactions":{tx_hash:{
+                    "mint_count":25,"token_ids":ids,"recipients":[caller]*25,
+                }}}},
+            })+"\n")
+            sequence=mod.Cw721DropMintSequence(report); iid="cw721-drop:"+owner
+            calls=[]
+            for i in range(25):
+                calls.append({"kind":"execute","family":"cw721-drop","instance_id":iid,"sender":caller,"origin_action_id":i,
+                              "msg":{"mint_drop":{"recipient":caller,"quantity":1,"stage_key":None,"nonce_key":None}}})
+            mod.reconcile_s4_drop_mint_calls({"tx_hash":tx_hash,"source_failed":False},calls,sequence)
+            self.assertEqual(sum(c["msg"]["mint_drop"]["quantity"] for c in calls),25)
+            self.assertEqual([c["msg"]["mint_drop"]["token_ids"][0] for c in calls],ids)
+
+    def test_s4_mint_validation_allows_untranslated_source_only_mint_transactions(self):
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_s4_omitted_events", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as td:
+            td=Path(td); report=td / "mints.json"
+            owner="0x"+"ab"*20; represented="0x"+"11"*32; omitted="0x"+"22"*32
+            report.write_text(json.dumps({
+                "schema_version":2,"dataset":"vegeta-s4",
+                "summary":{"all_observed_sequences_plus_one":True,"all_token_ids_fit_u64":True},
+                "owners":{owner:{"first_token_id":1,"transactions":{
+                    represented:{"mint_count":2,"token_ids":[61,62],"recipients":["0x"+"33"*20]*2},
+                    omitted:{"mint_count":60,"token_ids":list(range(1,61)),"recipients":["0x"+"44"*20]*60},
+                }}},
+            })+"\n")
+            sequence=mod.Cw721DropMintSequence(report)
+            result=mod.validate_drop_mint_translation(sequence,{(owner,represented):2})
+            self.assertTrue(result["validated"]); self.assertEqual(result["omitted_source_mint_transactions"],1)
+            self.assertEqual(result["omitted_source_mint_events"],60)
+
+    def test_cw721_authorization_preflight_catches_wrong_mint_owner_before_wasmd(self):
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_s4_auth_preflight", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as td:
+            td=Path(td); execution=td / "execution.jsonl"
+            iid="cw721-drop:0x" + "ab" * 20
+            alice="0x" + "11"*20; bob="0x" + "22"*20; recipient="0x" + "33"*20
+            execution.write_text(json.dumps({"block_number":7,"transactions":[{
+                "tx_index":0,"tx_hash":"0x"+"44"*32,"source_failed":False,"calls":[
+                    {"kind":"execute","family":"cw721-drop","instance_id":iid,"sender":bob,
+                     "source_owner":bob,"msg":{"transfer_nft":{"recipient":recipient,"token_id":5}}}
+                ]
+            }]}) + "\n")
+            manifest=[{"instance_id":iid,"family":"cw721-drop","instantiate_msg":{"next_token_id":6}}]
+            prime=[{"kind":"execute","family":"cw721-drop","instance_id":iid,"sender":alice,
+                    "msg":{"seed_mint":{"owner":alice,"token_id":5}}}]
+            with self.assertRaisesRegex(RuntimeError,"source/native owner mismatch"):
+                mod.validate_cw721_authorization_lifecycle(execution,manifest,prime,progress_every=999)
+
+            execution.write_text(json.dumps({"block_number":7,"transactions":[{
+                "tx_index":0,"tx_hash":"0x"+"55"*32,"source_failed":False,"calls":[
+                    {"kind":"execute","family":"cw721-drop","instance_id":iid,"sender":bob,
+                     "source_owner":alice,"msg":{"transfer_nft":{"recipient":recipient,"token_id":5}}}
+                ]
+            }]}) + "\n")
+            prime.append({"kind":"execute","family":"cw721-drop","instance_id":iid,"sender":alice,
+                          "msg":{"approve_all":{"operator":bob,"approved":True}}})
+            stats=mod.validate_cw721_authorization_lifecycle(execution,manifest,prime,progress_every=999)
+            self.assertEqual(stats["blocks"],1)
+
     def test_prepare_wrapper_collects_and_reuses_cw721_mint_audit(self):
         prepare = (ROOT / "tools/legacy-scripts/run-vegeta-s1-prepare-native.sh").read_text()
         audit = (ROOT / "tools/legacy-scripts/run-vegeta-s1-cw721-mint-audit.sh").read_text()

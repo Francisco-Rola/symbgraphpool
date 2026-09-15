@@ -114,3 +114,7 @@ Do not compare runs with different evaluator hashes, calibration values, IAVL se
 ## Scope boundary
 
 The artifact does **not** implement or claim an original-EVM reproduction of Vegeta S1/S4. S1/S4 provide real transaction provenance, but the evaluated workloads execute native Wasmd translations. The paper should use the names *S1-derived Wasmd* and *S4-derived Wasmd* and report the workload-parallelism diagnostics generated from the actual translated accesses. Vegeta's published S1 chain ratio is context only, not an asserted equivalence target.
+
+## EuroSys six-figure artifact bundle
+
+For the consolidated six-figure/two-table submission layout, use `evaluation/eurosys/run.sh` instead of the legacy `experiments/run-all.sh`.  It preserves experiments 01--14, adds compute-intensity and exact-S3 fidelity studies, captures per-strategy peak RSS and machine provenance, and writes the publication bundle to `benchmark-results/eurosys/<machine-tag>/paper/`.  See [`eurosys/README.md`](eurosys/README.md) for the local-six-core and Vegeta-class run commands.

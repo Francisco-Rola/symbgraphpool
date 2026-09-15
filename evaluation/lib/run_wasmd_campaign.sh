@@ -60,6 +60,7 @@ REUSE_SETUP_TEMPLATE="${EVAL_WASMD_REUSE_SETUP_TEMPLATE:-1}"
 ISOLATE_STRATEGIES="${EVAL_WASMD_ISOLATE_STRATEGIES:-0}"
 REUSE_ISOLATED_PARTS="${EVAL_WASMD_REUSE_ISOLATED_PARTS:-0}"
 REUSE_WEIGHTS="${EVAL_WASMD_REUSE_WEIGHTS:-0}"
+RESOURCE_ACCOUNTING="${EVAL_WASMD_RESOURCE_ACCOUNTING:-0}"
 ONLY_STRATEGY="${EVAL_WASMD_ONLY_STRATEGY:-}"
 GO_TOOLCHAIN="${EVAL_WASMD_GO_TOOLCHAIN:-auto}"
 BASE_TOTAL_MS="${EVAL_WASMD_COMPUTE_BASE_TOTAL_MS:-1000}"
@@ -288,7 +289,7 @@ RECORDS="$OUT_DIR/records.jsonl"
 : > "$RECORDS"
 IFS=',' read -r -a WORKERS <<< "$WORKERS_LIST"
 run_campaign() {
-  local workers="$1" output="$2" strategy="$3" serial_oracle="${4:-}"
+  local workers="$1" output="$2" strategy="$3" serial_oracle="${4:-}" resource_out="${5:-}"
   local args=(
     --repo-root "$ROOT"
     --manifest "$MANIFEST"
@@ -321,12 +322,18 @@ run_campaign() {
   if [[ -n "${EVAL_WASMD_CAMPAIGN_PROFILE_DIR:-}" ]]; then
     args+=(--campaign-profile-dir "$EVAL_WASMD_CAMPAIGN_PROFILE_DIR")
   fi
-  "$BIN" "${args[@]}"
+  if [[ -n "$resource_out" ]]; then
+    [[ -x /usr/bin/time ]] || { echo "GNU /usr/bin/time is required when EVAL_WASMD_RESOURCE_ACCOUNTING=1" >&2; exit 3; }
+    LC_ALL=C /usr/bin/time -v -o "$resource_out" "$BIN" "${args[@]}"
+  else
+    "$BIN" "${args[@]}"
+  fi
 }
 
 isolated_part_complete() {
   local part="$1" strategy="$2" workers="$3" meta="$part.meta"
   [[ "$REUSE_ISOLATED_PARTS" == "1" && -s "$part" && -s "$meta" ]] || return 1
+  if [[ "$RESOURCE_ACCOUNTING" == "1" && ! -s "$part.resource.txt" ]]; then return 1; fi
   local plan_stamp
   plan_stamp="$(stat -c '%s:%Y' "$PLAN" 2>/dev/null || stat -f '%z:%m' "$PLAN")"
   grep -Fxq "strategy=$strategy" "$meta" || return 1
@@ -407,6 +414,7 @@ dataset=$DATASET_LABEL
 exact_oracle=$EXACT_ORACLE
 plan_stamp=$plan_stamp
 binary_sha256=$BINARY_SHA256
+resource_accounting=$RESOURCE_ACCOUNTING
 iavl_cache_size=$IAVL_CACHE_SIZE
 iavl_sync_pruning=$IAVL_SYNC_PRUNING
 EOF
@@ -442,7 +450,9 @@ for workers in "${WORKERS[@]}"; do
           serial_oracle="$OUT_DIR/raw/records-w${workers}-serial.jsonl"
           [[ -s "$serial_oracle" ]] || { echo "missing completed serial oracle: $serial_oracle" >&2; exit 3; }
         fi
-        run_campaign "$workers" "$part" "$strategy" "$serial_oracle"
+        resource_out=""
+        if [[ "$RESOURCE_ACCOUNTING" == "1" ]]; then resource_out="$part.resource.txt"; rm -f "$resource_out"; fi
+        run_campaign "$workers" "$part" "$strategy" "$serial_oracle" "$resource_out"
         write_isolated_part_meta "$part" "$strategy" "$workers"
       fi
       cat "$part" >> "$raw"
@@ -469,6 +479,9 @@ if [[ "$EXACT_ORACLE" == "0" ]]; then SUMMARY_ARGS+=(--no-exact-oracle); fi
 if [[ -n "$SOURCE_CORPUS" ]]; then SUMMARY_ARGS+=(--source-corpus "$SOURCE_CORPUS"); fi
 if [[ -n "$VEGETA_DATASET_TAG" ]]; then SUMMARY_ARGS+=(--vegeta-dataset-tag "$VEGETA_DATASET_TAG"); fi
 python3 evaluation/wasmd/summarize.py "${SUMMARY_ARGS[@]}"
+if [[ "$RESOURCE_ACCOUNTING" == "1" ]]; then
+  python3 evaluation/eurosys/summarize_resource_usage.py --raw-dir "$OUT_DIR/raw" --output-dir "$OUT_DIR/summary"
+fi
 sha256sum "$RECORDS" > "$OUT_DIR/records.sha256"
 
 echo

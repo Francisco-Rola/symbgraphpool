@@ -25,6 +25,17 @@ publication_workers() {
   echo "$out"
 }
 
+max_worker() {
+  local list="${1:-$WORKERS}" max=0 v
+  IFS=',' read -r -a _workers <<< "$list"
+  for v in "${_workers[@]}"; do
+    [[ "$v" =~ ^[0-9]+$ ]] || continue
+    (( v > max )) && max="$v"
+  done
+  (( max > 0 )) || max=1
+  echo "$max"
+}
+
 PHYSICAL_CORES="$(physical_cores)"
 case "$PROFILE" in
   smoke)
