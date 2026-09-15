@@ -37,7 +37,7 @@ fi
 "${ARGS[@]}"
 
 echo
-echo "PASS: wide S4 dual-gate plan and fifth-batch review scaffold generated"
+echo "PASS: wide S4 scheduler-fidelity conflict plan and diagnostic access-tail scaffold generated"
 echo "planner:    $WORK_DIR/family-marginal-coverage.txt"
 echo "candidates: $CANDIDATES_TXT"
 echo "decisions:  $DECISIONS_DRAFT"

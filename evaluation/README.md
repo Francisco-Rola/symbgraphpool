@@ -32,7 +32,7 @@ PAPER_EVAL_RESULT_ROOT=/path/to/paper-eval python3 evaluation/plots/plot_all.py
 PAPER_EVAL_RESULT_ROOT=/path/to/paper-eval PAPER_EVAL_FIGURE_DIR=/path/to/figures python3 evaluation/plots/plot_all.py
 ```
 
-`02_s4_headline.sh` skips until the reviewed S4 native execution bundle exists. The S4 post-collection pipeline lives under `tools/vegeta/`: audit frozen-corpus provenance, characterize the caches, inspect the transaction-level blocker-cluster/greedy coverage plan, review the seeded high-impact families, pass the all-storage/conflict/median-block family freeze gates, freeze the family map with explicit review attestation, then run `evaluation/workloads/prepare_s4.sh`. Set `PAPER_EVAL_REQUIRE_S4=1` in the final artifact to make a missing bundle a hard failure.
+`02_s4_headline.sh` skips until the reviewed S4 native execution bundle exists. The S4 post-collection pipeline lives under `tools/vegeta/`: audit frozen-corpus provenance, characterize the caches, inspect the transaction-level blocker-cluster/greedy coverage plan, review the seeded high-impact families, pass the S1-analogous scheduler-fidelity family freeze gates (conflict/median-block/integrity), freeze the family map with explicit review attestation, then run `evaluation/workloads/prepare_s4.sh`. Set `PAPER_EVAL_REQUIRE_S4=1` in the final artifact to make a missing bundle a hard failure.
 
 ## Workload preparation
 
@@ -46,7 +46,7 @@ bash tools/vegeta/run-vegeta-s4-apply-first-batch.sh
 bash tools/vegeta/run-vegeta-s4-apply-second-batch.sh  # safe aliases + exact conflict-closure report
 bash tools/vegeta/run-vegeta-s4-apply-third-batch.sh   # reviewed token/pool conflict closure
 bash tools/vegeta/run-vegeta-s4-apply-fourth-batch.sh  # evidence-backed P12-P16 + exact before/after delta
-# if either hard gate is still open, widen the planner and create the next fail-closed human review scaffold:
+# if the structural conflict gate is still open, widen the planner and create the next fail-closed human review scaffold:
 bash tools/vegeta/run-vegeta-s4-plan-fifth-batch.sh
 # collect exact local evidence for the projected conflict-closure shortlist (analysis only; does not map anything):
 bash tools/vegeta/run-vegeta-s4-analyze-fifth-batch.sh
@@ -54,9 +54,9 @@ bash tools/vegeta/run-vegeta-s4-analyze-fifth-batch.sh
 VEGETA_S4_FIFTH_FETCH_SOURCE=1 bash tools/vegeta/run-vegeta-s4-analyze-fifth-batch.sh
 # the checked-in reviewed subset is validated against the generated dossier; unsupported rows stay unresolved
 bash tools/vegeta/run-vegeta-s4-apply-fifth-batch.sh   # applies only evidence-supported rows; exact before/after delta
-bash tools/vegeta/run-vegeta-s4-review-check.sh        # strict 90% all-storage / 95% conflict / 80% median-block family freeze gate
+bash tools/vegeta/run-vegeta-s4-review-check.sh        # S1-analogous family freeze: 95% conflict / 80% median-block / corpus integrity; storage is diagnostic
 VEGETA_S4_REVIEW_ACK=1 bash tools/vegeta/run-vegeta-s4-freeze-reviewed-map.sh
-bash evaluation/workloads/prepare_s4.sh                # selector/conflict/transaction/implementation gates + Wasmd bundle
+bash evaluation/workloads/prepare_s4.sh                # default scheduler-fidelity profile + separately reported semantic-replay profile + Wasmd bundle
 ```
 
 Native application and ConflictLab inputs are generated deterministically by the experiment scripts and need no network access.

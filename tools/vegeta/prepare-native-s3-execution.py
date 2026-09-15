@@ -58,10 +58,36 @@ class TokenIdRemapper:
         mapping[raw] = raw
         return raw
 
+    def record_existing(self, instance_id: str, source_token_id: Any, native_token_id: Any) -> int:
+        """Rehydrate an already translated source->native token mapping during resume."""
+        raw=intv(source_token_id); native=intv(native_token_id)
+        if native<0 or native>U64_MAX:
+            raise OverflowError(f"native token ID outside u64 for {instance_id}: {native}")
+        mapping=self._maps[instance_id]
+        existing=mapping.get(raw)
+        if existing is not None and existing!=native:
+            raise ValueError(f"inconsistent resumed token-ID mapping for {instance_id}: {raw}->{existing} vs {native}")
+        for other_raw,other_native in mapping.items():
+            if other_raw!=raw and other_native==native:
+                raise ValueError(f"colliding resumed token-ID mapping for {instance_id}: {other_raw} and {raw} -> {native}")
+        mapping[raw]=native
+        return native
+
+    def assert_source_u64_identity(self, instance_ids: set[str]) -> None:
+        """Reject resumed streams built with the old dense mapping for sequential drop instances."""
+        for iid in sorted(instance_ids):
+            for raw,native in self._maps.get(iid,{}).items():
+                if raw < 0 or raw > U64_MAX or native != raw:
+                    raise RuntimeError(
+                        "translated execution stream predates sequential cw721-drop token-ID alignment: "
+                        f"{iid} source={raw} native={native}; rebuild only the execution bundle with "
+                        "VEGETA_S4_REBUILD_NATIVE_EXECUTION=1 bash evaluation/workloads/prepare_s4.sh"
+                    )
+
     def summary(self) -> dict[str, Any]:
         counts = {iid: len(mapping) for iid, mapping in sorted(self._maps.items())}
         return {
-            "policy": "dense-u64-bijection except reviewed cw721-drop instances preserve source u64 token IDs for state-derived sequential mint alignment",
+            "policy": "dense-u64-bijection except reviewed sequential-mint cw721-drop instances preserve source u64 token IDs for native MintDrop alignment",
             "instances": len(counts),
             "distinct_source_token_ids": sum(counts.values()),
             "max_distinct_ids_per_instance": max(counts.values(), default=0),
@@ -231,30 +257,65 @@ def decode_abi_bool(result: str) -> bool | None:
     except ValueError: return None
 
 class HistoricalEthCallCache:
-    """Resumable high-level EVM state reads used only to reconstruct S3's initial state.
+    """Resumable high-level EVM state reads used only to reconstruct native initial state.
 
-    The cache stores eth_call results, never storage-slot reads/writes.  Queries are made at the
-    predecessor block so the native replay starts from the same logical ERC721 ownership/approval
-    state without importing the concrete storage keys later used for fidelity measurement.
+    Successful calls are atomically persisted immediately, so a provider throttle or process restart
+    never discards completed predecessor-state work. HTTP 429 and rate-limit-shaped JSON-RPC errors
+    are retried with adaptive pacing and are never cached as semantic failures.
     """
-    def __init__(self, rpc_url: str | None, block_number: int, path: Path):
+    def __init__(
+        self, rpc_url: str | None, block_number: int, path: Path, *,
+        min_interval: float = 0.05, max_retries: int = 10, progress_every: int = 100,
+    ):
         self.rpc_url=(rpc_url or "").strip()
         self.block_number=int(block_number)
         self.path=path
+        self.min_interval=max(float(min_interval),0.0)
+        self.max_retries=max(int(max_retries),1)
+        self.progress_every=max(int(progress_every),1)
+        self._last_request_at=0.0
+        self.cache_hits=0; self.remote_calls=0; self.rate_limits=0; self.retries=0
         self.data={"schema_version":1,"block_number":self.block_number,"calls":{}}
         if path.exists():
             try:
                 loaded=json.loads(path.read_text())
                 if int(loaded.get("block_number",-1))==self.block_number and isinstance(loaded.get("calls"),dict):
                     self.data=loaded
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"initial-state cache warning: ignoring unreadable {path}: {e}", flush=True)
 
     def _save(self):
         self.path.parent.mkdir(parents=True,exist_ok=True)
         tmp=self.path.with_suffix(self.path.suffix+".tmp")
         tmp.write_text(json.dumps(self.data,indent=2,sort_keys=True)+"\n")
         tmp.replace(self.path)
+
+    def _pace(self):
+        if self.min_interval<=0: return
+        now=time.monotonic(); delay=self.min_interval-(now-self._last_request_at)
+        if delay>0: time.sleep(delay)
+
+    @staticmethod
+    def _rate_limit_rpc_error(error: Any) -> bool:
+        text=json.dumps(error,sort_keys=True).lower() if not isinstance(error,str) else error.lower()
+        return any(term in text for term in ("rate limit","too many requests","request limit","capacity","throttl"))
+
+    def _retry_delay(self, attempt: int, retry_after: str | None = None) -> float:
+        if retry_after:
+            try: return max(float(retry_after),0.0)
+            except ValueError: pass
+        return min(30.0,1.0*(2**attempt))
+
+    def _note_progress(self):
+        completed=self.cache_hits+self.remote_calls
+        if completed and completed % self.progress_every == 0:
+            print(
+                "initial-state RPC progress: "
+                f"completed={completed} cache_hits={self.cache_hits} remote={self.remote_calls} "
+                f"rate_limits={self.rate_limits} retries={self.retries} "
+                f"throttle={self.min_interval:.3f}s",
+                flush=True,
+            )
 
     def call(self, to: str, data: str) -> str | None:
         to=norm_addr(to)
@@ -263,6 +324,7 @@ class HistoricalEthCallCache:
         key=f"{to}|{data}"
         cached=self.data["calls"].get(key)
         if isinstance(cached,dict):
+            self.cache_hits+=1; self._note_progress()
             return cached.get("result") if cached.get("status")=="ok" else None
         if not self.rpc_url:
             return None
@@ -271,32 +333,71 @@ class HistoricalEthCallCache:
             "params":[{"to":to,"data":data},hex(self.block_number)],
         }).encode()
         last=None
-        for attempt in range(4):
+        for attempt in range(self.max_retries):
             try:
+                self._pace()
                 req=urllib.request.Request(
                     self.rpc_url,data=payload,
-                    headers={"Content-Type":"application/json","User-Agent":"symbgraphpool-vegeta-s3/1"},
+                    headers={"Content-Type":"application/json","User-Agent":"symbgraphpool-vegeta-native/2"},
                     method="POST",
                 )
+                self._last_request_at=time.monotonic()
                 with urllib.request.urlopen(req,timeout=45) as resp:
                     body=json.loads(resp.read())
-                if body.get("error"):
-                    self.data["calls"][key]={"status":"error","error":body["error"]}
-                    self._save()
+                error=body.get("error")
+                if error and self._rate_limit_rpc_error(error):
+                    self.rate_limits+=1; self.retries+=1; last=f"JSON-RPC rate limit: {error}"
+                    self.min_interval=max(self.min_interval,min(1.0,0.10*(2**min(self.rate_limits-1,3))))
+                    delay=self._retry_delay(attempt)
+                    print(
+                        f"initial-state RPC throttled (JSON-RPC); retry {attempt+1}/{self.max_retries} "
+                        f"in {delay:.1f}s; cache persisted at {self.path}", flush=True,
+                    )
+                    if attempt+1<self.max_retries: time.sleep(delay); continue
+                    break
+                if error:
+                    self.data["calls"][key]={"status":"error","error":error}
+                    self._save(); self.remote_calls+=1; self._note_progress()
                     return None
                 result=body.get("result")
                 if isinstance(result,str):
                     self.data["calls"][key]={"status":"ok","result":result}
-                    self._save()
+                    self._save(); self.remote_calls+=1; self._note_progress()
                     return result
                 last=f"invalid eth_call response: {body!r}"
-            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+            except urllib.error.HTTPError as e:
                 last=str(e)
-                if attempt<3: time.sleep(0.5*(2**attempt))
-        raise RuntimeError(f"historical eth_call failed after retries for {to} {data}: {last}")
+                if e.code==429:
+                    self.rate_limits+=1; self.retries+=1
+                    self.min_interval=max(self.min_interval,min(1.0,0.10*(2**min(self.rate_limits-1,3))))
+                    delay=self._retry_delay(attempt,e.headers.get("Retry-After") if e.headers else None)
+                    print(
+                        f"initial-state RPC HTTP 429; retry {attempt+1}/{self.max_retries} "
+                        f"in {delay:.1f}s (adaptive throttle {self.min_interval:.3f}s); "
+                        f"cache persisted at {self.path}", flush=True,
+                    )
+                    if attempt+1<self.max_retries: time.sleep(delay); continue
+                    break
+                self.retries+=1
+                delay=self._retry_delay(attempt)
+                if attempt+1<self.max_retries: time.sleep(delay); continue
+                break
+            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+                last=str(e); self.retries+=1
+                delay=self._retry_delay(attempt)
+                if attempt+1<self.max_retries: time.sleep(delay); continue
+                break
+        raise RuntimeError(
+            f"historical eth_call failed after {self.max_retries} attempts for {to} {data}: {last}; "
+            f"completed calls remain cached at {self.path}. Resume without retranslating via "
+            "VEGETA_S4_RESUME_NATIVE_EXECUTION=1 bash evaluation/workloads/prepare_s4.sh"
+        )
 
     def has_cached_calls(self) -> bool:
         return bool(self.data.get("calls"))
+
+    def cached_call_count(self) -> int:
+        return len(self.data.get("calls") or {})
 
 def resolve_cw721_initial_state(
     resolver: HistoricalEthCallCache,
@@ -309,6 +410,15 @@ def resolve_cw721_initial_state(
     approvals: dict[tuple[str,int],str]={}
     operators: set[tuple[str,str,str]]=set()
     stats=defaultdict(int)
+    token_total=sum(len(rows) for rows in token_sources.values())
+    operator_total=len(operator_pairs)
+    print(
+        "initial-state CW721 hydration: "
+        f"tokens={token_total} operator_pairs={operator_total} "
+        f"cached_eth_calls={resolver.cached_call_count() if hasattr(resolver,'cached_call_count') else 0}",
+        flush=True,
+    )
+    token_done=0
     for iid, native_to_raw in sorted(token_sources.items()):
         contract=norm_addr(iid.split(":",1)[1] if ":" in iid else None)
         if not contract: continue
@@ -323,6 +433,15 @@ def resolve_cw721_initial_state(
                     approvals[(iid,native_tid)]=approved; stats["token_approvals_resolved"]+=1
             else:
                 unresolved_tokens.add((iid,native_tid)); stats["owner_queries_unresolved"]+=1
+            token_done+=1
+            if token_done % 100 == 0 or token_done == token_total:
+                print(
+                    "initial-state CW721 token progress: "
+                    f"{token_done}/{token_total} owners={stats['owners_resolved']} "
+                    f"unresolved={stats['owner_queries_unresolved']} approvals={stats['token_approvals_resolved']}",
+                    flush=True,
+                )
+    operator_done=0
     for iid,owner,operator in sorted(operator_pairs):
         contract=norm_addr(iid.split(":",1)[1] if ":" in iid else None)
         owner=norm_addr(owner); operator=norm_addr(operator)
@@ -335,6 +454,21 @@ def resolve_cw721_initial_state(
             stats["operator_approvals_false"]+=1
         else:
             stats["operator_queries_unresolved"]+=1
+        operator_done+=1
+        if operator_done % 100 == 0 or operator_done == operator_total:
+            print(
+                "initial-state CW721 operator progress: "
+                f"{operator_done}/{operator_total} true={stats['operator_approvals_true']} "
+                f"false={stats['operator_approvals_false']} unresolved={stats['operator_queries_unresolved']}",
+                flush=True,
+            )
+    print(
+        "initial-state CW721 hydration complete: "
+        f"owners={stats['owners_resolved']} token_approvals={stats['token_approvals_resolved']} "
+        f"operator_true={stats['operator_approvals_true']} cached_hits={getattr(resolver,'cache_hits',0)} "
+        f"remote_calls={getattr(resolver,'remote_calls',0)} rate_limits={getattr(resolver,'rate_limits',0)}",
+        flush=True,
+    )
     return {"owners":owners,"unresolved_tokens":sorted(unresolved_tokens),"approvals":approvals,"operators":operators,"statistics":dict(stats)}
 
 class Cw721DropMintSequence:
@@ -693,7 +827,7 @@ def register_translated_instance(call: dict, family: str, instances: dict[str, s
     return iid
 
 
-def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: str, token_ids: TokenIdRemapper, selector_mints: Erc721SelectorMintAudits | None = None, drop_mint_sequence: Cw721DropMintSequence | None = None):
+def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: str, token_ids: TokenIdRemapper, selector_mints: Erc721SelectorMintAudits | None = None, drop_mint_sequence: Cw721DropMintSequence | None = None, sequential_drop_instances: set[str] | None = None):
     args=a.get('arguments') or {}; data=str(a.get('ethereum_input') or '0x'); e=canon_ep(ep); ec=e.replace('_',''); iid=instance_id(family,a)
     if str(ep).startswith('reviewed::'):
         return {'kind':'noop','origin_action_id':a.get('action_id'),'reviewed_stateless_entrypoint':ep}
@@ -728,6 +862,19 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         call=contract_call('execute',family,iid,'native-s3-admin',{'mint':{'recipient':recipient,'amount':str(max(n,1))}},a)
         call['source_minter']=caller
         call['source_authorization_adapter']='source-successful-fiat-token-mint-via-native-admin'
+        return call
+    # Source-reviewed fee/limit token policy mutations.  Use the synthetic native admin
+    # capability and touch the shared CONFIG singleton without claiming historical EVM values.
+    if family == 'cw20-base' and 'setpolicymarker' in ec:
+        call=contract_call('execute',family,iid,caller,{'set_policy_marker':{}},a)
+        call['source_policy_caller']=caller
+        call['source_policy_adapter']='source-successful-owner-scoped-policy-marker'
+        return call
+    if family == 'cw20-base' and ec.endswith('::mint'):
+        recipient=args.get('recipient') or abi_addr(data,0); n=amount(args.get('amount',abi_uint(data,1)))
+        call=contract_call('execute',family,iid,caller,{'mint':{'recipient':recipient,'amount':str(max(n,1))}},a)
+        call['source_minter']=caller
+        call['source_authorization_adapter']='source-successful-owner-scoped-cw20-mint'
         return call
     # Standard fungible interfaces.
     if family in {'cw20-base','controlled-cw20','fiat-token-cw20','fee-token-cw20','wrapped-native-token','stargate-cw20'}:
@@ -827,8 +974,17 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         if 'tokensbyownercount' in ec:
             return contract_call('query',family,iid,None,{'tokens_by_owner_count':{'owner':abi_addr(data,0)}},a)
     if family=='cw721-drop':
+        # Only the frozen S1 sequential-drop owners require source-u64 identity so native
+        # next_token_id remains aligned with the audited mint sequence.  S4 reuses this native
+        # family for additional reviewed ERC721 owners whose uint256 token IDs are not constrained
+        # to u64; those owners must use the normal collision-free dense remapper.
+        preserve_source_tid = bool(
+            (drop_mint_sequence is not None and drop_mint_sequence.owner_for_instance(iid))
+            or (sequential_drop_instances is not None and iid in sequential_drop_instances)
+        )
+        map_drop_tid = token_ids.map_source_u64 if preserve_source_tid else token_ids.map
         if 'transfernft' in ec or 'sendorsafetransfernft' in ec:
-            source_owner,recipient,raw_tid=erc721_transfer_parts(data,args); tid=token_ids.map_source_u64(iid,raw_tid)
+            source_owner,recipient,raw_tid=erc721_transfer_parts(data,args); tid=map_drop_tid(iid,raw_tid)
             call=contract_call('execute',family,iid,caller,{'transfer_nft':{'recipient':recipient,'token_id':tid}},a)
             call['source_owner']=source_owner; call['source_token_id']=raw_tid
             return call
@@ -836,14 +992,14 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
             op=args.get('operator') or abi_addr(data,0); approved=args.get('approved',abi_bool(data,1))
             return contract_call('execute',family,iid,caller,{'approve_all':{'operator':op,'approved':bool(approved)}},a)
         if 'approvenft' in ec:
-            spender=args.get('spender') or abi_addr(data,0); raw_tid=intv(args.get('token_id',abi_uint(data,1))); tid=token_ids.map_source_u64(iid,raw_tid)
+            spender=args.get('spender') or abi_addr(data,0); raw_tid=intv(args.get('token_id',abi_uint(data,1))); tid=map_drop_tid(iid,raw_tid)
             call=contract_call('execute',family,iid,caller,{'approve_nft':{'spender':spender,'token_id':tid}},a); call['source_token_id']=raw_tid
             return call
         if 'ownerof' in ec:
-            raw_tid=intv(args.get('token_id',abi_uint(data,0))); call=contract_call('query',family,iid,None,{'owner_of':{'token_id':token_ids.map_source_u64(iid,raw_tid)}},a); call['source_token_id']=raw_tid
+            raw_tid=intv(args.get('token_id',abi_uint(data,0))); call=contract_call('query',family,iid,None,{'owner_of':{'token_id':map_drop_tid(iid,raw_tid)}},a); call['source_token_id']=raw_tid
             return call
         if e.endswith('::approval'):
-            raw_tid=intv(args.get('token_id',abi_uint(data,0))); call=contract_call('query',family,iid,None,{'approved':{'token_id':token_ids.map_source_u64(iid,raw_tid)}},a); call['source_token_id']=raw_tid
+            raw_tid=intv(args.get('token_id',abi_uint(data,0))); call=contract_call('query',family,iid,None,{'approved':{'token_id':map_drop_tid(iid,raw_tid)}},a); call['source_token_id']=raw_tid
             return call
         if ec.endswith('::balance'):
             return contract_call('query',family,iid,None,{'balance':{'owner':args.get('owner') or abi_addr(data,0)}},a)
@@ -914,7 +1070,21 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
             # Whitelist signatures lack an explicit nonce/stage in the reviewed ABI, so their public
             # calldata fingerprint remains the conservative replay-key surrogate.
             stage_key=None
-            if 'multistage' in ec:
+            if 'archetypemintdrop' in ec:
+                # Archetype mint(Auth,uint256,address,bytes) stores mint limits by
+                # (msg.sender, auth.key). Auth is the first dynamic tuple; its first word is key.
+                raw=bytes.fromhex(data[2:] if data.startswith('0x') else data)
+                auth_offset=intv(args.get('auth_offset',abi_uint(data,0)))
+                key_start=4+auth_offset
+                if auth_offset < 0 or auth_offset % 32 or key_start+32 > len(raw):
+                    return None
+                stage_key='invite:0x'+raw[key_start:key_start+32].hex()
+            elif 'collectionmintdrop' in ec:
+                # Collection mint(bytes16,address,uint16,uint32,bytes) passes collectionId/nonce/
+                # signature to an external verifier. Do not invent owner-local stage/nonce storage
+                # keys for those authorization inputs; only the local mint effect is represented.
+                stage_key=None
+            elif 'multistage' in ec:
                 stage_key=f"stage:{abi_uint(data,2)}"
             elif 'mintbatch' in ec:
                 stage_key=f"batch:{fingerprint[16:40]}"
@@ -923,7 +1093,9 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
             elif 'whitelist' in ec:
                 stage_key=fingerprint[16:40]
             nonce_key=None
-            if 'signed' in ec:
+            if 'collectionmintdrop' in ec:
+                nonce_key=None
+            elif 'signed' in ec:
                 nonce_key=f"nonce:{intv(args.get('nonce',abi_uint(data,1)))}"
             elif 'whitelist' in ec:
                 nonce_key=fingerprint[40:64]
@@ -943,6 +1115,14 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
             term=intv(args.get('term',abi_uint(data,0))); return contract_call('execute',family,iid,caller,{'claim_rank':{'term_days':max(0,min(term,1))}},a)
         if 'claimmintrewardandshare' in ec:
             other=args.get('other') or abi_addr(data,0); pct=intv(args.get('pct',abi_uint(data,1))); return contract_call('execute',family,iid,caller,{'claim_mint_reward_and_share':{'other':other,'pct':min(pct,100)}},a)
+        if 'claimmintrewardandstake' in ec:
+            pct=intv(args.get('pct',abi_uint(data,0))); term=intv(args.get('term',abi_uint(data,1)))
+            return contract_call('execute',family,iid,caller,{'claim_mint_reward_and_stake':{'pct':min(pct,100),'term_days':max(0,min(term,1))}},a)
+        if ec.endswith('::stake'):
+            n=amount(args.get('amount',abi_uint(data,0))); term=intv(args.get('term',abi_uint(data,1)))
+            return contract_call('execute',family,iid,caller,{'stake':{'amount':str(max(n,1)),'term_days':max(0,min(term,1))}},a)
+        if ec.endswith('::withdraw'):
+            return contract_call('execute',family,iid,caller,{'withdraw':{}},a)
         if 'claimmintreward' in ec: return contract_call('execute',family,iid,caller,{'claim_mint_reward':{}},a)
         if e.endswith('::transfer'):
             recipient=args.get('recipient') or abi_addr(data,0); return contract_call('execute',family,iid,caller,{'transfer':{'recipient':recipient,'amount':'1'}},a)
@@ -955,12 +1135,14 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         if 'sendfrom' in ec:
             return contract_call('execute',family,iid,caller,{'send_from':{'from':abi_addr(data,0),'to':abi_addr(data,1),'token_id':token_ids.map(iid,abi_uint(data,2)),'amount':str(max(amount(abi_uint(data,3)),1))}},a)
         if 'balance' in e: return contract_call('query',family,iid,None,{'balance':{'address':abi_addr(data,0),'token_id':token_ids.map(iid,abi_uint(data,1))}},a)
-    if family in {'marketplace-router','universal-router','custom-swap-router','v3-pool-lock','amp-partition-collateral-lock','linea-rollup-lock','zksync-l1-system-lock','arbitrum-bridge-lock'}:
+    if family in {'marketplace-router','universal-router','custom-swap-router','v3-pool-lock','amp-partition-collateral-lock','linea-rollup-lock','zksync-l1-system-lock','arbitrum-bridge-lock','synthetix-system-lock','starknet-l1-system-lock'}:
         semantic_id=calldata_fingerprint(data)
         if 'incrementcounter' in ec or 'incrementnonce' in ec:
             return contract_call('execute',family,iid,caller,{'increment_counter':{}},a)
         if 'executeroute' in ec:
             return contract_call('execute',family,iid,caller,{'execute_route':{'route_id':semantic_id}},a)
+        if 'readroutelock' in ec:
+            return contract_call('query',family,iid,None,{'read_route_lock':{}},a)
         if 'v3swapcallback' in ec:
             return contract_call('execute',family,iid,caller,{'v3_swap_callback':{'route_id':semantic_id}},a)
         if 'blursettle' in ec:
@@ -980,7 +1162,41 @@ def translate(family: str, ep: str, sig: str | None, tx: dict, a: dict, caller: 
         if 'isoperatorallowed' in ec: return contract_call('query',family,iid,None,{'is_operator_allowed':{'registrant':abi_addr(data,0),'operator':abi_addr(data,1)}},a)
     return None
 
-def instantiate_msg(fam: str, participants: set[str], iid: str | None = None, drop_mint_sequence: Cw721DropMintSequence | None = None):
+def discover_sequential_cw721_drop_instances(plan_path: Path) -> set[str]:
+    """Find cw721-drop instances whose reviewed execution plan contains native sequential mint calls.
+
+    The cw721-drop native contract materializes MintDrop by allocating `next_token_id` sequentially.
+    Any source instance using those reviewed mint adapters must therefore keep source u64 token IDs
+    identity-mapped; otherwise later approve/transfer calls can target a dense ID different from the
+    one written by MintDrop. Generic ERC721 aliases without reviewed mint entrypoints continue to use
+    the collision-free dense uint256->u64 remapper.
+    """
+    out: set[str] = set()
+    with plan_path.open(encoding='utf-8') as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            block=json.loads(line)
+            for tx in block.get('transactions',[]):
+                for action in tx.get('native_actions',[]):
+                    if action.get('native_code_family') != 'cw721-drop':
+                        continue
+                    ep=str(action.get('native_entrypoint') or '')
+                    if not ep.startswith('execute::'):
+                        continue
+                    ec=canon_ep(ep).replace('_','')
+                    if any(marker in ec for marker in ('mint','purchase','airdrop','reservedrop')):
+                        out.add(instance_id('cw721-drop',action))
+    return out
+
+
+def instantiate_msg(
+    fam: str,
+    participants: set[str],
+    iid: str | None = None,
+    drop_mint_sequence: Cw721DropMintSequence | None = None,
+    drop_next_token_id_overrides: dict[str,int] | None = None,
+):
     bals=[{'address':a,'amount':str(SEED)} for a in sorted(participants) if norm_addr(a)]
     if fam=='cw20-base': return {'name':'S3','symbol':'S3','decimals':18,'initial_balances':bals}
     if fam in {'controlled-cw20','fiat-token-cw20'}: return {'admin':'native-s3-admin','initial_balances':bals}
@@ -990,13 +1206,259 @@ def instantiate_msg(fam: str, participants: set[str], iid: str | None = None, dr
     if fam=='cw721-mintable': return {'admin':'native-s3-admin','name':'S3NFT','symbol':'S3N'}
     if fam=='cw721-drop':
         first = drop_mint_sequence.first_token_id(iid or '') if drop_mint_sequence is not None else None
+        if first is None and drop_next_token_id_overrides is not None:
+            first = drop_next_token_id_overrides.get(iid or '')
         return {'admin':'native-s3-admin','name':'S1Drop','symbol':'S1D','next_token_id':int(first if first is not None else 1)}
     if fam=='astroport-pair': return {'asset0':'asset0','asset1':'asset1'}
     if fam=='xen-like': return {'genesis_ts':0}
     return {}
 
+
+def recover_translated_execution_state(
+    prepared_path: Path,
+    source_plan_path: Path,
+    drop_mint_sequence: Cw721DropMintSequence,
+    *,
+    progress_every: int = 500,
+) -> dict[str, Any]:
+    """Rebuild post-translation bookkeeping from an already completed execution-plan tmp file.
+
+    This is intentionally much cheaper than translating the native plan again.  It exists so an
+    RPC failure during predecessor-state hydration can resume from the exact stage that failed.
+    The prepared block stream is checked against the current source native plan before reuse.
+    """
+    token_ids=TokenIdRemapper()
+    drop_translated_mints: dict[tuple[str,str], int] = defaultdict(int)
+    workload_logical_addresses=set()
+    instances={}; participant=defaultdict(set); allowances=set(); nft_tokens=defaultdict(dict)
+    nft_owner_priority={}; nft_ops=set(); nft_operator_pairs=set(); nft_approve_senders=set()
+    nft_source_tokens=defaultdict(dict); multi_seed=set(); multi_approvals=set(); xen_first={}
+    bank_senders=set(); stats=defaultdict(int)
+    first_block=None; last_block=None; block_count=0; prepared_identity=hashlib.sha256()
+
+    print(f"resume: reusing completed translated execution stream {prepared_path}", flush=True)
+    with prepared_path.open(encoding='utf-8') as prepared:
+        for line in prepared:
+            if not line.strip(): continue
+            b=json.loads(line); bn=int(b['block_number']); prepared_identity.update(f'block:{bn}\n'.encode())
+            first_block=bn if first_block is None else min(first_block,bn); last_block=bn; block_count+=1
+            for tx in b.get('transactions',[]):
+                prepared_identity.update(f"tx:{str(tx.get('tx_hash') or '').lower()}\n".encode())
+                calls=tx.get('calls') or []
+                stats['transactions']+=1; stats['skipped_actions']+=int(tx.get('skipped_actions') or 0)
+                scopes={int(c['source_revert_scope_action_id']) for c in calls if c.get('source_revert_scope_action_id') is not None}
+                stats['internal_revert_scopes']+=len(scopes)
+                stats['calls_in_internal_revert_scopes']+=sum(1 for c in calls if c.get('source_revert_scope_action_id') is not None)
+                for c in calls:
+                    kind=str(c.get('kind') or ''); fam=str(c.get('family') or ''); iid=c.get('instance_id'); m=c.get('msg') or {}
+                    if kind=='noop' and c.get('reviewed_stateless_entrypoint'):
+                        stats['reviewed_noop_calls']+=1
+                    elif kind in {'bank_send','noop'} and not iid:
+                        stats['system']+=1
+                    if kind=='bank_send':
+                        frm=c.get('from')
+                        if frm: bank_senders.add(frm)
+                    if iid and fam:
+                        iid=str(iid); instances[iid]=fam; stats['contract_calls']+=1
+                        if c.get('source_token_id') is not None:
+                            raw_tid=intv(c.get('source_token_id')); native_tid=None
+                            if 'transfer_nft' in m: native_tid=intv(m['transfer_nft'].get('token_id'))
+                            elif 'approve_nft' in m: native_tid=intv(m['approve_nft'].get('token_id'))
+                            elif 'mint' in m: native_tid=intv(m['mint'].get('token_id'))
+                            elif 'owner_of' in m: native_tid=intv(m['owner_of'].get('token_id'))
+                            elif 'approved' in m: native_tid=intv(m['approved'].get('token_id'))
+                            if native_tid is not None: token_ids.record_existing(iid,raw_tid,native_tid)
+                        if kind=='execute':
+                            sender=c.get('sender')
+                            if sender: participant[iid].add(sender)
+                            if 'transfer' in m: participant[iid].add(m['transfer']['recipient'])
+                            if 'transfer_from' in m:
+                                z=m['transfer_from']; participant[iid]|={z['owner'],z['recipient']}; allowances.add((iid,z['owner'],sender))
+                            if 'approve' in m and sender: participant[iid].add(sender)
+                            if fam=='wrapped-native-token' and ('deposit' in m or 'withdraw' in m):
+                                if sender: participant[iid].add(sender); bank_senders.add(sender)
+                            if fam in {'cw721-mintable','cw721-drop'}:
+                                if 'mint' in m: participant[iid].add(m['mint']['owner'])
+                                if 'transfer_nft' in m:
+                                    z=m['transfer_nft']; tid=intv(z['token_id']); raw_tid=intv(c.get('source_token_id'))
+                                    nft_source_tokens[iid][tid]=raw_tid
+                                    source_owner=norm_addr(c.get('source_owner')) or sender
+                                    if source_owner:
+                                        note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,source_owner,3)
+                                        if sender and sender!=source_owner:
+                                            nft_ops.add((iid,source_owner,sender)); nft_operator_pairs.add((iid,source_owner,sender))
+                                if 'approve_nft' in m:
+                                    tid=intv(m['approve_nft']['token_id']); raw_tid=intv(c.get('source_token_id'))
+                                    nft_source_tokens[iid][tid]=raw_tid
+                                    if sender:
+                                        note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,sender,2)
+                                        nft_approve_senders.add((iid,tid,sender))
+                                if 'approve_all' in m and sender:
+                                    nft_operator_pairs.add((iid,sender,m['approve_all']['operator']))
+                            if fam=='cw1155-like' and 'send_from' in m:
+                                z=m['send_from']; multi_seed.add((iid,intv(z['token_id']),z['from']))
+                                if sender and sender!=z['from']: multi_approvals.add((iid,z['from'],sender))
+                            if fam=='xen-like' and sender and m:
+                                xen_first.setdefault((iid,sender),next(iter(m)))
+                        elif kind=='query' and fam in {'cw721-mintable','cw721-drop'} and 'owner_of' in m:
+                            tid=intv(m['owner_of']['token_id']); nft_source_tokens[iid][tid]=intv(c.get('source_token_id'))
+                            note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,'native-s3-seed-owner',1)
+                    if fam=='cw721-drop' and kind=='execute' and 'mint_drop' in m and counts_for_drop_mint_event_validation(tx,c):
+                        owner=drop_mint_sequence.owner_for_instance(str(iid or ''))
+                        if owner: drop_translated_mints[(owner,str(tx.get('tx_hash') or '').lower())]+=intv(m['mint_drop'].get('quantity'))
+                    for key in ('sender','from','to'):
+                        value=c.get(key)
+                        if isinstance(value,str): workload_logical_addresses.add(value)
+                    collect_logical_strings(m,workload_logical_addresses)
+            if block_count % progress_every==0:
+                print(f"resume reconstruction: blocks={block_count} tx={stats['transactions']} instances={len(instances)}", flush=True)
+
+    source_blocks=0; source_first=None; source_last=None; source_identity=hashlib.sha256()
+    with source_plan_path.open(encoding='utf-8') as source_plan:
+        for line in source_plan:
+            if not line.strip(): continue
+            b=json.loads(line); bn=int(b['block_number']); source_blocks+=1; source_identity.update(f'block:{bn}\n'.encode())
+            source_first=bn if source_first is None else min(source_first,bn); source_last=bn
+            for tx in b.get('transactions',[]):
+                source_identity.update(f"tx:{str(tx.get('tx_hash') or '').lower()}\n".encode())
+                for a in tx.get('native_actions',[]):
+                    if a.get('ethereum_msg_sender'): stats['explicit_msg_senders']+=1
+                    else: stats['missing_msg_senders']+=1
+    if (block_count,first_block,last_block)!=(source_blocks,source_first,source_last) or prepared_identity.digest()!=source_identity.digest():
+        raise RuntimeError(
+            "refusing stale/incomplete translated execution resume: "
+            f"prepared={(block_count,first_block,last_block)} source={(source_blocks,source_first,source_last)} "
+            f"identity_match={prepared_identity.digest()==source_identity.digest()}"
+        )
+    print(
+        f"resume reconstruction complete: blocks={block_count} tx={stats['transactions']} "
+        f"instances={len(instances)}; source-plan boundaries verified",
+        flush=True,
+    )
+    return {
+        'token_ids':token_ids,'drop_translated_mints':drop_translated_mints,
+        'workload_logical_addresses':workload_logical_addresses,'instances':instances,
+        'participant':participant,'allowances':allowances,'nft_tokens':nft_tokens,
+        'nft_owner_priority':nft_owner_priority,'nft_ops':nft_ops,
+        'nft_operator_pairs':nft_operator_pairs,'nft_approve_senders':nft_approve_senders,
+        'nft_source_tokens':nft_source_tokens,'multi_seed':multi_seed,'multi_approvals':multi_approvals,
+        'xen_first':xen_first,'bank_senders':bank_senders,'stats':stats,
+        'first_block':first_block,'block_count':block_count,
+    }
+
+def validate_cw721_token_lifecycle(
+    execution_path: Path,
+    manifest_instances: list[dict[str,Any]],
+    priming_calls: list[dict[str,Any]],
+    *,
+    progress_every: int = 500,
+) -> dict[str,int]:
+    """Fail before Wasmd setup if a committed CW721 call can target a nonexistent native token.
+
+    This is a logical-key preflight only. It does not emulate ownership/authorization; it verifies
+    that predecessor priming plus earlier committed native mints can materialize every token ID
+    reached by transfer/approve/owner queries. Source-failed transactions and explicitly reverted
+    internal scopes are allowed to encounter missing tokens because the benchmark discards them.
+    """
+    families={str(row['instance_id']):str(row['family']) for row in manifest_instances}
+    next_id: dict[str,int] = {}
+    existing: dict[str,set[int]] = defaultdict(set)
+    for row in manifest_instances:
+        iid=str(row['instance_id']); fam=str(row['family']); msg=row.get('instantiate_msg') or {}
+        if fam=='cw721-drop': next_id[iid]=intv(msg.get('next_token_id',1))
+
+    def apply_mint(call: dict[str,Any], additions: dict[str,set[int]], cursors: dict[str,int]) -> None:
+        iid=str(call.get('instance_id') or ''); fam=families.get(iid); msg=call.get('msg') or {}
+        if fam=='cw721-drop' and 'seed_mint' in msg:
+            tid=intv(msg['seed_mint'].get('token_id')); additions[iid].add(tid)
+            cursors[iid]=max(cursors.get(iid,1),tid+1)
+        elif fam=='cw721-drop' and 'mint_drop' in msg:
+            q=intv(msg['mint_drop'].get('quantity'))
+            start=cursors.get(iid,1)
+            if q>0:
+                additions[iid].update(range(start,start+q)); cursors[iid]=start+q
+        elif fam=='cw721-mintable' and 'mint' in msg:
+            tid=msg['mint'].get('token_id')
+            if tid is not None: additions[iid].add(intv(tid))
+
+    def required_token(call: dict[str,Any]) -> int | None:
+        iid=str(call.get('instance_id') or ''); fam=families.get(iid); msg=call.get('msg') or {}
+        if fam not in {'cw721-drop','cw721-mintable'}: return None
+        for key in ('transfer_nft','send_or_safe_transfer_nft','approve_nft','owner_of','approved'):
+            if key in msg: return intv((msg[key] or {}).get('token_id'))
+        return None
+
+    for call in priming_calls:
+        apply_mint(call,existing,next_id)
+
+    stats=defaultdict(int)
+    blocks=0
+    with execution_path.open(encoding='utf-8') as fh:
+        for line in fh:
+            if not line.strip(): continue
+            block=json.loads(line); blocks+=1
+            for tx in block.get('transactions',[]):
+                tx_add: dict[str,set[int]]=defaultdict(set)
+                tx_next=dict(next_id)
+                calls=tx.get('calls') or []; i=0; tx_aborted=False
+                while i<len(calls):
+                    scope=calls[i].get('source_revert_scope_action_id')
+                    if scope is not None:
+                        scope_add: dict[str,set[int]]=defaultdict(set)
+                        scope_next=dict(tx_next)
+                        while i<len(calls) and calls[i].get('source_revert_scope_action_id')==scope:
+                            call=calls[i]; tid=required_token(call); iid=str(call.get('instance_id') or '')
+                            if tid is not None and tid not in existing.get(iid,set()) and tid not in tx_add.get(iid,set()) and tid not in scope_add.get(iid,set()):
+                                stats['reverted_missing_tokens']+=1
+                                while i<len(calls) and calls[i].get('source_revert_scope_action_id')==scope: i+=1
+                                break
+                            apply_mint(call,scope_add,scope_next); i+=1
+                        continue
+                    call=calls[i]; tid=required_token(call); iid=str(call.get('instance_id') or '')
+                    if tid is not None and tid not in existing.get(iid,set()) and tid not in tx_add.get(iid,set()):
+                        if bool(tx.get('source_failed')):
+                            stats['source_failed_missing_tokens']+=1; tx_aborted=True; break
+                        raise RuntimeError(
+                            'CW721 token-lifecycle preflight failed before Wasmd setup: '
+                            f"block={block.get('block_number')} tx_index={tx.get('tx_index')} tx_hash={tx.get('tx_hash')} "
+                            f"call={i} instance={iid} family={families.get(iid)} token_id={tid} msg={json.dumps(call.get('msg'),sort_keys=True)}"
+                        )
+                    apply_mint(call,tx_add,tx_next); i+=1
+                if not bool(tx.get('source_failed')) and not tx_aborted:
+                    for iid,rows in tx_add.items(): existing[iid].update(rows)
+                    next_id=tx_next
+                stats['transactions']+=1
+            if blocks % progress_every==0:
+                print(
+                    f"CW721 token-lifecycle preflight: blocks={blocks} tx={stats['transactions']} "
+                    f"reverted_missing={stats['reverted_missing_tokens']} failed_tx_missing={stats['source_failed_missing_tokens']}",
+                    flush=True,
+                )
+    stats['blocks']=blocks
+    stats['tracked_tokens']=sum(len(rows) for rows in existing.values())
+    print(
+        f"CW721 token-lifecycle preflight PASS: blocks={blocks} tx={stats['transactions']} "
+        f"tracked_tokens={stats['tracked_tokens']} reverted_missing={stats['reverted_missing_tokens']} "
+        f"failed_tx_missing={stats['source_failed_missing_tokens']}",
+        flush=True,
+    )
+    return dict(stats)
+
+
 def build(argv=None):
-    ap=argparse.ArgumentParser(); ap.add_argument('--plan',type=Path,default=DEFAULT_PLAN); ap.add_argument('--selector-map',type=Path,default=DEFAULT_SELECTOR); ap.add_argument('--code-cache',type=Path,default=DEFAULT_CODE_CACHE); ap.add_argument('--implementation-manifest',type=Path,default=DEFAULT_IMPL); ap.add_argument('--output-dir',type=Path,default=DEFAULT_OUT); ap.add_argument('--initial-state-mode',choices=('rpc','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_INITIAL_STATE_MODE','rpc')); ap.add_argument('--caller-mode',choices=('exact','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_CALLER_MODE','exact')); ap.add_argument('--rpc-url',default=os.environ.get('ETH_RPC_URL')); ap.add_argument('--initial-state-cache',type=Path,default=None); ap.add_argument('--cw721-drop-mint-sequence',type=Path,default=None); ap.add_argument('--erc721-selector-mint-audit',type=Path,action='append',default=[]); ap.add_argument('--readiness-report',type=Path,default=None); ap.add_argument('--dataset-label',default='vegeta-s3-native'); ns=ap.parse_args(argv)
+    ap=argparse.ArgumentParser()
+    ap.add_argument('--plan',type=Path,default=DEFAULT_PLAN); ap.add_argument('--selector-map',type=Path,default=DEFAULT_SELECTOR)
+    ap.add_argument('--code-cache',type=Path,default=DEFAULT_CODE_CACHE); ap.add_argument('--implementation-manifest',type=Path,default=DEFAULT_IMPL)
+    ap.add_argument('--output-dir',type=Path,default=DEFAULT_OUT); ap.add_argument('--initial-state-mode',choices=('rpc','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_INITIAL_STATE_MODE','rpc'))
+    ap.add_argument('--caller-mode',choices=('exact','heuristic'),default=os.environ.get('VEGETA_S3_NATIVE_CALLER_MODE','exact')); ap.add_argument('--rpc-url',default=os.environ.get('ETH_RPC_URL'))
+    ap.add_argument('--initial-state-cache',type=Path,default=None); ap.add_argument('--cw721-drop-mint-sequence',type=Path,default=None)
+    ap.add_argument('--erc721-selector-mint-audit',type=Path,action='append',default=[]); ap.add_argument('--readiness-report',type=Path,default=None)
+    ap.add_argument('--dataset-label',default='vegeta-s3-native')
+    ap.add_argument('--resume-after-translation',action='store_true',help='reuse a completed execution-plan.jsonl.tmp and resume predecessor-state hydration')
+    ap.add_argument('--rpc-min-interval',type=float,default=float(os.environ.get('VEGETA_NATIVE_RPC_MIN_INTERVAL_SECONDS','0.05')))
+    ap.add_argument('--rpc-max-retries',type=int,default=int(os.environ.get('VEGETA_NATIVE_RPC_MAX_RETRIES','10')))
+    ap.add_argument('--rpc-progress-every',type=int,default=int(os.environ.get('VEGETA_NATIVE_RPC_PROGRESS_EVERY','100')))
+    ns=ap.parse_args(argv)
     selector=read_json(ns.selector_map); cache={str(k).lower():v for k,v in read_json(ns.code_cache).items() if isinstance(v,dict)}; idx,fam_by_addr=rule_index(selector,cache); impl=read_json(ns.implementation_manifest)
     readiness_meta=None
     if ns.readiness_report is not None:
@@ -1011,108 +1473,151 @@ def build(argv=None):
             'profiles':{name:{'ready':bool((row or {}).get('ready'))} for name,row in (readiness.get('profiles') or {}).items()},
         }
     wasm={r['native_code_family']:r['wasm_artifact'] for r in impl['families']}
-    token_ids=TokenIdRemapper()
-    drop_mint_sequence=Cw721DropMintSequence(ns.cw721_drop_mint_sequence)
-    selector_mints=Erc721SelectorMintAudits(ns.erc721_selector_mint_audit)
-    drop_translated_mints: dict[tuple[str,str], int] = defaultdict(int)
-    workload_logical_addresses=set()
-    instances={}; participant=defaultdict(set); allowances=set(); nft_tokens=defaultdict(dict); nft_owner_priority={}; nft_ops=set(); nft_operator_pairs=set(); nft_approve_senders=set(); nft_source_tokens=defaultdict(dict); multi_seed=set(); multi_approvals=set(); xen_first={}; bank_senders=set(); stats=defaultdict(int)
     out=ns.output_dir; out.mkdir(parents=True,exist_ok=True)
     execution_tmp=out/'execution-plan.jsonl.tmp'
-    first_block=None; block_count=0
-    plan_handle=ns.plan.open(encoding='utf-8')
-    execution_handle=execution_tmp.open('w',encoding='utf-8')
-    for line in plan_handle:
-        if not line.strip(): continue
-        b=json.loads(line); bn=int(b['block_number']); first_block=bn if first_block is None else min(first_block,bn); block_count+=1; ob={'block_number':bn,'timestamp':b.get('timestamp',0),'transactions':[]}
-        for tx in b.get('transactions',[]):
-            by_id={int(a['action_id']):a for a in tx.get('native_actions',[]) if a.get('action_id') is not None}; calls=[]; skipped=0
-            for a in tx.get('native_actions',[]):
-                if a.get('ethereum_msg_sender'): stats['explicit_msg_senders']+=1
-                else: stats['missing_msg_senders']+=1
-                caller=caller_for(tx,a,by_id,ns.caller_mode); fam=a.get('native_code_family'); ep=a.get('native_entrypoint'); sig=None
-                if a.get('translation_status')=='mapped-system-action':
-                    ep=str(ep or '')
-                    aa=a.get('arguments') or {}
-                    if ep=='system::bank_send':
-                        frm=aa.get('sender') or caller; to=aa.get('recipient') or norm_addr(a.get('ethereum_code_address')); n=max(amount(aa.get('amount_wei')),1); calls.append(attach_revert_scope({'kind':'bank_send','from':frm,'to':to,'coins':[{'denom':'unative','amount':str(n)}],'origin_action_id':a.get('action_id')},a,by_id)); bank_senders.add(frm); stats['system']+=1
-                    else: calls.append(attach_revert_scope({'kind':'noop','origin_action_id':a.get('action_id')},a,by_id)); stats['system']+=1
-                    continue
-                if not fam or not ep or str(ep).startswith('opaque::'):
-                    r=match_rule(a,idx,fam_by_addr)
-                    if r: fam=r['native_code_family']; ep=r['native_entrypoint']; sig=r.get('ethereum_function_signature')
-                    else: skipped+=1; continue
-                if fam=='system':
-                    if ep=='system::custodial_value_deposit':
-                        n=max(amount(a.get('ethereum_value')),1); to=norm_addr(a.get('ethereum_code_address')); calls.append(attach_revert_scope({'kind':'bank_send','from':caller,'to':to,'coins':[{'denom':'unative','amount':str(n)}],'origin_action_id':a.get('action_id')},a,by_id)); bank_senders.add(caller)
-                    else: calls.append(attach_revert_scope({'kind':'noop','origin_action_id':a.get('action_id')},a,by_id))
-                    stats['system']+=1; continue
-                c=translate(str(fam),str(ep),sig,tx,a,caller,token_ids,selector_mints,drop_mint_sequence)
-                if c is None: skipped+=1; continue
-                attach_revert_scope(c,a,by_id); calls.append(c)
-                iid=register_translated_instance(c,str(fam),instances,stats)
-                if iid is None:
-                    continue
-                if (
-                    str(fam)=='cw721-drop' and c['kind']=='execute' and 'mint_drop' in c.get('msg',{})
-                    and counts_for_drop_mint_event_validation(tx,c)
-                ):
-                    owner=drop_mint_sequence.owner_for_instance(iid)
-                    if owner:
-                        drop_translated_mints[(owner,str(tx.get('tx_hash') or '').lower())] += int(c['msg']['mint_drop']['quantity'])
-                if c['kind']=='execute':
-                    m=c['msg']; participant[iid].add(c.get('sender',caller))
-                    if 'transfer' in m: participant[iid].add(m['transfer']['recipient'])
-                    if 'transfer_from' in m:
-                        z=m['transfer_from']; participant[iid]|={z['owner'],z['recipient']}; allowances.add((iid,z['owner'],c.get('sender',caller)))
-                    if 'approve' in m: participant[iid].add(c.get('sender',caller))
-                    if fam=='wrapped-native-token' and ('deposit' in m or 'withdraw' in m): participant[iid].add(c.get('sender',caller)); bank_senders.add(c.get('sender',caller))
-                    if fam in {'cw721-mintable','cw721-drop'}:
-                        if 'mint' in m:
-                            participant[iid].add(m['mint']['owner'])
-                        if 'transfer_nft' in m:
-                            z=m['transfer_nft']; tid=int(z['token_id']); raw_tid=intv(c.get('source_token_id')); nft_source_tokens[iid][tid]=raw_tid; source_owner=norm_addr(c.get('source_owner')) or c.get('sender',caller)
-                            note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,source_owner,3)
-                            sender=c.get('sender',caller)
-                            if sender!=source_owner: nft_ops.add((iid,source_owner,sender)); nft_operator_pairs.add((iid,source_owner,sender))
-                        if 'approve_nft' in m:
-                            tid=int(m['approve_nft']['token_id']); raw_tid=intv(c.get('source_token_id')); nft_source_tokens[iid][tid]=raw_tid; sender=c.get('sender',caller)
-                            note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,sender,2)
-                            nft_approve_senders.add((iid,tid,sender))
-                        if 'approve_all' in m:
-                            nft_operator_pairs.add((iid,c.get('sender',caller),m['approve_all']['operator']))
-                    if fam=='cw1155-like' and 'send_from' in m:
-                        z=m['send_from']; multi_seed.add((iid,int(z['token_id']),z['from']));
-                        if c.get('sender')!=z['from']: multi_approvals.add((iid,z['from'],c.get('sender')))
-                    if fam=='xen-like': xen_first.setdefault((iid,c.get('sender',caller)), next(iter(m)))
-                elif c['kind']=='query' and fam in {'cw721-mintable','cw721-drop'} and 'owner_of' in c['msg']:
-                    tid=int(c['msg']['owner_of']['token_id']); nft_source_tokens[iid][tid]=intv(c.get('source_token_id')); note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,'native-s3-seed-owner',1)
-            for prepared_call in calls:
-                for key in ('sender','from','to'):
-                    value=prepared_call.get(key)
-                    if isinstance(value,str): workload_logical_addresses.add(value)
-                collect_logical_strings(prepared_call.get('msg'),workload_logical_addresses)
-            scopes={int(c['source_revert_scope_action_id']) for c in calls if c.get('source_revert_scope_action_id') is not None}
-            stats['internal_revert_scopes']+=len(scopes)
-            stats['calls_in_internal_revert_scopes']+=sum(1 for c in calls if c.get('source_revert_scope_action_id') is not None)
-            ob['transactions'].append({'tx_index':tx['tx_index'],'tx_hash':tx['tx_hash'],'source_failed':bool(tx.get('source_failed')),'source_compute_proxy':int(tx.get('gas_used_compute_proxy') or 0),'calls':calls,'skipped_actions':skipped})
-            stats['transactions']+=1; stats['skipped_actions']+=skipped
-        execution_handle.write(json.dumps(ob,separators=(',',':'))+'\n')
-        if block_count % 100 == 0: print(f'prepared execution blocks={block_count} tx={stats["transactions"]}', flush=True)
-    plan_handle.close(); execution_handle.close()
+    drop_mint_sequence=Cw721DropMintSequence(ns.cw721_drop_mint_sequence)
+    sequential_drop_instances=discover_sequential_cw721_drop_instances(ns.plan)
+    print(
+        f'cw721-drop token-ID policy: sequential-mint identity instances={len(sequential_drop_instances)}; '
+        'other drop aliases=dense uint256->u64',
+        flush=True,
+    )
+    if ns.resume_after_translation:
+        resume_path=execution_tmp if execution_tmp.exists() else (out/'execution-plan.jsonl')
+        if not resume_path.exists():
+            raise RuntimeError(
+                f"resume requested but neither {execution_tmp} nor {out/'execution-plan.jsonl'} exists; "
+                "run the normal preparation path once to complete translation"
+            )
+        recovered=recover_translated_execution_state(resume_path,ns.plan,drop_mint_sequence)
+        token_ids=recovered['token_ids']; drop_translated_mints=recovered['drop_translated_mints']
+        workload_logical_addresses=recovered['workload_logical_addresses']; instances=recovered['instances']
+        participant=recovered['participant']; allowances=recovered['allowances']; nft_tokens=recovered['nft_tokens']
+        nft_owner_priority=recovered['nft_owner_priority']; nft_ops=recovered['nft_ops']
+        nft_operator_pairs=recovered['nft_operator_pairs']; nft_approve_senders=recovered['nft_approve_senders']
+        nft_source_tokens=recovered['nft_source_tokens']; multi_seed=recovered['multi_seed']; multi_approvals=recovered['multi_approvals']
+        xen_first=recovered['xen_first']; bank_senders=recovered['bank_senders']; stats=recovered['stats']
+        first_block=recovered['first_block']; block_count=recovered['block_count']; execution_work_path=resume_path
+        token_ids.assert_source_u64_identity(sequential_drop_instances)
+        selector_mints=Erc721SelectorMintAudits(ns.erc721_selector_mint_audit)
+    else:
+        token_ids=TokenIdRemapper()
+        selector_mints=Erc721SelectorMintAudits(ns.erc721_selector_mint_audit)
+        drop_translated_mints: dict[tuple[str,str], int] = defaultdict(int)
+        workload_logical_addresses=set()
+        instances={}; participant=defaultdict(set); allowances=set(); nft_tokens=defaultdict(dict); nft_owner_priority={}; nft_ops=set(); nft_operator_pairs=set(); nft_approve_senders=set(); nft_source_tokens=defaultdict(dict); multi_seed=set(); multi_approvals=set(); xen_first={}; bank_senders=set(); stats=defaultdict(int)
+        first_block=None; block_count=0
+        plan_handle=ns.plan.open(encoding='utf-8')
+        execution_handle=execution_tmp.open('w',encoding='utf-8')
+        for line in plan_handle:
+            if not line.strip(): continue
+            b=json.loads(line); bn=int(b['block_number']); first_block=bn if first_block is None else min(first_block,bn); block_count+=1; ob={'block_number':bn,'timestamp':b.get('timestamp',0),'transactions':[]}
+            for tx in b.get('transactions',[]):
+                by_id={int(a['action_id']):a for a in tx.get('native_actions',[]) if a.get('action_id') is not None}; calls=[]; skipped=0
+                for a in tx.get('native_actions',[]):
+                    if a.get('ethereum_msg_sender'): stats['explicit_msg_senders']+=1
+                    else: stats['missing_msg_senders']+=1
+                    caller=caller_for(tx,a,by_id,ns.caller_mode); fam=a.get('native_code_family'); ep=a.get('native_entrypoint'); sig=None
+                    if a.get('translation_status')=='mapped-system-action':
+                        ep=str(ep or '')
+                        aa=a.get('arguments') or {}
+                        if ep=='system::bank_send':
+                            frm=aa.get('sender') or caller; to=aa.get('recipient') or norm_addr(a.get('ethereum_code_address')); n=max(amount(aa.get('amount_wei')),1); calls.append(attach_revert_scope({'kind':'bank_send','from':frm,'to':to,'coins':[{'denom':'unative','amount':str(n)}],'origin_action_id':a.get('action_id')},a,by_id)); bank_senders.add(frm); stats['system']+=1
+                        else: calls.append(attach_revert_scope({'kind':'noop','origin_action_id':a.get('action_id')},a,by_id)); stats['system']+=1
+                        continue
+                    if not fam or not ep or str(ep).startswith('opaque::'):
+                        r=match_rule(a,idx,fam_by_addr)
+                        if r: fam=r['native_code_family']; ep=r['native_entrypoint']; sig=r.get('ethereum_function_signature')
+                        else: skipped+=1; continue
+                    if fam=='system':
+                        if ep=='system::custodial_value_deposit':
+                            n=max(amount(a.get('ethereum_value')),1); to=norm_addr(a.get('ethereum_code_address')); calls.append(attach_revert_scope({'kind':'bank_send','from':caller,'to':to,'coins':[{'denom':'unative','amount':str(n)}],'origin_action_id':a.get('action_id')},a,by_id)); bank_senders.add(caller)
+                        else: calls.append(attach_revert_scope({'kind':'noop','origin_action_id':a.get('action_id')},a,by_id))
+                        stats['system']+=1; continue
+                    c=translate(str(fam),str(ep),sig,tx,a,caller,token_ids,selector_mints,drop_mint_sequence,sequential_drop_instances)
+                    if c is None: skipped+=1; continue
+                    attach_revert_scope(c,a,by_id); calls.append(c)
+                    iid=register_translated_instance(c,str(fam),instances,stats)
+                    if iid is None:
+                        continue
+                    if (
+                        str(fam)=='cw721-drop' and c['kind']=='execute' and 'mint_drop' in c.get('msg',{})
+                        and counts_for_drop_mint_event_validation(tx,c)
+                    ):
+                        owner=drop_mint_sequence.owner_for_instance(iid)
+                        if owner:
+                            drop_translated_mints[(owner,str(tx.get('tx_hash') or '').lower())] += int(c['msg']['mint_drop']['quantity'])
+                    if c['kind']=='execute':
+                        m=c['msg']; participant[iid].add(c.get('sender',caller))
+                        if 'transfer' in m: participant[iid].add(m['transfer']['recipient'])
+                        if 'transfer_from' in m:
+                            z=m['transfer_from']; participant[iid]|={z['owner'],z['recipient']}; allowances.add((iid,z['owner'],c.get('sender',caller)))
+                        if 'approve' in m: participant[iid].add(c.get('sender',caller))
+                        if fam=='wrapped-native-token' and ('deposit' in m or 'withdraw' in m): participant[iid].add(c.get('sender',caller)); bank_senders.add(c.get('sender',caller))
+                        if fam in {'cw721-mintable','cw721-drop'}:
+                            if 'mint' in m:
+                                participant[iid].add(m['mint']['owner'])
+                            if 'transfer_nft' in m:
+                                z=m['transfer_nft']; tid=int(z['token_id']); raw_tid=intv(c.get('source_token_id')); nft_source_tokens[iid][tid]=raw_tid; source_owner=norm_addr(c.get('source_owner')) or c.get('sender',caller)
+                                note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,source_owner,3)
+                                sender=c.get('sender',caller)
+                                if sender!=source_owner: nft_ops.add((iid,source_owner,sender)); nft_operator_pairs.add((iid,source_owner,sender))
+                            if 'approve_nft' in m:
+                                tid=int(m['approve_nft']['token_id']); raw_tid=intv(c.get('source_token_id')); nft_source_tokens[iid][tid]=raw_tid; sender=c.get('sender',caller)
+                                note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,sender,2)
+                                nft_approve_senders.add((iid,tid,sender))
+                            if 'approve_all' in m:
+                                nft_operator_pairs.add((iid,c.get('sender',caller),m['approve_all']['operator']))
+                        if fam=='cw1155-like' and 'send_from' in m:
+                            z=m['send_from']; multi_seed.add((iid,int(z['token_id']),z['from']));
+                            if c.get('sender')!=z['from']: multi_approvals.add((iid,z['from'],c.get('sender')))
+                        if fam=='xen-like': xen_first.setdefault((iid,c.get('sender',caller)), next(iter(m)))
+                    elif c['kind']=='query' and fam in {'cw721-mintable','cw721-drop'} and 'owner_of' in c['msg']:
+                        tid=int(c['msg']['owner_of']['token_id']); nft_source_tokens[iid][tid]=intv(c.get('source_token_id')); note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,tid,'native-s3-seed-owner',1)
+                for prepared_call in calls:
+                    for key in ('sender','from','to'):
+                        value=prepared_call.get(key)
+                        if isinstance(value,str): workload_logical_addresses.add(value)
+                    collect_logical_strings(prepared_call.get('msg'),workload_logical_addresses)
+                scopes={int(c['source_revert_scope_action_id']) for c in calls if c.get('source_revert_scope_action_id') is not None}
+                stats['internal_revert_scopes']+=len(scopes)
+                stats['calls_in_internal_revert_scopes']+=sum(1 for c in calls if c.get('source_revert_scope_action_id') is not None)
+                ob['transactions'].append({'tx_index':tx['tx_index'],'tx_hash':tx['tx_hash'],'source_failed':bool(tx.get('source_failed')),'source_compute_proxy':int(tx.get('gas_used_compute_proxy') or 0),'calls':calls,'skipped_actions':skipped})
+                stats['transactions']+=1; stats['skipped_actions']+=skipped
+            execution_handle.write(json.dumps(ob,separators=(',',':'))+'\n')
+            if block_count % 100 == 0: print(f'prepared execution blocks={block_count} tx={stats["transactions"]}', flush=True)
+        plan_handle.close(); execution_handle.close()
+        execution_work_path=execution_tmp
     drop_mint_validation=validate_drop_mint_translation(drop_mint_sequence,drop_translated_mints)
     initial_state_meta={'mode':ns.initial_state_mode}
     rpc_nft_approvals={}
+    drop_next_token_id_overrides: dict[str,int] = {}
     if ns.initial_state_mode=='rpc':
         if first_block is None: raise RuntimeError('native execution plan has no blocks')
         initial_block=first_block-1
         cache_path=ns.initial_state_cache or (ns.output_dir/'evm-initial-state-cache.json')
-        resolver=HistoricalEthCallCache(ns.rpc_url,initial_block,cache_path)
+        resolver=HistoricalEthCallCache(ns.rpc_url,initial_block,cache_path,min_interval=ns.rpc_min_interval,max_retries=ns.rpc_max_retries,progress_every=ns.rpc_progress_every)
         if not ns.rpc_url and not resolver.has_cached_calls():
             raise RuntimeError('RPC-backed native initial state is required but ETH_RPC_URL is unset and no populated cache exists; rerun with ETH_RPC_URL=<archive-capable Ethereum RPC> or explicitly opt into --initial-state-mode heuristic')
         resolved=resolve_cw721_initial_state(resolver,nft_source_tokens,nft_operator_pairs)
+        unresolved_by_sequential_instance: dict[str,list[int]] = defaultdict(list)
         for iid,tid in resolved.get('unresolved_tokens',[]):
-            nft_tokens.get(iid,{}).pop(int(tid),None)
+            native_tid=int(tid)
+            nft_tokens.get(iid,{}).pop(native_tid,None)
+            if iid in sequential_drop_instances:
+                unresolved_by_sequential_instance[iid].append(native_tid)
+        for iid,tids in sorted(unresolved_by_sequential_instance.items()):
+            # These source IDs are identity-mapped.  The earliest referenced token that did not
+            # exist at the predecessor block is a safe lower bound for the in-window sequential
+            # mint cursor. SeedMint of predecessor tokens can only advance this cursor.
+            drop_next_token_id_overrides[iid]=min(tids)
+        if drop_next_token_id_overrides:
+            preview=', '.join(f'{iid.split(":",1)[-1]}->{tid}' for iid,tid in list(sorted(drop_next_token_id_overrides.items()))[:8])
+            suffix=' ...' if len(drop_next_token_id_overrides)>8 else ''
+            print(
+                f'cw721-drop in-window mint cursor overrides: {len(drop_next_token_id_overrides)} instances [{preview}{suffix}]',
+                flush=True,
+            )
         for iid,rows in resolved['owners'].items():
             for tid,owner in rows.items(): note_nft_initial_owner(nft_tokens,nft_owner_priority,iid,int(tid),owner,100)
         rpc_nft_approvals=resolved['approvals']
@@ -1123,7 +1628,12 @@ def build(argv=None):
 
     # all instance participants need valid addresses; include tx actors only where relevant
     manifest_instances=[]
-    for iid,fam in sorted(instances.items()): manifest_instances.append({'instance_id':iid,'family':fam,'instantiate_msg':instantiate_msg(fam,participant[iid],iid,drop_mint_sequence)})
+    for iid,fam in sorted(instances.items()):
+        manifest_instances.append({
+            'instance_id':iid,
+            'family':fam,
+            'instantiate_msg':instantiate_msg(fam,participant[iid],iid,drop_mint_sequence,drop_next_token_id_overrides),
+        })
     prime=[]
     for iid,owner,spender in sorted(allowances):
         fam=instances[iid]
@@ -1153,10 +1663,19 @@ def build(argv=None):
     for iid,tid,owner in sorted(multi_seed): prime.append(contract_call('execute','cw1155-like',iid,'native-s3-admin',{'mint':{'to':owner,'token_id':tid,'amount':str(SEED)}},{'action_id':None}))
     for iid,owner,op in sorted(multi_approvals): prime.append(contract_call('execute','cw1155-like',iid,owner,{'approve_all':{'operator':op,'approved':True}},{'action_id':None}))
     for (iid,user),first in sorted(xen_first.items()):
-        if first in {'claim_mint_reward','claim_mint_reward_and_share'}: prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None}))
-        elif first=='transfer':
+        if first in {'claim_mint_reward','claim_mint_reward_and_share','claim_mint_reward_and_stake'}:
+            prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None}))
+        elif first in {'transfer','stake'}:
             prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'claim_mint_reward':{}},{'action_id':None}))
-    execution_tmp.replace(out/'execution-plan.jsonl')
+        elif first=='withdraw':
+            prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'claim_mint_reward':{}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'stake':{'amount':'1','term_days':0}},{'action_id':None}))
+    lifecycle_stats=validate_cw721_token_lifecycle(execution_work_path,manifest_instances,prime)
+    initial_state_meta['cw721_token_lifecycle_preflight']=lifecycle_stats
+    final_execution=out/'execution-plan.jsonl'
+    if execution_work_path != final_execution:
+        execution_work_path.replace(final_execution)
+    else:
+        print(f'resume: translated execution stream already finalized at {final_execution}', flush=True)
     first_timestamp=0
     try:
         with (out/'execution-plan.jsonl').open(encoding='utf-8') as _f:

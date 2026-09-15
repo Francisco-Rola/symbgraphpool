@@ -1309,7 +1309,15 @@ func (b *benchApp) executeTxCalls(ctx sdk.Context, block ExecutionBlock, tx Exec
 			continue
 		}
 		if e := b.executePreparedCall(ctx, block, tx, i); e != nil {
-			return fmt.Errorf("block %d tx %d call %d: %w", block.BlockNumber, tx.TxIndex, i, e)
+			family, instance := "", ""
+			if c.Family != nil {
+				family = *c.Family
+			}
+			if c.InstanceID != nil {
+				instance = *c.InstanceID
+			}
+			msg, _ := json.Marshal(c.Msg)
+			return fmt.Errorf("block %d tx %d call %d family=%s instance=%s msg=%s: %w", block.BlockNumber, tx.TxIndex, i, family, instance, string(msg), e)
 		}
 		i++
 	}
@@ -1886,6 +1894,17 @@ func main() {
 		}
 		return
 	}
+	// Fail fast on symbolic bundle/configuration problems before constructing the
+	// expensive Wasmd setup template. The Rust bridge loads the same directory
+	// again per sample, but this cheap header-only preflight keeps metadata or
+	// malformed-profile errors from appearing after contract instantiation and
+	// state priming have already completed.
+	symbolicPreflight, err := loadRustBridgeConfig(*repoRoot, *symbolicDir)
+	if err != nil {
+		panic(fmt.Errorf("symbolic bundle preflight: %w", err))
+	}
+	fmt.Fprintf(os.Stderr, "Wasmd symbolic preflight: documents=%d profiles=%d source=%s\n", len(symbolicPreflight.Documents), len(symbolicPreflight.Profiles), resolveRepoPath(*repoRoot, *symbolicDir))
+
 	var exactTraceIndex *exactEthereumTraceIndex
 	var exactNativeTranslationIndex *exactNativeTranslationIndex
 	if *exactOracle {

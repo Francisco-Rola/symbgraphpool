@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the next S4 conflict-closure review scaffold from the exact dual-gate planner.
+"""Build the next S4 scheduler-fidelity conflict-closure review scaffold.
 
 This tool is deliberately non-executable: it chooses the projected minimum conflict-first
 prefix needed to cross the hard conflict target and emits a separate access-heavy tail for
@@ -184,7 +184,7 @@ def main() -> int:
             "choose an already implemented native family only when the state dependency semantics match",
             "otherwise add a distinct conservative native dependency family before marking reviewed",
             "fill reviewed_native_family, mapping_basis, review_conclusion, and evidence_sources",
-            "rerun exact dual-gate coverage after application; planner gains are projections, not credited coverage",
+            "rerun exact scheduler-fidelity family coverage after application; planner gains are projections, not credited coverage",
         ],
     }
     atomic(ns.output, out)

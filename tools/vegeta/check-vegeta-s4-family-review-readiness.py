@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Check whether an S4 reviewed family-map draft is ready to freeze.
 
-This gate is intentionally earlier than full native-plan readiness. It requires the
-frozen corpus to be internally consistent, all-source storage-access coverage to reach
-the publication threshold, and structural conflict coverage to be high. Conflict-relevant
-access and strict fully-mapped transaction-gas statistics remain visible diagnostics.
+This is the S4 analogue of the S1 scheduler-fidelity family gate.  Family freeze is
+about dependency/contention structure, not general replay completeness: corpus integrity,
+exact source conflict coverage, and block-balanced conflict coverage are hard gates.
+All-source storage-access coverage, conflict-relevant access, state-owner occurrence, and
+strict fully-mapped transaction/gas statistics remain visible diagnostics.  Selector,
+transaction, contention, and implementation readiness are enforced after freeze.
 """
 from __future__ import annotations
 
@@ -33,8 +35,8 @@ def main() -> int:
     ap.add_argument("--min-conflict", type=float, default=0.95)
     ap.add_argument("--min-median-block", type=float, default=0.80)
     ap.add_argument(
-        "--min-storage-access", type=float, default=0.90,
-        help="hard family-freeze threshold for coverage of all concrete source storage-access records",
+        "--storage-access-reference", "--min-storage-access", dest="storage_access_reference", type=float, default=0.90,
+        help="diagnostic reference for all source storage-access coverage (not a family-freeze gate)",
     )
     ap.add_argument(
         "--min-conflict-relevant-access", type=float, default=0.90,
@@ -58,7 +60,6 @@ def main() -> int:
         "median_block_conflict_coverage": float((coverage.get("block_balanced_conflict_coverage") or {}).get("median_coverage") or 0.0),
         "conflict_relevant_access_coverage": float(relevant_storage.get("access_record_coverage") or 0.0),
         "storage_access_coverage": float(storage.get("access_record_coverage") or 0.0),
-        "all_storage_access_coverage_diagnostic": float(storage.get("access_record_coverage") or 0.0),  # compatibility alias
         "state_owner_occurrence_coverage": float(storage.get("state_owner_occurrence_coverage") or 0.0),
         "fully_mapped_source_state_gas_coverage_diagnostic": float(gas.get("fully_selected_family_state_gas_coverage") or 0.0),
         "fully_mapped_source_state_transaction_coverage_diagnostic": float(gas.get("fully_selected_family_state_transaction_coverage") or 0.0),
@@ -66,51 +67,62 @@ def main() -> int:
     }
     gates = {
         "internal_corpus_integrity": metrics["internal_corpus_integrity"],
-        "storage_access_coverage": metrics["storage_access_coverage"] >= ns.min_storage_access,
         "conflict_coverage": metrics["conflict_coverage"] >= ns.min_conflict,
         "median_block_conflict_coverage": metrics["median_block_conflict_coverage"] >= ns.min_median_block,
     }
     ready = all(gates.values())
     report = {
-        "schema_version": 4,
+        "schema_version": 5,
         "dataset": "vegeta-s4",
+        "selected_profile": "scheduler-fidelity-family-freeze",
         "ready_to_freeze_family_map": ready,
         "metrics": metrics,
         "gates": gates,
         "thresholds": {
             "conflict": ns.min_conflict,
             "median_block": ns.min_median_block,
-            "storage_access": ns.min_storage_access,
         },
         "diagnostic_reference_thresholds": {
+            "storage_access": ns.storage_access_reference,
             "conflict_relevant_access": ns.min_conflict_relevant_access,
         },
-        "diagnostic_note": (
-            "All-source storage-access and exact source-conflict coverage are hard family-freeze gates. "
-            "Conflict-relevant access and fully-mapped transaction gas are diagnostics; selector/semantic/transaction readiness remains fail-closed after freeze."
+        "definition": (
+            "S4 family freeze mirrors S1 scheduler-fidelity: dependency/contention structure is gated by corpus integrity, "
+            "reviewed source conflict coverage, and block-balanced conflict coverage. All-source storage volume is not a "
+            "scheduler-fidelity gate and remains a transparent diagnostic."
         ),
-        "next_gate": "after freeze, prepare-native recomputes selector semantic, transaction, contention, and implementation readiness",
+        "non_substitution": (
+            "Passing the family-freeze scheduler-fidelity gate does not imply general Ethereum semantic equivalence or "
+            "all-transaction replay coverage; selector/transaction/contention/implementation readiness is enforced after freeze."
+        ),
+        "next_gate": "after freeze, prepare-native applies the S1-analogous scheduler-fidelity and semantic-replay readiness profiles",
     }
     atomic(ns.output, report)
     lines = [
-        "Vegeta S4 family-review freeze gate",
+        "Vegeta S4 family-review scheduler-fidelity freeze gate",
         "",
         f"ready to freeze: {'PASS' if ready else 'FAIL'}",
         f"internal frozen-corpus integrity: {metrics['internal_corpus_integrity']}",
         f"conflict coverage: {100*metrics['conflict_coverage']:.2f}% (target {100*ns.min_conflict:.2f}%)",
         f"median conflict-bearing block coverage: {100*metrics['median_block_conflict_coverage']:.2f}% (target {100*ns.min_median_block:.2f}%)",
-        f"all storage-access coverage: {100*metrics['storage_access_coverage']:.2f}% (target {100*ns.min_storage_access:.2f}%)",
-        f"conflict-relevant storage-access coverage: {100*metrics['conflict_relevant_access_coverage']:.2f}% (diagnostic; reference {100*ns.min_conflict_relevant_access:.2f}%)",
-        f"state-owner occurrence coverage: {100*metrics['state_owner_occurrence_coverage']:.2f}% (diagnostic)",
-        f"fully mapped source-state gas: {100*metrics['fully_mapped_source_state_gas_coverage_diagnostic']:.2f}% (conservative diagnostic; not a gate)",
-        f"fully mapped source-state transactions: {100*metrics['fully_mapped_source_state_transaction_coverage_diagnostic']:.2f}% (conservative diagnostic; not a gate)",
-        f"profile mappings: {metrics['profile_mappings']}",
+        "",
+        "Diagnostics (reported, not family-freeze gates):",
+        f"  all storage-access coverage: {100*metrics['storage_access_coverage']:.2f}% (reference {100*ns.storage_access_reference:.2f}%)",
+        f"  conflict-relevant storage-access coverage: {100*metrics['conflict_relevant_access_coverage']:.2f}% (reference {100*ns.min_conflict_relevant_access:.2f}%)",
+        f"  state-owner occurrence coverage: {100*metrics['state_owner_occurrence_coverage']:.2f}%",
+        f"  fully mapped source-state gas: {100*metrics['fully_mapped_source_state_gas_coverage_diagnostic']:.2f}% (conservative)",
+        f"  fully mapped source-state transactions: {100*metrics['fully_mapped_source_state_transaction_coverage_diagnostic']:.2f}% (conservative)",
+        f"  profile mappings: {metrics['profile_mappings']}",
+        "",
+        "Interpretation: this is the family-level prerequisite for the S4 contention/scheduler benchmark.",
+        "It does not claim general replay completeness; prepare-native still enforces reviewed selector semantics,",
+        "conflict-participant transaction coverage, and native implementation readiness.",
     ]
     ns.text_output.parent.mkdir(parents=True, exist_ok=True)
     ns.text_output.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     if not ready and not ns.allow_low:
-        raise SystemExit("S4 reviewed family map is below dual publication/freeze gates; continue with families that close the remaining storage-access and conflict deficits")
+        raise SystemExit("S4 reviewed family map is below scheduler-fidelity family-freeze gates; continue conflict-focused review")
     return 0
 
 

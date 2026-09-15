@@ -1,0 +1,906 @@
+{
+  "bootstrap_base_map": "evaluation/vegeta/s1-native-family-map.v2.json",
+  "bootstrap_base_map_sha256": "bc46c511fac76123c7f839418a0cd28a6e36b1c8d32d62d35083b8aa5c97e9d4",
+  "candidate_only": false,
+  "dataset": "vegeta-s4",
+  "expected_native_code_families": 19,
+  "expected_profile_mappings": 57,
+  "freeze_evidence": {
+    "coverage_sha256": "e26a37339d2d2442eaa1185b879c533d9f5d3ce64b4d4abc4074ea6e3c4640ec",
+    "draft_map_sha256": "b71a060cac2b85e7d70a29b1f9c93a56a4ca7d815275168ec1e3696d1352224d",
+    "freeze_readiness_sha256": "2916bc4da08a00f4cb49c555dde13592a68a4ce2e8a018ec71c14d9a8e8983df",
+    "provenance_sha256": "7348dfc7b90b6d34f89e19b4e29ed30f46dea03b29123add7a05ccd28014e6f3"
+  },
+  "methodology_note": "Only identical runtime-code-family mappings already reviewed for the base map are reused automatically. New S4 bytecode families/selectors remain unmapped until explicit review. S4 has no exact SLOAD/SSTORE oracle.",
+  "native_code_families": {
+    "amp-partition-collateral-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "AMP's verified contract exposes ERC20-compatible balances plus partition balances, partition/operator permissions, collateral-manager registration, transfer hooks, and partition strategies. S4 family review therefore does not collapse AMP to cw20-base. The native alias uses one independent per-AMP-owner singleton dependency lock as a conservative family-level conflict abstraction for the reviewed S4 storage surface; it does not claim exact partition keys, balances, hook execution, or EVM state equivalence.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "arbitrum-bridge-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Arbitrum L1 Bridge accumulator/counter/outbox/inbox configuration state. Official Nitro Bridge/IBridge source exposes delayed and sequencer accumulators/counts, allowed inbox/outbox state, active outbox, and bridge execution. The alias models one independent per-bridge-owner singleton dependency for the reviewed S4 bridge-global storage surface; it does not model accumulator contents, ETH escrow, low-level calls, or EVM execution equivalence.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "astroport-pair": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/astroport-pair/src/lib.rs",
+      "semantic_scope": "constant-product AMM pair behavior corresponding to the Uniswap-V2-like family",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/astroport-pair.symbolic.json"
+    },
+    "controlled-cw20": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/controlled-cw20/src/lib.rs",
+      "semantic_scope": "fungible token with pause/blacklist/mint-burn/config style state, used for Tether/FiatToken-like families",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/controlled-cw20.symbolic.json"
+    },
+    "custom-swap-router": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "S4 Banana Gun router storage owner modeled as an independent router instance with a conservative singleton route-execution guard for the observed swap/fallback selector class. This preserves the reviewed conflict-relevant router state class without claiming EVM execution equivalence or Universal-Router application equivalence.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "cw20-base": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
+      "semantic_scope": "standard fungible-token transfer/balance/allowance behavior exercised by S3",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw20-base.symbolic.json"
+    },
+    "cw721-drop": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/cw721-drop/src/lib.rs",
+      "semantic_scope": "reviewed ERC721 ownership/approval plus public, staged, signed, whitelist, SeaDrop, purchase, and sequential mint dependency classes exercised by frozen S1 selectors; proof/signature cryptography excluded while their public-input stage/nonce dependency state is preserved",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/cw721-drop.symbolic.json"
+    },
+    "fee-token-cw20": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/fee-token-cw20/src/lib.rs",
+      "semantic_scope": "fungible token with transfer policy/fee/router state",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/fee-token-cw20.symbolic.json"
+    },
+    "fiat-token-cw20": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/fiat-token-cw20/src/lib.rs",
+      "semantic_scope": "S1 FiatToken/USDC-style balances, allowances, burn, and EIP-2612 permit nonce dependencies; signature verification itself is treated as public-input validation",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/fiat-token-cw20.symbolic.json"
+    },
+    "linea-rollup-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Linea L1 Message Service/LineaRollup global finalization and message-service state. Frozen S4 directly observes selector 0x4165d6dd on the reviewed owner and public explorer evidence identifies those calls as Finalize Blocks. The alias models one independent per-Linea-owner singleton state dependency for that rollup-global mutation class; it does not model proof verification, message Merkle structures, individual block roots, or EVM execution equivalence.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "marketplace-router": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Seaport-style order status/counters and Blur order status/internal execution guard; Universal Router is split into its own reviewed family in S1 v3 semantics; concrete EVM storage keys are not used",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "stargate-cw20": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/stargate-cw20/src/lib.rs",
+      "semantic_scope": "STG-like ERC20 transfer/allowance behavior plus reviewed sendTokens/lzReceive main-endpoint escrow balance dependencies without emulating LayerZero transport; total supply remains unchanged",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/stargate-cw20.symbolic.json"
+    },
+    "starknet-l1-system-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Starknet L1 core proxy/implementation global state for state updates, L1/L2 messaging, governance/operator state, and related protocol-global storage. One independent singleton dependency namespace is used per reviewed storage owner; proof verification, message payloads, state roots, and EVM execution equivalence are out of scope.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "synthetix-system-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Synthetix protocol/token implementation state spanning synth issuance/burn/exchange/settlement and token transfer classes observed in frozen S4. One independent singleton dependency namespace is used per reviewed storage owner; synth accounting, resolver internals, debt ledger semantics, and EVM execution equivalence are out of scope.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "universal-router": {
+      "implementation_status": "implemented-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Uniswap Universal Router execute/callback execution-lock semantics plus reviewed stateless receive(); shares the source-derived router-lock implementation with marketplace-router but uses independent family/state instances",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "v3-pool-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "Observed S4 Uniswap-V3 pool swap class modeled as an independent pool instance with a singleton pool-state dependency lock. This conservatively preserves same-pool cross-transaction dependency/conflict structure without modeling ticks, liquidity math, token settlement, or claiming EVM/Uniswap-V3 execution equivalence.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    },
+    "wrapped-native-token": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/wrapped-native-token/src/lib.rs",
+      "semantic_scope": "wrapped native token deposit/withdraw plus fungible-token behavior",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/wrapped-native-token.symbolic.json"
+    },
+    "xen-like": {
+      "implementation_status": "implemented-source-derived-symbolic",
+      "native_contract_source": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+      "semantic_scope": "rank/mint/stake state machine corresponding to the XENCrypto family; Math delegatecalls are treated as internal helpers rather than a separate state namespace",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/xen-like.symbolic.json"
+    },
+    "zksync-l1-system-lock": {
+      "implementation_alias_of": "marketplace-router",
+      "implementation_status": "implemented-conservative-source-derived-symbolic-alias",
+      "native_contract_source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+      "semantic_scope": "ZKsync Era L1 DiamondProxy/main-chain contract state. Frozen S4 directly observes selector 0xeb672419, independently documented as requestL2Transaction. The alias models one independent per-chain singleton dependency for priority-operation/mailbox/chain-global state touched by the observed request class; it does not model diamond facets, priority queue contents, bridge settlement, proof state, or EVM execution equivalence.",
+      "symbolic_analysis": "benchmarks/symbolic/native-s3/marketplace-router.symbolic.json"
+    }
+  },
+  "observed_source_conflict_coverage": null,
+  "observed_source_conflict_pairs": null,
+  "observed_total_conflict_pairs": null,
+  "profile_mappings": [
+    {
+      "ethereum_contract_identifier": "TetherToken.sol:TetherToken",
+      "ethereum_profile_family": "6d967f98f2f3843065688dc2065248e3686b56fc0b6ddfa82007df016148becb",
+      "mapping_basis": "verified-source-interface-review",
+      "native_code_family": "controlled-cw20",
+      "rank": 1,
+      "s3_conflict_pair_coverage": 0.6781428290379697
+    },
+    {
+      "ethereum_contract_identifier": "UniswapV2Pair.sol:UniswapV2Pair",
+      "ethereum_profile_family": "8b5db55fa9ab3b9527508d4abe0b39eb588bf310270c8e04b3f38214e8ba63b4",
+      "mapping_basis": "verified-source-interface-review",
+      "native_code_family": "astroport-pair",
+      "rank": 2,
+      "s3_conflict_pair_coverage": 0.1239425536100728
+    },
+    {
+      "ethereum_contract_identifier": "WETH9.sol:WETH9",
+      "ethereum_profile_family": "5566bf50796faf93c9b6f6adacd3b32c70bfe16b48ffc59db6cd144cbdc89739",
+      "mapping_basis": "verified-source-interface-review",
+      "native_code_family": "wrapped-native-token",
+      "rank": 3,
+      "s3_conflict_pair_coverage": 0.09708833366122369
+    },
+    {
+      "ethereum_contract_identifier": "FiatTokenProxy.sol:FiatTokenProxy + observed FiatTokenV2_1 delegate target",
+      "ethereum_profile_family": "c1bcd4dc4f30c4dcf6c9fe462abeaf2efefc065dcb4dec74996e471f1ce219b4",
+      "mapping_basis": "verified FiatTokenV2_1 proxy/source; S1-specific native family preserves burn and permit allowance+nonce state without changing frozen S3 controlled-cw20 binary",
+      "native_code_family": "fiat-token-cw20",
+      "rank": 5,
+      "s3_conflict_pair_coverage": 0.04082234900649223
+    },
+    {
+      "ethereum_contract_identifier": "TokenMintERC20Token.sol:TokenMintERC20Token",
+      "ethereum_profile_family": "c120860259b3a050e6f7dca1bb7d337ff57d0c9d7b9604c87e8930bc072bfc7b",
+      "mapping_basis": "verified-source-interface-review",
+      "native_code_family": "cw20-base",
+      "rank": 7,
+      "s3_conflict_pair_coverage": 0.023313004131418454
+    },
+    {
+      "ethereum_contract_identifier": "project:/contracts/XENCrypto.sol:XENCrypto",
+      "ethereum_profile_family": "ed357d169c8acac5245ebb366bce1d610c0ff26ceeaa6f1777d1dd9a3a9266c2",
+      "mapping_basis": "verified source/interface; S3 activity is dominated by claim/rank operations, while the observed Math delegate target is treated as an internal helper",
+      "native_code_family": "xen-like",
+      "rank": 8,
+      "s3_conflict_pair_coverage": 0.01839464882943144
+    },
+    {
+      "ethereum_contract_identifier": "ENJToken.sol:ENJToken",
+      "ethereum_profile_family": "20eb99b3610cc2648b0e918931736af025155d5dc0f37d0023b7418364022720",
+      "mapping_basis": "verified ERC20-like ABI; S3 exercises transfer",
+      "native_code_family": "cw20-base",
+      "rank": 10,
+      "s3_conflict_pair_coverage": 0.015050167224080268
+    },
+    {
+      "ethereum_contract_identifier": "MaskToken.sol:MaskToken",
+      "ethereum_profile_family": "29aa63c9f1f3ff6664753a81efa3f87fef503049c8304e27be0bc727adb5865b",
+      "mapping_basis": "verified ERC20-like ABI; S3 primarily exercises transfer/balanceOf",
+      "native_code_family": "cw20-base",
+      "rank": 11,
+      "s3_conflict_pair_coverage": 0.0065905961046626
+    },
+    {
+      "ethereum_contract_identifier": "Uniswap UniversalRouterV1 canonical mainnet deployment",
+      "ethereum_profile_family": "1473855ce1b22d4c0da2c64c807beedf0698bc44e9e272abaee9b4ed85e3c23d",
+      "exact_ground_truth_extension": true,
+      "mapping_basis": "official Uniswap Universal Router V1 deployment + reviewed execute/callback/receive semantics; split from generic marketplace family so opaque receive/callback frames are classified independently",
+      "native_code_family": "universal-router",
+      "rank": 13,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0xef1c6e67703c7bd7107eed8303fbe6ec2554bf6b"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Blur Exchange Proxy / verified BlurExchange implementation",
+      "ethereum_profile_family": "593f1950bcc35516cc41b8c5e012f883050182a10ab79bbdcb59acc58d11432f",
+      "exact_ground_truth_extension": true,
+      "mapping_basis": "Blur Foundation proxy deployment + verified BlurExchange ABI/source storage classes cancelledOrFilled, nonces, and isInternal; exact-FN owner attribution selected this pre-declared candidate family",
+      "native_code_family": "marketplace-router",
+      "rank": 14,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0x000000000000ad05ccc4f10045630fb830b95127"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Seaport 1.1 canonical deployment",
+      "ethereum_profile_family": "b576eb61c2dfd35404f209ebe93f8371b9d2cb58f915730a4d4aca38368a98c6",
+      "exact_ground_truth_extension": true,
+      "mapping_basis": "official canonical deployment + reviewed Seaport function/interface semantics; exact-FN owner attribution selected this pre-declared candidate family",
+      "native_code_family": "marketplace-router",
+      "rank": 15,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0x00000000006c3852cbef3e08e8df289169ede581"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "S1 reviewed runtime cluster 7aa093a267335e721ee2",
+      "ethereum_profile_family": "7aa093a267335e721ee2a150f933f139f2d3feb9c7758f06070aff00aeca29aa",
+      "mapping_basis": "Seizon proxy implementation; reviewed ERC721 plus multiStageMint selector",
+      "native_code_family": "cw721-drop",
+      "rank": 16,
+      "s1_family_extension": true,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0xa6cd272874ee7c872eb66801eff62784c0b13285"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "S1 reviewed runtime cluster 8124cb21a37a8a0592a6",
+      "ethereum_profile_family": "8124cb21a37a8a0592a60a549f6e579455a9327b813f8076c9369ecbcccce60f",
+      "mapping_basis": "STG token; reviewed ERC20 plus LayerZero sendTokens/lzReceive paths",
+      "native_code_family": "stargate-cw20",
+      "rank": 17,
+      "s1_family_extension": true,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0xaf5191b0de278c7286d6c7cc6ab6bb8a73ba2cd6"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "S1 reviewed runtime cluster 805ce8e887953d4a8d77",
+      "ethereum_profile_family": "805ce8e887953d4a8d77dd00c4f04520c222819d5e226dc49141119b87cf0ad3",
+      "mapping_basis": "shared minimal-proxy ERC721 drop implementation; reviewed mintPublic and standard ERC721 paths; unreviewed custom selectors remain opaque",
+      "native_code_family": "cw721-drop",
+      "rank": 21,
+      "s1_family_extension": true,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0x02eb6029adcb09bdc0bde2e61614be415689eabd",
+        "0x7974e0b19d8ee4daf3fdfecb2420507c198d3dbe",
+        "0x798116c6858dc4be729820d36554c4c427629744"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "S1 reviewed runtime cluster 3d5115b00da3b222d8a0",
+      "ethereum_profile_family": "3d5115b00da3b222d8a0cb921049254c86fbe3d16d0dff7f13262ca23e4c7014",
+      "mapping_basis": "ERC721DropProxy/implementation; reviewed purchase and standard ERC721 paths",
+      "native_code_family": "cw721-drop",
+      "rank": 23,
+      "s1_family_extension": true,
+      "s3_conflict_pair_coverage": null,
+      "storage_owner_scope": [
+        "0x1bbec3ef715cce96b715bc0aa8fef8989f7ad3b2"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Banana Gun custom swap/router family",
+      "ethereum_profile_family": "b554904137f2259dd2578d406fe4bc4c1327c918d1340c1a8f121f7f3262da63",
+      "mapping_basis": "Frozen S4 bytecode/address review identifies the historical Banana Gun router. Its source ABI is unverified, so the native model intentionally uses an independent conservative router-global execution-guard state class for the observed swap/fallback selectors; this is a conflict-preserving semantic abstraction, not an EVM-application-equivalence claim.",
+      "native_code_family": "custom-swap-router",
+      "rank": 24,
+      "s4_family_extension": true,
+      "s4_review_priority": 1,
+      "s4_semantic_notes": "Observed swap/fallback calls are mapped to the conservative route-execution guard. Unknown selectors remain explicit mapped-opaque/background behavior rather than guessed application semantics.",
+      "storage_owner_scope": [
+        "0xdb5889e35e379ef0498aae126fc2cce1fbd23216"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "LINK token family",
+      "ethereum_profile_family": "9792a60e149086e16264936114044e08b07981f87f64293339df5cd659e92a29",
+      "mapping_basis": "Frozen S4 activity for this LINK runtime family is ERC20 transfer-dominated. The reviewed S4 selector scope is represented by cw20-base balance/transfer/allowance state; selectors outside that reviewed scope remain opaque.",
+      "native_code_family": "cw20-base",
+      "rank": 25,
+      "s4_family_extension": true,
+      "s4_review_priority": 2,
+      "s4_semantic_notes": "Reuse only the standard fungible-token dependency classes exercised by frozen S4.",
+      "storage_owner_scope": [
+        "0x514910771af9ca656af840dff83e8264ecf986ca"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "SEEK ERC721-like family",
+      "ethereum_profile_family": "e4774ce981798c23daad3f54c4b86ffc2ca58500d7268e52a4d4e696bf3cd69b",
+      "mapping_basis": "Frozen S4 activity combines standard ERC721 approval/transfer paths with selector 0x3bb1ee11, whose public transaction effects are mint-like. The native translation preserves the ERC721 ownership/approval plus sequential-mint dependency classes; exact EVM mint cardinality/cryptographic validation is outside the S4 claim.",
+      "native_code_family": "cw721-drop",
+      "rank": 26,
+      "s4_family_extension": true,
+      "s4_review_priority": 3,
+      "s4_semantic_notes": "0x3bb1ee11 is translated as one logical mint event per source call to preserve the mint-state dependency class; the workload does not claim exact EVM final-state equivalence.",
+      "storage_owner_scope": [
+        "0xc114f87326c0e07f40e73b6c9fcea54888c2c67f"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "cbETH proxy/token family",
+      "ethereum_profile_family": "76bcd86b160a3cd8740d07c985eedc4c3b044c0fb9123c8f90f49ac17185fba8",
+      "mapping_basis": "Frozen S4 storage-owner and delegate-call review treats cbETH as an upgradeable fungible-token namespace. The native family preserves balances/allowances/supply-style token dependencies across the proxy storage context; unsupported implementation selectors remain explicit opaque actions.",
+      "native_code_family": "fiat-token-cw20",
+      "rank": 27,
+      "s4_family_extension": true,
+      "s4_review_priority": 4,
+      "s4_semantic_notes": "The proxy owner is the native instance namespace; implementation DELEGATECALL frames inherit that storage namespace.",
+      "storage_owner_scope": [
+        "0xbe9895146f7af43049ca1c1ae358b0541ea49704"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "RNDR token family",
+      "ethereum_profile_family": "2bac97e30a3749ba06f5ea2f1e205ad49fe9118caf7d283a1492760dd558b21b",
+      "mapping_basis": "Frozen S4 direct activity is standard fungible-token transfer behavior. cw20-base preserves the reviewed balance/transfer/allowance state classes; unreviewed proxy/implementation selectors remain opaque.",
+      "native_code_family": "cw20-base",
+      "rank": 28,
+      "s4_family_extension": true,
+      "s4_review_priority": 5,
+      "s4_semantic_notes": "No exact EVM storage-layout equivalence is claimed.",
+      "storage_owner_scope": [
+        "0x6de037ef9ad2725eb40118bb1702ebb27e4aeb24"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "MUBI token family",
+      "ethereum_profile_family": "1fc5a4ab49d1d973bcb42d8287dc59cb7579b7e76548fc8d9c94551d3dd07ee5",
+      "mapping_basis": "Frozen S4 activity is approve/balance/transfer-like and is represented by the standard cw20-base balance/allowance dependency classes. Selectors outside the reviewed ERC20-like scope remain opaque.",
+      "native_code_family": "cw20-base",
+      "rank": 29,
+      "s4_family_extension": true,
+      "s4_review_priority": 6,
+      "s4_semantic_notes": "Reuse is scoped to observed fungible-token dependency semantics, not bytecode equivalence.",
+      "storage_owner_scope": [
+        "0x38e382f74dfb84608f3c1f10187f6bef5951de93"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "ERC721 proxy / 81-82-83-84 collection",
+      "ethereum_profile_family": "17afef0441761ab1fe4211750b1198bbf3a4e69ed6e1d927ff4daf6407573996",
+      "mapping_basis": "Public contract/token metadata identifies this storage owner as an ERC721 proxy/token namespace; frozen S4 owner-level traces expose no direct selector at the owner. The family-level mapping reuses cw721-drop only for ERC721 ownership/approval/transfer dependency classes in this owner-scoped namespace. Selector-specific/custom application behavior remains opaque and must pass the later semantic-conflict gate.",
+      "native_code_family": "cw721-drop",
+      "rank": 30,
+      "s4_family_extension": true,
+      "s4_review_priority": 7,
+      "s4_semantic_notes": "Family coverage only; no claim of exact proxy implementation or mint/application equivalence.",
+      "storage_owner_scope": [
+        "0x45c77068a17ac94f56b7fd59dca0d4bd50457216"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "FU STUDIO MEMBERSHIP ERC721A family",
+      "ethereum_profile_family": "33caa6820fde1f8d7de68cb310e876f454e23f45cc820fc6772bff1bb6cfff28",
+      "mapping_basis": "Verified public source identifies FU STUDIO MEMBERSHIP as an ERC721A-style collection with ownership, approval, transfer, and mint state. The S4 family-level alias reuses cw721-drop for those dependency classes; invite/admin/custom mint policy state is not guessed and unsupported selectors remain opaque until selector-semantic validation.",
+      "native_code_family": "cw721-drop",
+      "rank": 31,
+      "s4_family_extension": true,
+      "s4_review_priority": 8,
+      "s4_semantic_notes": "Preserves ERC721 ownership/approval/sequential-mint dependency classes without claiming exact application state equivalence.",
+      "storage_owner_scope": [
+        "0x1c67d8f07d7ef2d637e61ed3fbc3fa9aaf7a6267"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Cartesi Token (CTSI) ERC20 family",
+      "ethereum_profile_family": "5c925cc2dcd38717e4fad3901190a5ceebda33c77b1170548ff7f5f666716b4c",
+      "mapping_basis": "Public verified token metadata identifies the owner as Cartesi Token (CTSI), an ERC20 token. The family-level S4 mapping reuses cw20-base for balance/allowance/transfer dependency classes; selectors outside the reviewed fungible-token scope remain opaque.",
+      "native_code_family": "cw20-base",
+      "rank": 32,
+      "s4_family_extension": true,
+      "s4_review_priority": 9,
+      "s4_semantic_notes": "Family-level ERC20 dependency reuse only; no exact EVM storage-layout claim.",
+      "storage_owner_scope": [
+        "0x491604c0fdf08347dd1fa4ee062a822a5dd06b5d"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "SHIBA INU (SHIB) ERC20 family",
+      "ethereum_profile_family": "5c813da8be193a1a33a7533edc758e3ad29f1fa1730cbf2d8c9fc8a7f31c78f3",
+      "mapping_basis": "Verified public source/token metadata identifies this address as SHIBA INU (SHIB), and frozen S4 direct activity includes ERC20 transfer. The S4 mapping reuses cw20-base balance/allowance/transfer dependency classes; unreviewed token-specific behavior remains opaque.",
+      "native_code_family": "cw20-base",
+      "rank": 33,
+      "s4_family_extension": true,
+      "s4_review_priority": 10,
+      "s4_semantic_notes": "Observed transfer path is standard fungible-token state; no bytecode or final-state equivalence claim.",
+      "storage_owner_scope": [
+        "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "L3E7 Worlds ERC721 proxy family",
+      "ethereum_profile_family": "0e837f348745c0a4224f1f891ad0ae81163233cd31904b543fb15d334e013f3b",
+      "mapping_basis": "Public verified metadata identifies this owner as the L3E7 Worlds ERC721 ERC1967 proxy. The owner-scoped family mapping reuses cw721-drop for ERC721 ownership/approval/transfer dependency classes while proxy implementation/custom selectors remain subject to the later selector-semantic gate.",
+      "native_code_family": "cw721-drop",
+      "rank": 34,
+      "s4_family_extension": true,
+      "s4_review_priority": 11,
+      "s4_semantic_notes": "Proxy storage namespace is preserved; custom game/application state is not inferred from the proxy shell.",
+      "storage_owner_scope": [
+        "0x20577896ea6113ed8c94b2f08f3893bdc08eba22"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "AMP partition/collateral token family",
+      "ethereum_profile_family": "9c3952a6a60eb6294bc00efde1f3cd908d3726074e3528c34fec263e0a4b5a6a",
+      "mapping_basis": "Official AMP documentation and the verified Ethereum source for 0xff2081...95c2 show that AMP is not a plain ERC20: it adds per-holder partitions, partition allowances/operators, collateral-manager registration, ERC1820 transfer hooks, and partition strategies. Because the frozen S4 owner-level review exposes no selector narrow enough to justify a cw20-base subset, map the runtime family to the dedicated amp-partition-collateral-lock alias. The alias is deliberately conservative: one independent owner-scoped singleton dependency preserves every within-owner conflict without claiming exact AMP storage keys or EVM behavior. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p12-amp.",
+      "native_code_family": "amp-partition-collateral-lock",
+      "rank": 35,
+      "s4_family_extension": true,
+      "s4_review_priority": 12,
+      "s4_semantic_notes": "Do not reinterpret this as cw20-base semantic equivalence. The family-level lock is an explicit conservative dependency abstraction; selector-level/native-execution readiness remains separately fail-closed.",
+      "storage_owner_scope": [
+        "0xff20817765cb7f73d4bde2e66e067e58d11095c2"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Linea L1 Message Service / LineaRollup family",
+      "ethereum_profile_family": "e518057ee9772b6d5ad104f0c0cbae96d42e5543dcaaff3b39257089ab5fe699",
+      "mapping_basis": "The exact owner is publicly identified as Linea's L1 Message Service/LineaRollup. Frozen S4 directly observes selector 0x4165d6dd, and public transaction/explorer evidence identifies calls with this selector as Finalize Blocks. Linea's reviewed source describes global rollup/message-service state for block finalization and cross-chain messaging. Map the family to linea-rollup-lock, an independent owner-scoped singleton dependency for the observed global mutation class. This preserves conservative conflicts while making no claim about proof verification, per-block root layout, message Merkle structures, or EVM state equivalence. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p13-linea.",
+      "native_code_family": "linea-rollup-lock",
+      "rank": 36,
+      "s4_family_extension": true,
+      "s4_review_priority": 13,
+      "s4_semantic_notes": "0x4165d6dd is translated only to the conservative global dependency guard; later selector-semantic validation remains authoritative.",
+      "storage_owner_scope": [
+        "0xd19d4b5d358258f05d7b411e21a1460d11b0876f"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "ZKsync Era L1 DiamondProxy/main-chain contract family",
+      "ethereum_profile_family": "b7d07cf451c70118754002caa25c35e6371e3c4e14fee774d0621bb718c32cdd",
+      "mapping_basis": "Official ZKsync documentation identifies 0x324000...0324 as the Era L1 DiamondProxy/main chain contract. Frozen S4 directly observes selector 0xeb672419; official SDK bindings identify it as requestL2Transaction(address,uint256,bytes,uint256,uint256,bytes[],address). The request path mutates chain-global priority-operation/mailbox state across diamond facets, so it is not mapped to a token/router family. zksync-l1-system-lock conservatively serializes that owner-scoped state-touch class without modeling facet routing, queue contents, proof state, or EVM execution equivalence. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p14-zksync.",
+      "native_code_family": "zksync-l1-system-lock",
+      "rank": 37,
+      "s4_family_extension": true,
+      "s4_review_priority": 14,
+      "s4_semantic_notes": "The DiamondProxy storage namespace is the native instance namespace; the observed requestL2Transaction class maps only to the conservative singleton dependency guard.",
+      "storage_owner_scope": [
+        "0x32400084c286cf3e17e7b677ea9583e60a000324"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Arbitrum One L1 Bridge family",
+      "ethereum_profile_family": "c2c49b1400159c76a8b41064333aa784bc108a11a5700d1f49a2c4fdc4a6fd78",
+      "mapping_basis": "The exact owner is publicly identified as the Arbitrum One L1 Bridge. Official Nitro Bridge/IBridge source defines delayed and sequencer message accumulators/counts, allowed inbox/outbox state, active outbox, rollup linkage, and execution state; current explorer activity also shows delayed-message enqueue calls reaching this bridge. Because the frozen owner summary does not expose a selector narrow enough for a more granular alias, map the runtime family to arbitrum-bridge-lock, an independent owner-scoped singleton dependency. This conservatively preserves bridge-global conflict structure without modeling accumulator contents, ETH escrow, low-level call effects, or EVM state equivalence. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p15-arbitrum.",
+      "native_code_family": "arbitrum-bridge-lock",
+      "rank": 38,
+      "s4_family_extension": true,
+      "s4_review_priority": 15,
+      "s4_semantic_notes": "Family-level bridge dependency classification only. Selector-level execution remains fail-closed until separately reviewed.",
+      "storage_owner_scope": [
+        "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Archetype ERC721 minimal-proxy collection family",
+      "ethereum_profile_family": "18c16c15c30c2696c7b126c4f4f0964e02d9020c9a09fad2661e218007530e9e",
+      "mapping_basis": "Frozen S4 groups 31 storage owners under this identical runtime-code family. Public explorer/source review of representative owners 0x0d049a...43a46, 0x12dd66...ae221, and 0xc374a2...e9579c identifies ERC721 collections implemented as minimal proxies to the same Archetype implementation 0x563fbc5181a6ca2970e94152c9969f19d0e37ad3. The implementation exposes ERC721 ownership/approval/transfer plus mint flows. Reuse cw721-drop for those ownership/approval/sequential-mint dependency classes; collection-specific sale, affiliate, withdrawal, metadata, and admin state is not inferred and unsupported selectors remain opaque. Review evidence is checked in as evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json#p16-archetype-erc721.",
+      "native_code_family": "cw721-drop",
+      "rank": 39,
+      "s4_family_extension": true,
+      "s4_review_priority": 16,
+      "s4_semantic_notes": "Family-wide reuse is justified by identical minimal-proxy runtime plus representative exact-owner implementation checks. This is dependency-family reuse, not application state equivalence.",
+      "storage_owner_scope": []
+    },
+    {
+      "ethereum_contract_identifier": "HumanStandardToken ERC20 runtime family",
+      "ethereum_profile_family": "8eee60ac0479c78b7dd93608ce2fe16b6b4eeacf92062605b30f348399208b12",
+      "mapping_basis": "Verified Sourcify metadata for all observed owners points to HumanStandardToken.sol with the standard ERC20 balance/allowance/transfer surface plus approveAndCall/version. Frozen S4 storage activity for this family is exercised through transfer/approve and standard ERC20 call-frame selectors. Reuse cw20-base for the observed fungible balance/allowance/transfer dependency namespace; approveAndCall/version behavior is not inferred.",
+      "native_code_family": "cw20-base",
+      "rank": 40,
+      "s4_family_extension": true,
+      "s4_review_priority": 17,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x2c7f4cca29a4627a7a8e20440abf107acc3e42eb"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "OnBot (ONB) ERC20 token family",
+      "ethereum_profile_family": "5a4315b476318917253bb08310959df1de83fc6f1d0ffff9950fab1bbf5570b6",
+      "mapping_basis": "Public Ethereum token metadata identifies the exact owner as OnBot/ONB and ERC-20. Frozen S4 owner-level selector summary contains no custom selector evidence at this storage owner. Reuse cw20-base only for standard balance/allowance/transfer dependency classes; later selector-semantic validation remains authoritative and unsupported selectors remain opaque.",
+      "native_code_family": "cw20-base",
+      "rank": 41,
+      "s4_family_extension": true,
+      "s4_review_priority": 17,
+      "s4_semantic_notes": "Family-level dependency classification only; no tokenomics or byte-for-byte EVM equivalence claim.",
+      "storage_owner_scope": [
+        "0xb912cfd8cd814988b794b5301785c12c71b51651"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "frozen S4 standard fungible-token selector family",
+      "ethereum_profile_family": "22b5c7e25fc0335550c67fd158ed9739d06aa126ee50126d5d6d1103f0a5c04e",
+      "mapping_basis": "Frozen S4 evidence for the storage owner is limited to standard ERC20 approve (0x095ea7b3) and balanceOf (0x70a08231) selector classes. Reuse cw20-base only for those standard dependency namespaces; this decision does not infer identity or semantics for any unobserved/custom selector, which remains mapped-opaque and is excluded by the later selector-semantic readiness gate unless reviewed separately.",
+      "native_code_family": "cw20-base",
+      "rank": 42,
+      "s4_family_extension": true,
+      "s4_review_priority": 18,
+      "s4_semantic_notes": "Selector-scoped classification from frozen evidence; exact application identity intentionally unresolved.",
+      "storage_owner_scope": [
+        "0x0b3ddf435d7e0a3cad97d85f94633a0e3a69fc01"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "TROENT ERC20 token",
+      "ethereum_profile_family": "691f30987d6abddc240dd299586d6dc10a9a1d078eee0d30ab736f0ad0ff3ef5",
+      "mapping_basis": "Verified source identifies TROENT.sol:TROENT. Frozen S4 directly exercises only transfer(address,uint256), with two balance writes per transfer. Reuse cw20-base for the exercised standard fungible-token dependency namespace.",
+      "native_code_family": "cw20-base",
+      "rank": 43,
+      "s4_family_extension": true,
+      "s4_review_priority": 18,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x42ccea04f823a130ff1a7603d9057b9fe2a25ac5"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "verified capped ERC20 Token",
+      "ethereum_profile_family": "eec09a60088c7bde51d7a34cd1299f7c26455fbe98593bd1b1f5f7c0cf82502d",
+      "mapping_basis": "Verified source identifies contracts/Token.sol:Token with standard ERC20 balance/allowance/transfer functions and cap metadata. Frozen S4 directly exercises transfer and approve with standard balanceOf/transferFrom call frames. Reuse cw20-base for those exercised fungible dependencies; cap administration is outside the exercised selector surface.",
+      "native_code_family": "cw20-base",
+      "rank": 44,
+      "s4_family_extension": true,
+      "s4_review_priority": 19,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x7da2641000cbb407c329310c461b2cb9c70c3046"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Uniswap V3 MUBI/WETH pool",
+      "ethereum_profile_family": "39fc30b247bd5f4ffd99adffc0b8cb1d9775248075475088b054243f08a4a7b4",
+      "mapping_basis": "Etherscan labels the exact address as the Uniswap V3 MUBI/WETH pool, and frozen S4 call-frame evidence is dominated by selector 0x128acb08 (Uniswap-V3 swap). The native alias models an independent per-pool singleton state dependency for this observed swap class. It intentionally does not model ticks/liquidity math or claim Uniswap-V3/EVM execution equivalence.",
+      "native_code_family": "v3-pool-lock",
+      "rank": 45,
+      "s4_family_extension": true,
+      "s4_review_priority": 19,
+      "s4_semantic_notes": "Conflict-preserving pool-global abstraction for the observed swap class; selector-semantic coverage remains separately gated.",
+      "storage_owner_scope": [
+        "0x844eb5c280f38c7462316aad3f338ef9bda62668"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Seaport marketplace settlement family",
+      "ethereum_profile_family": "4a60fba4eb9357db13a46f6da61074c58521f4869427acf1435b9d0e9d06b4d6",
+      "mapping_basis": "Verified source identifies contracts/Seaport.sol:Seaport at the exact storage owner. Frozen S4 exercises Seaport order fulfillment/cancellation/status/counter selector classes and 44k storage accesses. The checked-in marketplace-router family was created for Seaport/marketplace order-registration, validation, settlement, cancellation, counter, and route dependencies, so reuse it without claiming byte-for-byte state equivalence.",
+      "native_code_family": "marketplace-router",
+      "rank": 46,
+      "s4_family_extension": true,
+      "s4_review_priority": 20,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x00000000000000adc04c56bf30ac9d3c0aaf14dc"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "ELONKID fungible token family",
+      "ethereum_profile_family": "910f88715b76121546c5e89ea4527598577f116b6304aa2c7cd3839e402e2f05",
+      "mapping_basis": "Public token metadata identifies the exact address as ELONKID and reports buy/sell-tax behavior; frozen S4 call-frame evidence at the owner is balanceOf. Reuse fee-token-cw20 as the conservative fungible-token dependency namespace; unreviewed custom/admin selectors remain opaque and do not inherit semantics automatically.",
+      "native_code_family": "fee-token-cw20",
+      "rank": 47,
+      "s4_family_extension": true,
+      "s4_review_priority": 20,
+      "s4_semantic_notes": "Conservative fee-token family classification; no claim about exact tax rates or administrative logic.",
+      "storage_owner_scope": [
+        "0x9009bf358b29ec7091e6d9ade917a680df9c35f4"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "SPRINGFIELD fee/limit ERC20 token",
+      "ethereum_profile_family": "17dae0a0210e8d61d09959b96290901cbb5e4e59ab74749b9d5dcd554316ed9e",
+      "mapping_basis": "Verified source identifies SPRINGFIELD.sol:SPRINGFIELD and exposes tax-swap thresholds, max transaction/wallet state, bot flags, trading enablement, and standard ERC20 transfers. Frozen S4 exercises transfer/approve plus standard token call frames. Reuse fee-token-cw20 as the conservative balance/allowance plus shared transfer-policy dependency abstraction.",
+      "native_code_family": "fee-token-cw20",
+      "rank": 48,
+      "s4_family_extension": true,
+      "s4_review_priority": 21,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x1e984e2220a06a1845d3c93aa562bc84e10ba948"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Pepe ERC20 token family",
+      "ethereum_profile_family": "17a403ff0f06536c2f4ca216b03a512cbfdb6a3b9db607dcc53b65a5bf808b0a",
+      "mapping_basis": "Public token metadata identifies the exact address as Pepe/PEPE and frozen S4 call-frame evidence at this owner is standard balanceOf. Reuse cw20-base for standard fungible balance/allowance/transfer dependency classes only; custom selectors, if any, remain opaque and separately gated.",
+      "native_code_family": "cw20-base",
+      "rank": 49,
+      "s4_family_extension": true,
+      "s4_review_priority": 21,
+      "s4_semantic_notes": "Standard token namespace only; no tokenomics equivalence claim.",
+      "storage_owner_scope": [
+        "0x224da25c58574b852876a1c4e289be9eb7345322"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "AirTor fee/limit ERC20 token",
+      "ethereum_profile_family": "5539edde619c40b46095e6bef16569aa67f818a1a4bd4a38db190abc1087c053",
+      "mapping_basis": "Verified source identifies AirTor.sol:AirTor and exposes buy/sell fee buckets, treasury/operations/liquidity accounting, bot/early-buy state, max transaction/wallet limits, router/pair configuration, and ERC20 balances/allowances. Frozen S4 heavily exercises transfer/approve/transferFrom. Reuse fee-token-cw20 for the conservative shared-policy plus fungible balance/allowance dependency surface; exact tokenomics are not claimed.",
+      "native_code_family": "fee-token-cw20",
+      "rank": 50,
+      "s4_family_extension": true,
+      "s4_review_priority": 22,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x0f7b3f5a8fed821c5eb60049538a548db2d479ce"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "ACCEL (ACC) fee/limit ERC20 family",
+      "ethereum_profile_family": "ba7e918a2288ec52d2024fba5054224d962033ea64b880555cea18c0b2a3a562",
+      "mapping_basis": "Verified public source for the exact ACCEL address exposes ERC20 transfer/balance/allowance state plus tax/max-transaction/max-wallet policy. Frozen S4 evidence includes standard balanceOf calls. Reuse fee-token-cw20 as the closest existing dependency abstraction for fungible balances/allowances plus shared policy state; exact tax/limit logic is not claimed.",
+      "native_code_family": "fee-token-cw20",
+      "rank": 51,
+      "s4_family_extension": true,
+      "s4_review_priority": 22,
+      "s4_semantic_notes": "Dependency-family reuse only; exact ACCEL policy values and EVM control flow are outside scope.",
+      "storage_owner_scope": [
+        "0x4981816b0c2eef52473b708f914242a5e84a58a5"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Entropy role-controlled ERC20",
+      "ethereum_profile_family": "d87e25afc70f513a1c8807697b1a575142ae5761ddedc34545a75ef7250ca679",
+      "mapping_basis": "Verified source identifies contracts/erc20/EntropyErc20.sol:EntropyErc20 with role-controlled minting, burn, bridge configuration, and ERC20 balances/allowances. Frozen S4 exercises transfer and one mint(address,uint256) call frame. Reuse controlled-cw20 because it models fungible balances/allowances plus privileged mint/control state; transferAndCall/bridge-specific behavior remains outside the reviewed selector scope.",
+      "native_code_family": "controlled-cw20",
+      "rank": 52,
+      "s4_family_extension": true,
+      "s4_review_priority": 23,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x675ababd3a210566a5e213547523b740be80041a"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Live by X (LIVE) fungible token family",
+      "ethereum_profile_family": "a6bafdea07747a30664c475376d5ad1132ed654df2e1bf7f8a25fe53cef32cb1",
+      "mapping_basis": "Public token metadata identifies the exact address as Live by X/LIVE and frozen S4 call-frame evidence at this owner is standard balanceOf. Reuse cw20-base for the observed standard fungible dependency namespace; unobserved/custom selector behavior remains opaque and separately gated.",
+      "native_code_family": "cw20-base",
+      "rank": 53,
+      "s4_family_extension": true,
+      "s4_review_priority": 23,
+      "s4_semantic_notes": "Observed-selector/family-level mapping only; no claim about unobserved tokenomics.",
+      "storage_owner_scope": [
+        "0x6ad252cb62f2c1fd589e37f6c07abf0cf3b81cd9"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "LON permit/mint ERC20 token",
+      "ethereum_profile_family": "9e37ccc74af0aebc44759afd944123dfcd9dbc9c420093f252b85d1c6b7a023f",
+      "mapping_basis": "Verified source identifies contracts/implements/Lon.sol:Lon with ERC20 balances/allowances, mint/burn, EIP-2612 permit nonces/domain state, and ownership/minter controls. Frozen S4 exercises transfer/approve/transferFrom/balance and a permit selector. Reuse fiat-token-cw20 because it already models controlled fungible state plus permit nonce/allowance dependencies.",
+      "native_code_family": "fiat-token-cw20",
+      "rank": 54,
+      "s4_family_extension": true,
+      "s4_review_priority": 24,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x0000000000095413afc295d19edeb1ad7b71c952"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Dogecoin On The Moon (MOONDOGE) fee/limit ERC20 family",
+      "ethereum_profile_family": "fe242a638f820dcb8a5ae15c13b2fea01efdb057a4c98b625cf1e5b1654c039d",
+      "mapping_basis": "Verified public source for the exact MOONDOGE address exposes ERC20 balance/allowance/transfer plus trading-limit/bot/tax policy state; frozen S4 evidence includes balanceOf calls. Reuse fee-token-cw20 as the conservative balance/allowance plus shared-policy dependency abstraction, without claiming exact tax or anti-bot semantics.",
+      "native_code_family": "fee-token-cw20",
+      "rank": 55,
+      "s4_family_extension": true,
+      "s4_review_priority": 24,
+      "s4_semantic_notes": "Conservative policy-state abstraction; custom/admin selectors remain opaque unless separately reviewed.",
+      "storage_owner_scope": [
+        "0xda169ce4c000ec32d13fd78b504940c605645c43"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Spacecraft ERC20 token family",
+      "ethereum_profile_family": "4de4849ca7a53ec6085061cf396d75c10f94ff6fdc21503694ec588f9acae905",
+      "mapping_basis": "Public Ethereum token metadata identifies the exact address as Spacecraft and classifies it as ERC-20. Reuse cw20-base only for standard fungible dependency classes; absent owner-level selector evidence means custom behavior is not inferred and remains mapped-opaque at the later semantic gate.",
+      "native_code_family": "cw20-base",
+      "rank": 56,
+      "s4_family_extension": true,
+      "s4_review_priority": 25,
+      "s4_semantic_notes": "Family-level token classification; exact application/tokenomics equivalence is not claimed.",
+      "storage_owner_scope": [
+        "0xc8d2f14c33064c810efa29ee7648ccca0cd1f772"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "VRA controlled/pausable ERC20-777 style token",
+      "ethereum_profile_family": "333fe18b561619d120d3f984f328c4ca026e608c9c6138e6eab4cea53581ebc9",
+      "mapping_basis": "Verified source identifies VraToken.sol:VraToken with role-based minting, pause/blocklist state, operators, and ERC20/ERC777-style transfer paths. Frozen S4 exercises standard token selectors plus several custom operator/control selectors. Reuse controlled-cw20 for the reviewed fungible balance/allowance plus global control/block state at family level; unsupported ERC777 operator selector semantics remain subject to later selector/native readiness rather than being claimed equivalent.",
+      "native_code_family": "controlled-cw20",
+      "rank": 57,
+      "s4_family_extension": true,
+      "s4_review_priority": 25,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0xf411903cbc70a74d22900a5de66a2dda66507255"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "BetIT ERC20 token family",
+      "ethereum_profile_family": "9771b5a2b4e1aa02727b5281f1afb2aa1f5c224ff9dfefc85d6d7e2d545f7eae",
+      "mapping_basis": "Verified public source for the exact BetIT address includes the standard IERC20 balance/transfer/allowance interface. Reuse cw20-base for those standard dependency classes; any application-specific/admin functions remain opaque and must not inherit token semantics implicitly.",
+      "native_code_family": "cw20-base",
+      "rank": 58,
+      "s4_family_extension": true,
+      "s4_review_priority": 26,
+      "s4_semantic_notes": "Standard IERC20 dependency mapping only.",
+      "storage_owner_scope": [
+        "0xa3c519683010d59fa54a4a6c4cac0f55cb20bb3f"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "standard fungible selector-only family",
+      "ethereum_profile_family": "881d0161885a68df597c6831fa3b59c25e1543251c82252dab963eb612b98fe5",
+      "mapping_basis": "Verified source was unavailable, but the complete frozen S4 evidence for the owner is limited to ERC20 transfer/approve directly and transfer/transferFrom/balanceOf/allowance call frames, with no delegate target and no custom selector. Reuse cw20-base only for this observed standard fungible dependency namespace.",
+      "native_code_family": "cw20-base",
+      "rank": 59,
+      "s4_family_extension": true,
+      "s4_review_priority": 26,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0xd8912c10681d8b21fd3742244f44658dba12264e"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "MATIC pausable ERC20 token",
+      "ethereum_profile_family": "676e7a8f6295c36d83db31018f21dcaeeebaaef2da1198a3308e7c0435f2519a",
+      "mapping_basis": "Verified source identifies MaticToken.sol:MaticToken with standard ERC20 state plus pauser role and pause/unpause control. Frozen S4 exercises transfer/approve/transferFrom and increaseAllowance. Reuse controlled-cw20 for balances/allowances plus shared pause/control dependencies.",
+      "native_code_family": "controlled-cw20",
+      "rank": 60,
+      "s4_family_extension": true,
+      "s4_review_priority": 27,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x7d1afa7b718fb893db30a3abc0cfc608aacfebb0"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Synthetix protocol/token system family",
+      "ethereum_profile_family": "057f5a9212d017d3a499e9ac4ddae634f8e484c9327b7f8266874c1ffd9df7e0",
+      "mapping_basis": "Verified source identifies Synthetix.sol:Synthetix and the frozen call frames include synth issue/burn/exchange/settlement and token transfer classes, with repeated access to a very small global storage surface. This is materially broader than a generic ERC20. Use a distinct per-storage-owner conservative singleton dependency lock for the reviewed Synthetix implementation state; no synth accounting or EVM execution equivalence is claimed.",
+      "native_code_family": "synthetix-system-lock",
+      "rank": 61,
+      "s4_family_extension": true,
+      "s4_review_priority": 28,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "BlurPool implementation behind reviewed ERC1967Proxy storage owner",
+      "ethereum_profile_family": "3b52a3f0be0f75537b6dadc9378a8db02e6eedee15b36f7374f510de285a3fed",
+      "mapping_basis": "The blocker runtime family is generic ERC1967Proxy bytecode shared by multiple applications, so it must not be mapped by proxy runtime hash. Frozen callTracer evidence for storage owner 0x0000000000a39bb272e79075ade125fd351887ac delegates to implementation family 3b52a3f0... identified by verified source as contracts/pool/BlurPool.sol:BlurPool. BlurPool exposes deposit, withdraw, balanceOf, totalSupply, and transferFrom. Map that proxy storage owner explicitly to the implementation profile and reuse wrapped-native-token for the wrapped/deposit-withdraw fungible dependency surface.",
+      "native_code_family": "wrapped-native-token",
+      "rank": 62,
+      "s4_family_extension": true,
+      "s4_review_priority": 29,
+      "s4_semantic_notes": "Explicit owner scope prevents the same generic proxy runtime family from conflating BlurPool with BlurExchange.",
+      "storage_owner_scope": [
+        "0x0000000000a39bb272e79075ade125fd351887ac"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "The Sandbox SAND controlled/super-operator ERC20",
+      "ethereum_profile_family": "f3fd137f4a5a3d15084d199b2a1c0e93feb03da2d91baa02ac4d0d489239b163",
+      "mapping_basis": "Verified source identifies src/Sand.sol:Sand with ERC20 balances/allowances plus admin, super-operator, execution-operator, approve-and-call, paid-call, and burn extensions. Frozen S4 exercises transfer/approve/transferFrom/balance/allowance selectors. Reuse controlled-cw20 as the closest existing fungible plus shared-control dependency abstraction; super-operator/call-extension execution semantics are not claimed equivalent.",
+      "native_code_family": "controlled-cw20",
+      "rank": 63,
+      "s4_family_extension": true,
+      "s4_review_priority": 31,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x3845badade8e6dff049820680d1f14bd3903a5d0"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "Starknet L1 core implementation behind reviewed Proxy storage owner",
+      "ethereum_profile_family": "044d6332da1b79172c779e718e485de3fba43e367eb494fa1b456678ac0e6eec",
+      "mapping_basis": "The storage owner is verified Proxy.sol:Proxy, while every observed delegate frame resolves to implementation 0x16938e4b59297060484fa56a12594d8d6f4177e8, verified as Starknet.sol:Starknet. Frozen calls exercise implementation selectors across state updates and L1/L2 message-state paths. Map the proxy storage owner explicitly to the verified implementation profile and use a distinct per-owner singleton dependency lock for Starknet core state; proof/message contents and EVM execution are not modeled.",
+      "native_code_family": "starknet-l1-system-lock",
+      "rank": 64,
+      "s4_family_extension": true,
+      "s4_review_priority": 32,
+      "s4_semantic_notes": "Mapping is implementation-aware; the generic Proxy runtime hash itself is not assigned Starknet semantics.",
+      "storage_owner_scope": [
+        "0xc662c410c0ecf747543f5ba90660f6abebd9c8c4"
+      ]
+    },
+    {
+      "ethereum_contract_identifier": "GROK fee/limit ERC20 token",
+      "ethereum_profile_family": "a98942a59ad55662b0e53997e985d47d5e72498bb4cc532930d32a87e8bddc34",
+      "mapping_basis": "Verified source identifies GROK.sol:GROK. The verified ABI exposes max-tax-swap, max-transaction, max-wallet, tax-swap-threshold, bot-list, trading-open, limit-removal, ownership, and standard ERC20 balance/allowance/transfer functions. Frozen S4 directly exercises approve/transfer and standard balanceOf/transferFrom/allowance call frames with no delegate targets. Reuse fee-token-cw20 as the conservative fungible balance/allowance plus shared transfer-policy dependency abstraction; exact tax rates, swap execution, bot policy, and EVM execution equivalence are not claimed.",
+      "native_code_family": "fee-token-cw20",
+      "rank": 65,
+      "s4_family_extension": true,
+      "s4_review_priority": 33,
+      "s4_semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed.",
+      "storage_owner_scope": [
+        "0x8390a1da07e376ef7add4be859ba74fb83aa02d5"
+      ]
+    }
+  ],
+  "review_status": "HUMAN REVIEW ATTESTED; structural conflict, median-block, and corpus-integrity scheduler-fidelity family-freeze gates passed. All-storage, conflict-relevant access, state-owner, and gas metrics remain diagnostics; full selector/semantic/transaction/implementation gates are still required by prepare-native.",
+  "s4_fifth_batch_native_extension": "evaluation/vegeta/s4-fifth-batch-native-family-extension.v1.json",
+  "s4_fifth_batch_review_evidence": "evaluation/vegeta/s4-fifth-batch-review-evidence.v1.json",
+  "s4_fifth_batch_review_evidence_sha256": "ba15182ab4d0ffbac20668d07a37bc926346757f9ef143f3ba72a86d70a9a064",
+  "s4_first_batch_native_extension": "evaluation/vegeta/s4-first-batch-native-family-extension.v1.json",
+  "s4_fourth_batch_native_extension": "evaluation/vegeta/s4-fourth-batch-native-family-extension.v1.json",
+  "s4_fourth_batch_review_evidence": "evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json",
+  "s4_fourth_batch_review_evidence_sha256": "fcb702098ff925bc66676ddfb2ca624f74fd5ca40bd14ee33ee83da6b04d758e",
+  "s4_pending_seed_runtime_families": [
+    "d124079c81bccc739fb75764c300034a3ea8da46a1fea0b8a497e32e381cfdcf"
+  ],
+  "s4_review_decisions_source": "benchmarks/corpora/vegeta-ethereum/s4/native-characterization/s4-review-decisions.draft.json",
+  "s4_reviewed_runtime_families": [
+    "b554904137f2259dd2578d406fe4bc4c1327c918d1340c1a8f121f7f3262da63",
+    "9792a60e149086e16264936114044e08b07981f87f64293339df5cd659e92a29",
+    "e4774ce981798c23daad3f54c4b86ffc2ca58500d7268e52a4d4e696bf3cd69b",
+    "76bcd86b160a3cd8740d07c985eedc4c3b044c0fb9123c8f90f49ac17185fba8",
+    "2bac97e30a3749ba06f5ea2f1e205ad49fe9118caf7d283a1492760dd558b21b",
+    "1fc5a4ab49d1d973bcb42d8287dc59cb7579b7e76548fc8d9c94551d3dd07ee5",
+    "17afef0441761ab1fe4211750b1198bbf3a4e69ed6e1d927ff4daf6407573996",
+    "33caa6820fde1f8d7de68cb310e876f454e23f45cc820fc6772bff1bb6cfff28",
+    "5c925cc2dcd38717e4fad3901190a5ceebda33c77b1170548ff7f5f666716b4c",
+    "5c813da8be193a1a33a7533edc758e3ad29f1fa1730cbf2d8c9fc8a7f31c78f3",
+    "0e837f348745c0a4224f1f891ad0ae81163233cd31904b543fb15d334e013f3b",
+    "9c3952a6a60eb6294bc00efde1f3cd908d3726074e3528c34fec263e0a4b5a6a",
+    "e518057ee9772b6d5ad104f0c0cbae96d42e5543dcaaff3b39257089ab5fe699",
+    "b7d07cf451c70118754002caa25c35e6371e3c4e14fee774d0621bb718c32cdd",
+    "c2c49b1400159c76a8b41064333aa784bc108a11a5700d1f49a2c4fdc4a6fd78",
+    "18c16c15c30c2696c7b126c4f4f0964e02d9020c9a09fad2661e218007530e9e",
+    "8eee60ac0479c78b7dd93608ce2fe16b6b4eeacf92062605b30f348399208b12",
+    "5a4315b476318917253bb08310959df1de83fc6f1d0ffff9950fab1bbf5570b6",
+    "22b5c7e25fc0335550c67fd158ed9739d06aa126ee50126d5d6d1103f0a5c04e",
+    "691f30987d6abddc240dd299586d6dc10a9a1d078eee0d30ab736f0ad0ff3ef5",
+    "eec09a60088c7bde51d7a34cd1299f7c26455fbe98593bd1b1f5f7c0cf82502d",
+    "39fc30b247bd5f4ffd99adffc0b8cb1d9775248075475088b054243f08a4a7b4",
+    "4a60fba4eb9357db13a46f6da61074c58521f4869427acf1435b9d0e9d06b4d6",
+    "910f88715b76121546c5e89ea4527598577f116b6304aa2c7cd3839e402e2f05",
+    "17dae0a0210e8d61d09959b96290901cbb5e4e59ab74749b9d5dcd554316ed9e",
+    "17a403ff0f06536c2f4ca216b03a512cbfdb6a3b9db607dcc53b65a5bf808b0a",
+    "5539edde619c40b46095e6bef16569aa67f818a1a4bd4a38db190abc1087c053",
+    "ba7e918a2288ec52d2024fba5054224d962033ea64b880555cea18c0b2a3a562",
+    "d87e25afc70f513a1c8807697b1a575142ae5761ddedc34545a75ef7250ca679",
+    "a6bafdea07747a30664c475376d5ad1132ed654df2e1bf7f8a25fe53cef32cb1",
+    "9e37ccc74af0aebc44759afd944123dfcd9dbc9c420093f252b85d1c6b7a023f",
+    "fe242a638f820dcb8a5ae15c13b2fea01efdb057a4c98b625cf1e5b1654c039d",
+    "4de4849ca7a53ec6085061cf396d75c10f94ff6fdc21503694ec588f9acae905",
+    "333fe18b561619d120d3f984f328c4ca026e608c9c6138e6eab4cea53581ebc9",
+    "9771b5a2b4e1aa02727b5281f1afb2aa1f5c224ff9dfefc85d6d7e2d545f7eae",
+    "881d0161885a68df597c6831fa3b59c25e1543251c82252dab963eb612b98fe5",
+    "676e7a8f6295c36d83db31018f21dcaeeebaaef2da1198a3308e7c0435f2519a",
+    "057f5a9212d017d3a499e9ac4ddae634f8e484c9327b7f8266874c1ffd9df7e0",
+    "3b52a3f0be0f75537b6dadc9378a8db02e6eedee15b36f7374f510de285a3fed",
+    "f3fd137f4a5a3d15084d199b2a1c0e93feb03da2d91baa02ac4d0d489239b163",
+    "044d6332da1b79172c779e718e485de3fba43e367eb494fa1b456678ac0e6eec",
+    "a98942a59ad55662b0e53997e985d47d5e72498bb4cc532930d32a87e8bddc34"
+  ],
+  "s4_third_batch_native_extension": "evaluation/vegeta/s4-third-batch-native-family-extension.v1.json",
+  "schema_version": "1-s4-bootstrap-reviewed-runtime-families",
+  "selected_profile_families": 57,
+  "status": "frozen-reviewed-s4-family-map-pending-native-plan-semantic-readiness",
+  "target_conflict_coverage": 0.95,
+  "translation_rules": [
+    "Every source transaction remains in the same block and transaction position.",
+    "Identical runtime-code-family mappings may reuse previously reviewed native semantics, but S4 selector coverage is recomputed independently.",
+    "Unsupported/unreviewed calls remain explicit background fallback or mapped-opaque actions; they are never silently approximated.",
+    "Concrete source storage accesses are offline coverage evidence only and are never embedded in the native execution plan or exposed to prediction.",
+    "S4 has no exact SLOAD/SSTORE oracle; exact-access headroom claims remain restricted to S3."
+  ]
+}

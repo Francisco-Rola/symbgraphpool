@@ -253,9 +253,21 @@ S4_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
         "0xdd62ed3e": ("query::allowance", [("owner", "address"), ("spender", "address")]),
         "0x18160ddd": ("query::total_supply", []),
         "0x313ce567": ("query::decimals", []),
+        # Source-reviewed FiatToken supply mutations; the native adapter already preserves
+        # recipient/caller balance and total-supply dependency classes.
+        "0x40c10f19": ("execute::mint", [("recipient", "address"), ("amount", "uint256")]),
+        "0x42966c68": ("execute::burn", [("amount", "uint256")]),
     },
     "cw721-drop": {
         "0x3bb1ee11": ("execute::mint_drop_one", []),
+    },
+    "xen-like": {
+        # XEN verified ABI: reviewed mint/stake lifecycle selectors. The native XEN adapter
+        # implements the same logical global/user-mint/user-stake dependency classes.
+        "0x52c7f8dc": ("execute::claim_mint_reward", []),
+        "0x5bccb4c4": ("execute::claim_mint_reward_and_stake", [("pct", "uint256"), ("term", "uint256")]),
+        "0x7b0472f0": ("execute::stake", [("amount", "uint256"), ("term", "uint256")]),
+        "0x3ccfd60b": ("execute::withdraw", []),
     },
     "custom-swap-router": {
         "0x0162e2d0": ("execute::execute_route", []),
@@ -288,6 +300,180 @@ S4_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]
         # coverage is reviewed, while selector-level execution remains fail-closed.
     },
 }
+
+# S4 owner-scoped selector reviews. These selectors are deliberately not family-wide: S4's
+# cw721-drop family aliases several unrelated ERC721 implementations, and a 4-byte selector alone
+# is not evidence that every collection shares the same mint policy/state layout.
+#
+# 0x45c770... is the 81-82-83-84 ERC721 proxy. Its reviewed Collection implementation exposes
+# mint(bytes16 collectionId,address user,uint16 num,uint32 nonce,bytes signature), selector
+# 0xd2e8281f. collectionId/nonce/signature feed the external Alba verifier; the owner-local Collection
+# state effect is represented only by the recipient/quantity mint dependency classes.
+#
+# 0x1c67d8... (FU STUDIO MEMBERSHIP) and 0xc374a2... (Project AEON representative) are
+# source-reviewed Archetype ERC721 collections. Archetype v0.3.x mint(Auth,uint256,address,bytes)
+# (0x4a21a2df) mints to msg.sender and accounts per-wallet/per-invite-key state. The nested Auth key
+# is recovered from public calldata by the executable adapter; Merkle/signature verification itself
+# is intentionally outside the scheduler dependency model.
+S4_OWNER_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
+    "0x45c77068a17ac94f56b7fd59dca0d4bd50457216": {
+        "0xd2e8281f": (
+            "execute::collection_mint_drop",
+            [
+                ("collection_id", "bytes32"),
+                ("recipient", "address"),
+                ("quantity", "uint256"),
+                ("nonce", "uint256"),
+                ("signature", "bytes"),
+            ],
+        ),
+    },
+    "0x1c67d8f07d7ef2d637e61ed3fbc3fa9aaf7a6267": {
+        "0x4a21a2df": (
+            "execute::archetype_mint_drop",
+            [
+                ("auth_offset", "uint256"),
+                ("quantity", "uint256"),
+                ("affiliate", "address"),
+                ("signature", "bytes"),
+            ],
+        ),
+    },
+    "0xc374a204334d4edd4c6a62f0867c752d65e9579c": {
+        "0x4a21a2df": (
+            "execute::archetype_mint_drop",
+            [
+                ("auth_offset", "uint256"),
+                ("quantity", "uint256"),
+                ("affiliate", "address"),
+                ("signature", "bytes"),
+            ],
+        ),
+    },
+    # Same runtime-code family as the source-reviewed Project AEON Archetype owner above.
+    "0x5a7c3aedaf077accd041799f01264dcacb17eea2": {
+        "0x4a21a2df": (
+            "execute::archetype_mint_drop",
+            [("auth_offset", "uint256"), ("quantity", "uint256"), ("affiliate", "address"), ("signature", "bytes")],
+        ),
+    },
+    # L3E7 Worlds is an owner-scoped ERC721 proxy. Frozen calls decode as
+    # whitelistMint(uint256,bytes32[]); preserve caller/quantity plus a deterministic
+    # proof-derived whitelist dependency rather than claiming Merkle verification equivalence.
+    "0x20577896ea6113ed8c94b2f08f3893bdc08eba22": {
+        "0xd2cab056": ("execute::whitelist_mint_drop", [("quantity", "uint256")]),
+    },
+    # Arbitrum One Bridge state-mutating entrypoints. Both feed the already-reviewed
+    # per-bridge singleton dependency abstraction; delayedMessageCount() stays read/opaque.
+    "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a": {
+        "0x7a88b107": ("execute::execute_route", []),
+        "0x86598a56": ("execute::execute_route", []),
+    },
+    # Arbitrum SequencerInbox batch submission mutates inbox/bridge sequencing state.
+    "0x1c479675ad559dc151f6ec7ed3fbf8cee79582b6": {
+        "0x8f111f3c": ("execute::execute_route", []),
+    },
+    # Banana Gun's standard Uniswap-V3 callback is source/ABI-identifiable; keep the
+    # less certain 0x244a7353 selector opaque.
+    "0xdb5889e35e379ef0498aae126fc2cce1fbd23216": {
+        "0xfa461e33": ("execute::v3_swap_callback", []),
+    },
+    # Legacy Synthetix implementation: proxy bookkeeping and transfer both mutate the
+    # reviewed per-owner system-lock namespace.
+    "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032": {
+        "0xbc67f832": ("execute::execute_route", []),
+        "0xa9059cbb": ("execute::execute_route", []),
+    },
+    # Starknet Core L1->L2 message publication increments messaging state/nonces.
+    "0xc662c410c0ecf747543f5ba90660f6abebd9c8c4": {
+        "0x3e3aa6c5": ("execute::execute_route", []),
+    },
+    # zkSync Era main DiamondProxy executor facet. These are the source-reviewed
+    # commit/prove/execute block-state transitions and share the existing per-chain lock.
+    "0x32400084c286cf3e17e7b677ea9583e60a000324": {
+        "0x7739cbe7": ("execute::execute_route", []),
+        "0x0c4dd810": ("execute::execute_route", []),
+        "0xce9dcf16": ("execute::execute_route", []),
+    },
+    # Arbitrum Bridge delayed-message enqueue is a bridge-global mutation. The three
+    # count/accumulator views are reviewed as reads of that same conservative singleton.
+    "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a": {
+        "0x7a88b107": ("execute::execute_route", []),
+        "0x86598a56": ("execute::execute_route", []),
+        "0x8db5993b": ("execute::execute_route", []),
+        "0xeca067ad": ("query::read_route_lock", []),
+        "0x0084120c": ("query::read_route_lock", []),
+        "0x16bf5579": ("query::read_route_lock", [("index", "uint256")]),
+    },
+    # Linea L1 Message Service sendMessage mutates the reviewed global message-service state.
+    "0xd19d4b5d358258f05d7b411e21a1460d11b0876f": {
+        "0x9f3ce55a": ("execute::execute_route", []),
+    },
+    # The reviewed MUBI/WETH Uniswap-V3 pool uses the same per-pool conservative lock for
+    # liquidity burn/mint state transitions.
+    "0x844eb5c280f38c7462316aad3f338ef9bda62668": {
+        "0xa34123a7": ("execute::execute_route", []),
+        "0x3c8a7d8d": ("execute::execute_route", []),
+    },
+    # BetIT verified source is a fee/limit token; enableTrading mutates shared trading policy.
+    "0xa3c519683010d59fa54a4a6c4cac0f55cb20bb3f": {
+        "0x8a8c523c": ("execute::set_policy_marker", []),
+    },
+    # Standard transferFrom on the reviewed Synthetix implementation mutates its system state.
+    "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032": {
+        "0xbc67f832": ("execute::execute_route", []),
+        "0xa9059cbb": ("execute::execute_route", []),
+        "0x23b872dd": ("execute::execute_route", []),
+    },
+    # Final scheduler-fidelity micro-closure. These custom/admin token selectors are
+    # owner-scoped and deliberately collapse only to cw20-base's singleton policy marker.
+    # For OnBot, the exact function names remain unresolved, but the frozen successful
+    # frames are state-capable on this exact ERC20 owner. The scheduler profile therefore
+    # reviews only their conservative owner-local mutation dependency class, not their
+    # return values, authorization, storage layout, or tokenomics.
+    "0xb912cfd8cd814988b794b5301785c12c71b51651": {
+        "0xfbd75753": ("execute::set_policy_marker", []),
+        "0x27193bc4": ("execute::set_policy_marker", []),
+        "0xf576f539": ("execute::set_policy_marker", []),
+    },
+    # Spacecraft admin-policy paths: updateTaxes(), renounceOwnership(), plus one
+    # frozen state-capable owner-admin selector whose exact text signature is unresolved.
+    "0xc8d2f14c33064c810efa29ee7648ccca0cd1f772": {
+        "0x1006ee0c": ("execute::set_policy_marker", []),
+        "0x715018a6": ("execute::set_policy_marker", []),
+        "0xf319ae77": ("execute::set_policy_marker", []),
+    },
+    # Owner-scoped OpenZeppelin renounceOwnership() on the reviewed Pepe token owner.
+    "0x224da25c58574b852876a1c4e289be9eb7345322": {
+        "0x715018a6": ("execute::set_policy_marker", []),
+    },
+    # Exact selector signature removeLimits(); this owner remains selector-scoped and
+    # only this newly reviewed policy mutation is added.
+    "0x0b3ddf435d7e0a3cad97d85f94633a0e3a69fc01": {
+        "0x751039fc": ("execute::set_policy_marker", []),
+    },
+    # BetIT source-backed fee-policy mutation in addition to enableTrading().
+    "0xa3c519683010d59fa54a4a6c4cac0f55cb20bb3f": {
+        "0x8a8c523c": ("execute::set_policy_marker", []),
+        "0x02dbd8f8": ("execute::set_policy_marker", [("marketing_fee", "uint256"), ("dev_fee", "uint256")]),
+    },
+    # Standard ERC20 mint(address,uint256) on a frozen successful cw20-base owner.
+    # The native cw20-base Mint path is intentionally permissionless; the source caller is
+    # retained only as provenance because the source transaction already succeeded.
+    "0x143d7a700a533b4baf6d693449b278a8a2f5927d": {
+        "0x40c10f19": ("execute::mint", [("recipient", "address"), ("amount", "uint256")]),
+    },
+    # Tiny Linea residuals: a successful state-capable system call plus a standard approve
+    # observed on reviewed Linea owners. Scheduler fidelity needs only the conservative
+    # per-owner system-lock dependency; exact EVM state/return-value equivalence is excluded.
+    "0xf64bae65f6f2a5277571143a24faafdfc0c2a737": {
+        "0xf6a3c090": ("execute::execute_route", []),
+    },
+    "0x046eee2cc3188071c02bfc1745a6b17c656e3f3d": {
+        "0x095ea7b3": ("execute::execute_route", [("spender", "address"), ("amount", "uint256")]),
+    },
+}
+
 
 S1_OWNER_ENTRYPOINT_EXTENSIONS: dict[str, dict[str, tuple[str, list[tuple[str, str]]]]] = {
     "0xbd18e233e12f2a066f5b5a351285ab5a39b1f2ac": {
@@ -722,6 +908,10 @@ def translate_call_tree(
             entry = S1_OWNER_ENTRYPOINT_EXTENSIONS.get(storage_context or "", {}).get(selector, entry)
         elif resolver.dataset == "vegeta-s4":
             entry = S4_ENTRYPOINT_EXTENSIONS.get(native_family or "", {}).get(selector, entry)
+            # As with S1, apply target-specific review only after resolving the storage namespace.
+            # This prevents a selector reviewed for one S4 ERC721 implementation from becoming a
+            # family-wide claim for unrelated cw721-drop aliases.
+            entry = S4_OWNER_ENTRYPOINT_EXTENSIONS.get(storage_context or "", {}).get(selector, entry)
         system_action_kind = None
         semantic_entrypoint = None
         semantic_effect = SEMANTIC_OPAQUE

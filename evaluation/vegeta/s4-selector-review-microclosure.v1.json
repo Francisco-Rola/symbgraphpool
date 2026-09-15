@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "Final scheduler-fidelity selector micro-closure after the exact post-final readiness report rounded selector-reviewed conflict coverage to 94.98%.",
+  "profile_scope": "scheduler-fidelity",
+  "policy": "This batch reviews only conservative owner-scoped conflict-dependency classes for successful state-capable selectors. Exact EVM storage layout, authorization, return values, fee values, and tokenomics are not claimed. The OnBot custom selector text signatures remain unresolved and are therefore accepted only as owner-local state-mutation locks for scheduler fidelity; they are not evidence of general semantic-replay completeness.",
+  "baseline": {
+    "displayed_selector_reviewed_conflict_coverage": 0.9498,
+    "target": 0.95,
+    "denominator_conflict_pairs": 468252,
+    "note": "The displayed percentage is rounded. The exact corpus recomputation after application remains authoritative."
+  },
+  "reviews": [
+    {
+      "address": "0xb912cfd8cd814988b794b5301785c12c71b51651",
+      "selectors": [
+        "0xfbd75753",
+        "0x27193bc4",
+        "0xf576f539"
+      ],
+      "native_family": "cw20-base",
+      "semantic_entrypoint": "execute::set_policy_marker",
+      "review_status": "reviewed-scheduler-dependency-class",
+      "observed_direct_gain_pairs_each_pre_final": 83,
+      "mapping_basis": "Public metadata identifies the exact owner as OnBot/ONB ERC20. The frozen corpus observes these exact selectors as successful state-capable calls on this owner. Their text signatures are unresolved, so this review does not assign application semantics; it conservatively maps only the owner-local mutation dependency class to cw20-base's singleton policy marker for scheduler fidelity.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-third-batch-reviewed-decisions.v1.json",
+        "benchmarks/corpora/vegeta-ethereum/s4/native-plan/semantic-conflict-coverage.txt"
+      ]
+    },
+    {
+      "address": "0xc8d2f14c33064c810efa29ee7648ccca0cd1f772",
+      "selectors": [
+        "0x1006ee0c",
+        "0x715018a6",
+        "0xf319ae77"
+      ],
+      "native_family": "cw20-base",
+      "semantic_entrypoint": "execute::set_policy_marker",
+      "review_status": "reviewed-scheduler-dependency-class",
+      "observed_direct_gain_pairs_pre_final": {
+        "0x1006ee0c": 10,
+        "0x715018a6": 6,
+        "0xf319ae77": 12
+      },
+      "mapping_basis": "The reviewed owner is Spacecraft ERC20. 0x1006ee0c resolves to updateTaxes(uint256,uint256), 0x715018a6 is renounceOwnership(), and 0xf319ae77 is retained only as a frozen successful owner-admin state mutation whose exact text signature is unresolved. All three are owner-scoped to the policy marker; no fee/ownership value equivalence is claimed.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-third-batch-reviewed-decisions.v1.json",
+        "https://www.codeslaw.app/contracts/ethereum/0x149af500734056b98572b66e6c771e57408e12e4?tab=dependencies",
+        "benchmarks/corpora/vegeta-ethereum/s4/native-plan/semantic-conflict-coverage.txt"
+      ]
+    },
+    {
+      "address": "0x224da25c58574b852876a1c4e289be9eb7345322",
+      "selector": "0x715018a6",
+      "native_family": "cw20-base",
+      "semantic_entrypoint": "execute::set_policy_marker",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs_pre_final": 6,
+      "mapping_basis": "0x715018a6 is the standard Ownable renounceOwnership() state mutation. The selector is owner-scoped and represented only as a policy/administrative singleton dependency.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-third-batch-reviewed-decisions.v1.json",
+        "https://www.codeslaw.app/contracts/bnbchain/0xeb2b7d5691878627eff20492ca7c9a71228d931d"
+      ]
+    },
+    {
+      "address": "0x0b3ddf435d7e0a3cad97d85f94633a0e3a69fc01",
+      "selector": "0x751039fc",
+      "native_family": "cw20-base",
+      "semantic_entrypoint": "execute::set_policy_marker",
+      "review_status": "reviewed-scheduler-dependency-class",
+      "observed_direct_gain_pairs_pre_final": 5,
+      "mapping_basis": "0x751039fc resolves to removeLimits(), a token-policy state mutation. The family review remains selector-scoped; only this exact owner+selector gains the conservative policy dependency.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-third-batch-reviewed-decisions.v1.json",
+        "https://etherscan.io/tx/0x7112a66e76c971a0936e51455231ad804b8fdc7d06b44f1c9485c13a805e4335"
+      ]
+    },
+    {
+      "address": "0xa3c519683010d59fa54a4a6c4cac0f55cb20bb3f",
+      "selector": "0x02dbd8f8",
+      "native_family": "cw20-base",
+      "semantic_entrypoint": "execute::set_policy_marker",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs_pre_final": 2,
+      "mapping_basis": "0x02dbd8f8 resolves to updateSellFees(uint256,uint256), consistent with the already-reviewed BetIT fee/limit/trading policy state. Reuse the same owner-scoped policy marker used for enableTrading().",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-selector-review-final.v1.json",
+        "https://etherscan.io/tx/0xc0b33de4f9429803ce6c08c25cd269fd0e62fa9a05abfe31f55fa36a97d2ea73"
+      ]
+    },
+    {
+      "address": "0x143d7a700a533b4baf6d693449b278a8a2f5927d",
+      "selector": "0x40c10f19",
+      "native_family": "cw20-base",
+      "semantic_entrypoint": "execute::mint",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs_pre_final": 7,
+      "mapping_basis": "0x40c10f19 is the canonical mint(address,uint256) selector. Frozen execution reports this exact owner/selector as successful and state-capable. Reuse cw20-base balance plus total-supply dependencies while retaining the source caller only as provenance; historical authorization is not reconstructed.",
+      "evidence_sources": [
+        "https://optimistic.etherscan.io/tx/0x48ec63feab1c57caed055a56a25107d9fe3361f7bda1832484ed7adba7d01a6f",
+        "benchmarks/corpora/vegeta-ethereum/s4/native-plan/semantic-conflict-coverage.txt"
+      ]
+    },
+    {
+      "address": "0xf64bae65f6f2a5277571143a24faafdfc0c2a737",
+      "selector": "0xf6a3c090",
+      "native_family": "linea-rollup-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed-scheduler-dependency-class",
+      "observed_direct_gain_pairs_pre_final": 10,
+      "mapping_basis": "Frozen successful traces classify this exact selector as state-capable on an already-reviewed Linea owner. The exact text signature remains unresolved, so scheduler fidelity records only the conservative per-owner Linea system-lock dependency and makes no execution/value claim.",
+      "evidence_sources": [
+        "benchmarks/corpora/vegeta-ethereum/s4/native-plan/semantic-conflict-coverage.txt"
+      ]
+    },
+    {
+      "address": "0x046eee2cc3188071c02bfc1745a6b17c656e3f3d",
+      "selector": "0x095ea7b3",
+      "native_family": "linea-rollup-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed-scheduler-dependency-class",
+      "observed_direct_gain_pairs_pre_final": 2,
+      "mapping_basis": "0x095ea7b3 is the standard approve(address,uint256) selector and the frozen successful frame is state-capable on this reviewed Linea owner. Preserve only the existing per-owner Linea dependency lock.",
+      "evidence_sources": [
+        "benchmarks/corpora/vegeta-ethereum/s4/native-plan/semantic-conflict-coverage.txt"
+      ]
+    }
+  ],
+  "interpretation": "This is a scheduler-conflict dependency micro-closure, not an expansion of the semantic-replay claim. Exact prepare_s4.sh coverage is authoritative.",
+  "expected_pre_overlap_gain_upper_bound_pairs": 143,
+  "expected_note": "The rounded 94.98% display implies at most about 117 pairs are needed to reach the exact 95% integer target. This batch intentionally carries modest margin; exact overlap is recomputed by prepare_s4.sh."
+}

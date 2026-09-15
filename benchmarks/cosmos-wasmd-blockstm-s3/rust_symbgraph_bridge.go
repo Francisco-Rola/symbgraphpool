@@ -205,7 +205,7 @@ func loadRustBridgeConfig(repoRoot, symbolicDir string) (rustBridgeConfig, error
 	var docs []rustSymbolicDocument
 	profiles := make(map[rustSymbolicProfileKey]struct{})
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" || isSymbolicBundleMetadata(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())

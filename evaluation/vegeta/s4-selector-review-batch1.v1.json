@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "Owner-scoped selector-semantic review for the first post-family-freeze S4 scheduler-fidelity closure batch.",
+  "policy": "Only source-supported owner+selector pairs become executable. Unlisted cw721-drop selectors remain mapped-opaque. Exact semantic-conflict coverage must be recomputed; direct_gain values are prioritization evidence, not claimed cumulative gain.",
+  "reviews": [
+    {
+      "address": "0x45c77068a17ac94f56b7fd59dca0d4bd50457216",
+      "selector": "0xd2e8281f",
+      "native_family": "cw721-drop",
+      "semantic_entrypoint": "execute::collection_mint_drop",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 3554,
+      "mapping_basis": "Verified Collection implementation ABI exposes mint(bytes16 collectionId,address user,uint16 num,uint32 nonce,bytes signature). Preserve the owner-local recipient/quantity mint dependency classes. collectionId, nonce, and signature are authorization inputs passed to the external Alba verifier, so this adapter deliberately does not invent owner-local stage/nonce storage keys; signature verification/payment policy are not claimed as native EVM equivalence.",
+      "evidence_sources": [
+        "https://etherscan.io/address/0x45c77068a17ac94f56b7fd59dca0d4bd50457216",
+        "https://www.codeslaw.app/contracts/ethereum/0xdf0d2c4498d87ba325edb42b9a6330ec6b152cf3?tab=dependencies"
+      ]
+    },
+    {
+      "address": "0x1c67d8f07d7ef2d637e61ed3fbc3fa9aaf7a6267",
+      "selector": "0x4a21a2df",
+      "native_family": "cw721-drop",
+      "semantic_entrypoint": "execute::archetype_mint_drop",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 3269,
+      "mapping_basis": "Verified FU STUDIO MEMBERSHIP Archetype source exposes mint(Auth,uint256,address,bytes). Archetype mint forwards to mintTo(...,msg.sender,...), mints quantity to the caller, and updates per-wallet/per-invite-key state. Preserve those dependency classes; proof/signature/payment policy remain outside the scheduler model.",
+      "evidence_sources": [
+        "https://etherscan.io/token/0x1c67d8f07d7ef2d637e61ed3fbc3fa9aaf7a6267"
+      ]
+    },
+    {
+      "address": "0xc374a204334d4edd4c6a62f0867c752d65e9579c",
+      "selector": "0x4a21a2df",
+      "native_family": "cw721-drop",
+      "semantic_entrypoint": "execute::archetype_mint_drop",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 1549,
+      "mapping_basis": "Existing S4 fourth-batch evidence identifies Project AEON as the same reviewed Archetype ERC721 implementation family. Verified ABI exposes the same mint(Auth,uint256,address,bytes) path, so reuse the same owner-scoped mint dependency adapter.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json",
+        "https://etherscan.io/address/0xc374a204334d4edd4c6a62f0867c752d65e9579c"
+      ]
+    }
+  ],
+  "deferred": [
+    {
+      "address": "0x5a7c3aedaf077accd041799f01264dcacb17eea2",
+      "selector": "0x4a21a2df",
+      "observed_direct_gain_pairs": 2324,
+      "reason": "Same selector/family signal is promising, but owner-specific verified implementation evidence was not established in this review batch; remain opaque."
+    },
+    {
+      "address": "0x20577896ea6113ed8c94b2f08f3893bdc08eba22",
+      "selector": "0xd2cab056",
+      "observed_direct_gain_pairs": 1446,
+      "reason": "L3E7 Worlds is a reviewed cw721-drop proxy family, but this batch does not establish owner-specific implementation semantics for the observed selector strongly enough to execute it; remain opaque."
+    }
+  ]
+}

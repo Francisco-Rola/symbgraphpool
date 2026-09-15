@@ -30,6 +30,7 @@ pub enum ExecuteMsg {
     Approve { spender: String, amount: Uint128 },
     Burn { amount: Uint128 },
     Mint { recipient: String, amount: Uint128 },
+    SetPolicyMarker {},
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -57,6 +58,7 @@ const TOKEN_INFO: Item<TokenInfo> = Item::new("token_info");
 const TOTAL_SUPPLY: Item<Uint128> = Item::new("total_supply");
 const BALANCES: Map<&str, Uint128> = Map::new("balances");
 const ALLOWANCES: Map<(&str, &str), Uint128> = Map::new("allowances");
+const POLICY_MARKER: Item<bool> = Item::new("policy_marker");
 
 #[derive(Error, Debug, PartialEq)]
 pub enum ContractError {
@@ -78,6 +80,7 @@ pub fn instantiate(deps: DepsMut, _env: Env, _info: MessageInfo, msg: Instantiat
         total = total.checked_add(initial.amount).map_err(StdError::overflow)?;
     }
     TOTAL_SUPPLY.save(deps.storage, &total)?;
+    POLICY_MARKER.save(deps.storage, &false)?;
     Ok(Response::new().add_attribute("action", "instantiate"))
 }
 
@@ -89,6 +92,7 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> 
         ExecuteMsg::Approve { spender, amount } => approve(deps, info.sender, spender, amount),
         ExecuteMsg::Burn { amount } => burn(deps, info.sender, amount),
         ExecuteMsg::Mint { recipient, amount } => mint(deps, recipient, amount),
+        ExecuteMsg::SetPolicyMarker {} => set_policy_marker(deps),
     }
 }
 
@@ -127,6 +131,11 @@ fn mint(deps: DepsMut, recipient: String, amount: Uint128) -> Result<Response, C
     credit(deps.storage, recipient.as_str(), amount)?;
     TOTAL_SUPPLY.update(deps.storage, |total| total.checked_add(amount).map_err(StdError::overflow))?;
     Ok(Response::new().add_attribute("action", "mint"))
+}
+
+fn set_policy_marker(deps: DepsMut) -> Result<Response, ContractError> {
+    POLICY_MARKER.save(deps.storage, &true)?;
+    Ok(Response::new().add_attribute("action", "set_policy_marker"))
 }
 
 fn debit(storage: &mut dyn cosmwasm_std::Storage, address: &str, amount: Uint128) -> Result<(), ContractError> {
@@ -169,5 +178,7 @@ mod tests {
         assert_eq!(BALANCES.load(deps.as_ref().storage, "alice").unwrap(), Uint128::new(75));
         assert_eq!(BALANCES.load(deps.as_ref().storage, "carol").unwrap(), Uint128::new(25));
         assert_eq!(ALLOWANCES.load(deps.as_ref().storage, ("alice", "bob")).unwrap(), Uint128::new(15));
+        execute(deps.as_mut(), mock_env(), mock_info("alice", &[]), ExecuteMsg::SetPolicyMarker {}).unwrap();
+        assert!(POLICY_MARKER.load(deps.as_ref().storage).unwrap());
     }
 }

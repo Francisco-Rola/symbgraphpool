@@ -30,6 +30,7 @@ pub enum ExecuteMsg {
 pub enum QueryMsg {
     GetOrderStatus { order_id: String },
     GetCounter { address: String },
+    ReadRouteLock {},
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -140,6 +141,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
                 .may_load(deps.storage, &address)?
                 .unwrap_or_default(),
         }),
+        QueryMsg::ReadRouteLock {} => to_json_binary(&ROUTER_LOCK.may_load(deps.storage)?.unwrap_or(false)),
     }
 }
 

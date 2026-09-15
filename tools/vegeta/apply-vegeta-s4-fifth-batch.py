@@ -119,9 +119,6 @@ def main() -> int:
         for row in (evidence.get("records") or [])
         if row.get("evidence_id")
     }
-    for record in evidence_by_id.values():
-        validate_evidence_record(record, generated_by_family)
-
     native = dict(base.get("native_code_families") or {})
     added_native: list[str] = []
     for name, config in sorted((ext.get("native_code_families") or {}).items()):
@@ -137,7 +134,17 @@ def main() -> int:
     )
     if not rows:
         raise SystemExit("fifth-batch decisions file is empty")
+
+    current = [dict(row) for row in workspace.get("decisions") or []]
+    index = {
+        str(row.get("runtime_code_family") or ""): i
+        for i, row in enumerate(current)
+        if row.get("runtime_code_family")
+    }
+
     reviewed_count = 0
+    newly_validated_reviewed = 0
+    already_applied_reviewed = 0
     for row in rows:
         family = str(row.get("runtime_code_family") or "")
         blocker = str(row.get("blocker_runtime_code_family") or family)
@@ -170,6 +177,24 @@ def main() -> int:
                     f"fifth-batch family {family} references unknown native family {target!r}; "
                     "register the reviewed implementation/dependency family first"
                 )
+
+            old = current[index[family]] if family in index else None
+            old_status = str((old or {}).get("review_status") or "pending").lower()
+            if old_status == "reviewed":
+                # Historical reviewed rows are authoritative cumulative state. They must still
+                # match the checked-in decision exactly, but they do not need to reappear in a
+                # newly regenerated, shortlist-scoped evidence dossier.
+                if old != row:
+                    raise SystemExit(
+                        f"refusing to replace an existing different reviewed decision for runtime family {family}"
+                    )
+                already_applied_reviewed += 1
+            else:
+                # Only genuinely new/promoted reviewed rows depend on the current transient
+                # generated dossier. This keeps incremental reruns idempotent while preserving
+                # fail-closed evidence validation for every new executable mapping.
+                validate_evidence_record(ev, generated_by_family)
+                newly_validated_reviewed += 1
         else:
             if row.get("reviewed_native_family") or str(row.get("mapping_basis") or "").strip():
                 raise SystemExit(f"non-reviewed fifth-batch row must not carry an executable mapping: {family}")
@@ -186,12 +211,6 @@ def main() -> int:
     base["s4_fifth_batch_review_evidence_sha256"] = hashlib.sha256(ns.review_evidence.read_bytes()).hexdigest()
     atomic(ns.review_base, base)
 
-    current = [dict(row) for row in workspace.get("decisions") or []]
-    index = {
-        str(row.get("runtime_code_family") or ""): i
-        for i, row in enumerate(current)
-        if row.get("runtime_code_family")
-    }
     appended: list[str] = []
     promoted: list[str] = []
     unchanged: list[str] = []
@@ -245,6 +264,8 @@ def main() -> int:
     })
     print(f"fifth-batch conservative native aliases added: {len(added_native)}")
     print(f"fifth-batch reviewed executable rows: {reviewed_count}")
+    print(f"fifth-batch new reviewed rows evidence-validated: {newly_validated_reviewed}")
+    print(f"fifth-batch already-applied reviewed rows skipped from transient evidence validation: {already_applied_reviewed}")
     print(f"fifth-batch rows appended: {len(appended)}")
     print(f"fifth-batch pending rows promoted/replaced: {len(promoted)}")
     print(f"fifth-batch identical rows retained: {len(unchanged)}")

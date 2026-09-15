@@ -11,7 +11,8 @@
     "S4 adds custom-swap-router as an independent storage namespace reusing the checked-in marketplace-router CosmWasm binary/profile only for a conservative singleton route-execution guard; this is explicitly not an application-equivalence claim.",
     "S4 adds v3-pool-lock as an independent per-pool storage namespace reusing the marketplace-router singleton ExecuteRoute dependency guard for the observed Uniswap-V3 swap class; ticks, liquidity math, settlement, and EVM execution equivalence are intentionally out of scope.",
     "S4 fourth-batch review adds distinct amp-partition-collateral-lock, linea-rollup-lock, zksync-l1-system-lock, and arbitrum-bridge-lock namespaces. Each reuses only the checked-in marketplace-router ExecuteRoute singleton dependency guard as a conservative per-source-owner lock; public-source evidence is checked in separately and no EVM state/execution equivalence is claimed.",
-    "S4 fifth-batch review adds synthetix-system-lock and starknet-l1-system-lock as distinct conservative per-owner dependency aliases. Generic proxy runtime bytecode is not treated as an application identity; BlurPool and Starknet proxy storage owners are reviewed through verified delegate implementation profiles."
+    "S4 fifth-batch review adds synthetix-system-lock and starknet-l1-system-lock as distinct conservative per-owner dependency aliases. Generic proxy runtime bytecode is not treated as an application identity; BlurPool and Starknet proxy storage owners are reviewed through verified delegate implementation profiles.",
+    "S4 final selector closure adds source-reviewed owner-scoped lifecycle/message selectors only. Read-only Arbitrum bridge counters share the conservative per-bridge singleton dependency through query::ReadRouteLock; XEN claim-and-stake is implemented atomically in the native XEN state machine. Unresolved selectors remain opaque."
   ],
   "families": [
     {
@@ -29,7 +30,8 @@
         "query::Balance",
         "query::Allowance",
         "query::TotalSupply",
-        "query::Decimals"
+        "query::Decimals",
+        "execute::SetPolicyMarker"
       ],
       "implementation_status": "implemented",
       "symbolic_status": "llm-source-derived"
@@ -138,6 +140,7 @@
         "execute::ClaimRank",
         "execute::ClaimMintReward",
         "execute::ClaimMintRewardAndShare",
+        "execute::ClaimMintRewardAndStake",
         "execute::Stake",
         "execute::Withdraw",
         "execute::Transfer",
@@ -349,7 +352,8 @@
       "wasm_artifact": "benchmarks/target/wasm32-unknown-unknown/release/acg_benchmark_native_s3_marketplace_router.wasm",
       "required_profiles": [
         "instantiate",
-        "execute::ExecuteRoute"
+        "execute::ExecuteRoute",
+        "query::ReadRouteLock"
       ],
       "implementation_status": "implemented-conservative-alias",
       "symbolic_status": "llm-source-derived",

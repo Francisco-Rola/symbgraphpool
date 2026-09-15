@@ -2,6 +2,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
+
+if [[ "${VEGETA_S4_REBUILD_NATIVE_EXECUTION:-0}" == "1" ]]; then
+  exec bash tools/vegeta/run-vegeta-s4-rebuild-native-execution.sh
+fi
+if [[ "${VEGETA_S4_RESUME_NATIVE_EXECUTION:-0}" == "1" ]]; then
+  exec bash tools/vegeta/run-vegeta-s4-resume-native-execution.sh
+fi
 S4_DIR="${VEGETA_S4_DIR:-benchmarks/corpora/vegeta-ethereum/s4}"
 CORPUS="${VEGETA_S4_CORPUS:-$S4_DIR/corpus.jsonl}"
 FAMILY_MAP="${VEGETA_S4_NATIVE_FAMILY_MAP:-evaluation/vegeta/s4-native-family-map.v1.json}"

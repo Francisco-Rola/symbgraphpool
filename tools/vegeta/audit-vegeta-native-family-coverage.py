@@ -165,7 +165,7 @@ def main() -> int:
     conflict_relevant_storage = {
         "definition": (
             "diagnostic reviewed-family coverage over concrete source storage accesses whose storage owner participates "
-            "in at least one observed cross-transaction source conflict; this is a secondary diagnostic, while the hard storage gate uses all source accesses"
+            "in at least one observed cross-transaction source conflict; all storage-volume views are diagnostics under the S1-analogous scheduler-fidelity policy"
         ),
         "conflict_relevant_owner_count": len(conflict_relevant_owners),
         "total_access_records": conflict_relevant_total_access,
@@ -176,7 +176,7 @@ def main() -> int:
         ),
     }
     storage = {
-        "definition": "reviewed-family coverage over all concrete source storage accesses; this is the S4 publication/family-freeze storage gate and includes non-conflicting long-tail state",
+        "definition": "reviewed-family coverage over all concrete source storage accesses; this includes non-conflicting long-tail state and is a diagnostic under the S1-analogous scheduler-fidelity policy",
         "total_access_records": total_access,
         "selected_family_access_records": mapped_access,
         "access_record_coverage": mapped_access / total_access if total_access else 1.0,

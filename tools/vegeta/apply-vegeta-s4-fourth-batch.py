@@ -135,7 +135,7 @@ def main() -> int:
     workspace["dataset"] = "vegeta-s4"
     workspace["purpose"] = (
         "S4 cumulative human-review workspace. Checked-in reviewed family decisions are executable only "
-        "in a candidate draft; the exact all-storage/conflict family gates and later selector/native gates "
+        "in a candidate draft; the exact scheduler-fidelity family conflict/median gates and later selector/native gates "
         "remain fail-closed."
     )
     workspace["decisions"] = sorted(

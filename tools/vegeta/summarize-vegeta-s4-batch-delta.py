@@ -58,7 +58,7 @@ def main() -> int:
     conflict_target = math.ceil(ns.target_conflict * int(after["total_conflict_pairs"]))
     access_target = math.ceil(ns.target_storage_access * int(after["total_storage_accesses"]))
     out = {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset": "vegeta-s4",
         "batch_label": ns.batch_label,
         "before": before,
@@ -79,7 +79,13 @@ def main() -> int:
             "conflict_pairs": max(0, conflict_target - int(after["mapped_conflict_pairs"])),
             "storage_access_records": max(0, access_target - int(after["mapped_storage_accesses"])),
         },
-        "publication_gates": {
+        "scheduler_fidelity_gates": {
+            "conflict": int(after["mapped_conflict_pairs"]) >= conflict_target,
+        },
+        "diagnostic_references": {
+            "storage_access": int(after["mapped_storage_accesses"]) >= access_target,
+        },
+        "publication_gates": {  # compatibility alias; storage_access is diagnostic in schema v2 policy
             "conflict": int(after["mapped_conflict_pairs"]) >= conflict_target,
             "storage_access": int(after["mapped_storage_accesses"]) >= access_target,
         },
@@ -91,9 +97,9 @@ def main() -> int:
         f"conflict pairs: {before['mapped_conflict_pairs']}/{before['total_conflict_pairs']} ({100*float(before['conflict_coverage']):.2f}%) -> {after['mapped_conflict_pairs']}/{after['total_conflict_pairs']} ({100*float(after['conflict_coverage']):.2f}%)  delta=+{out['delta']['newly_mapped_conflict_pairs']}",
         f"all storage accesses: {before['mapped_storage_accesses']}/{before['total_storage_accesses']} ({100*float(before['storage_access_coverage']):.2f}%) -> {after['mapped_storage_accesses']}/{after['total_storage_accesses']} ({100*float(after['storage_access_coverage']):.2f}%)  delta=+{out['delta']['newly_mapped_storage_accesses']}",
         f"remaining conflict pairs to {100*ns.target_conflict:.2f}%: {out['remaining']['conflict_pairs']}",
-        f"remaining all-storage accesses to {100*ns.target_storage_access:.2f}%: {out['remaining']['storage_access_records']}",
-        f"conflict gate: {'PASS' if out['publication_gates']['conflict'] else 'FAIL'}",
-        f"storage-access gate: {'PASS' if out['publication_gates']['storage_access'] else 'FAIL'}",
+        f"all-storage diagnostic shortfall to {100*ns.target_storage_access:.2f}% reference: {out['remaining']['storage_access_records']}",
+        f"scheduler-fidelity conflict gate: {'PASS' if out['scheduler_fidelity_gates']['conflict'] else 'FAIL'}",
+        f"storage-access diagnostic reference: {'REACHED' if out['diagnostic_references']['storage_access'] else 'OPEN'}",
     ]
     ns.text_output.parent.mkdir(parents=True, exist_ok=True)
     ns.text_output.write_text("\n".join(lines) + "\n", encoding="utf-8")

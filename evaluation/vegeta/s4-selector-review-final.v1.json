@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "Final post-family-freeze S4 selector-semantic residual closure batch, prioritized from the exact residual after selector batch 2.",
+  "policy": "Only owner/source-supported selectors become executable. System-family entries reuse already-reviewed conservative per-owner/per-bridge singleton dependency namespaces; no historical EVM storage-layout or execution equivalence is claimed. Unknown selectors remain mapped-opaque. Exact coverage must be recomputed after application.",
+  "baseline": {
+    "displayed_selector_reviewed_conflict_coverage": 0.9453,
+    "target": 0.95,
+    "note": "The pasted readiness report rounded coverage to two decimals; the checked-in batch therefore records observed marginal gains but does not manufacture an exact pre-apply numerator."
+  },
+  "reviews": [
+    {
+      "address": "0x32400084c286cf3e17e7b677ea9583e60a000324",
+      "selector": "0x7739cbe7",
+      "native_family": "zksync-l1-system-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 1535,
+      "mapping_basis": "Frozen traces place this state-capable selector on the already-reviewed zkSync Era DiamondProxy. Historical zkSync executor source and mainnet transaction/event evidence establish the block proof/verification lifecycle as a state transition. Reuse only the frozen per-chain singleton dependency lock; proof verification, batches, and storage layout are not reproduced.",
+      "evidence_sources": [
+        "https://github.com/matter-labs/zksync/blob/master/contracts/contracts/ZkSync.sol",
+        "https://etherscan.io/address/0x32400084c286cf3e17e7b677ea9583e60a000324"
+      ]
+    },
+    {
+      "address": "0x32400084c286cf3e17e7b677ea9583e60a000324",
+      "selector": "0x0c4dd810",
+      "native_family": "zksync-l1-system-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 25,
+      "observed_two_selector_unlock_pairs_with_0x7739cbe7": 175,
+      "mapping_basis": "Mainnet calls with this selector on the zkSync validator path emit BlockCommit events at the reviewed DiamondProxy, and zkSync source documents the block-commit lifecycle as state-mutating. Reuse the same conservative per-chain singleton dependency lock.",
+      "evidence_sources": [
+        "https://github.com/matter-labs/zksync/blob/master/contracts/contracts/ZkSync.sol",
+        "https://eth.tokenview.io/en/block/18406587"
+      ]
+    },
+    {
+      "address": "0x32400084c286cf3e17e7b677ea9583e60a000324",
+      "selector": "0xce9dcf16",
+      "native_family": "zksync-l1-system-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 5,
+      "mapping_basis": "Frozen traces classify the selector as a successful state-capable call on the reviewed zkSync DiamondProxy; zkSync source documents executeBlocks-style finalization as a state transition. Preserve only the per-chain singleton dependency class.",
+      "evidence_sources": [
+        "https://github.com/matter-labs/zksync/blob/master/contracts/contracts/ZkSync.sol"
+      ]
+    },
+    {
+      "address": "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+      "selector": "0x8db5993b",
+      "native_family": "arbitrum-bridge-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 106,
+      "mapping_basis": "Historical Arbitrum Bridge ABI/source identifies the observed delayed-message enqueue path as a bridge-global mutator. Reuse the frozen per-bridge singleton dependency abstraction rather than modeling bridge message arrays or accumulators directly.",
+      "evidence_sources": [
+        "https://github.com/OffchainLabs/nitro-contracts/blob/main/src/bridge/Bridge.sol",
+        "evaluation/vegeta/s4-selector-review-batch2.v1.json"
+      ]
+    },
+    {
+      "address": "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+      "selector": "0xeca067ad",
+      "native_family": "arbitrum-bridge-lock",
+      "semantic_entrypoint": "query::read_route_lock",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 0,
+      "observed_two_selector_unlock_pairs_with_0x8db5993b": 77,
+      "mapping_basis": "The selector is a reviewed delayed-message count/read path. Model it as a read of the same per-bridge singleton dependency touched by delayed-message enqueue; no return-value equivalence is claimed.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-selector-review-batch2.v1.json"
+      ]
+    },
+    {
+      "address": "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+      "selector": "0x0084120c",
+      "native_family": "arbitrum-bridge-lock",
+      "semantic_entrypoint": "query::read_route_lock",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 12,
+      "mapping_basis": "Arbitrum Bridge ABI identifies sequencerMessageCount() as a read of bridge-global sequencer state. Model dependency only through the conservative per-bridge singleton read.",
+      "evidence_sources": [
+        "https://github.com/OffchainLabs/nitro-contracts/blob/main/src/bridge/IBridge.sol"
+      ]
+    },
+    {
+      "address": "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+      "selector": "0x16bf5579",
+      "native_family": "arbitrum-bridge-lock",
+      "semantic_entrypoint": "query::read_route_lock",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 12,
+      "mapping_basis": "Arbitrum Bridge ABI identifies sequencerInboxAccs(uint256) as a read of bridge-global accumulator state. Preserve only the singleton dependency relationship; the index and return value are provenance, not native storage-layout claims.",
+      "evidence_sources": [
+        "https://github.com/OffchainLabs/nitro-contracts/blob/main/src/bridge/IBridge.sol"
+      ]
+    },
+    {
+      "address": "0xd19d4b5d358258f05d7b411e21a1460d11b0876f",
+      "selector": "0x9f3ce55a",
+      "native_family": "linea-rollup-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 90,
+      "mapping_basis": "Etherscan decodes 0x9f3ce55a on the exact Linea L1 Message Service as sendMessage(address,uint256,bytes); successful calls emit MessageSent/RollingHashUpdated and mutate messaging state. Reuse the reviewed Linea singleton lock dependency.",
+      "evidence_sources": [
+        "https://etherscan.io/address/0xd19d4b5d358258f05d7b411e21a1460d11b0876f"
+      ]
+    },
+    {
+      "address": "0xa3c519683010d59fa54a4a6c4cac0f55cb20bb3f",
+      "selector": "0x8a8c523c",
+      "native_family": "cw20-base",
+      "semantic_entrypoint": "execute::set_policy_marker",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 70,
+      "mapping_basis": "Verified BetIT source/ABI exposes enableTrading() together with buy/sell fee, max-transaction/max-wallet, swapping, and trading-policy state. Keep the already-frozen family classification unchanged and map only this owner+selector to a new conservative POLICY_MARKER singleton in the existing cw20-base native implementation. Standard CW20 selectors and other owners do not acquire this custom entrypoint; exact policy values and authorization are not reproduced.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-third-batch-reviewed-decisions.v1.json",
+        "https://etherscan.io/address/0xa3c519683010d59fa54a4a6c4cac0f55cb20bb3f"
+      ]
+    },
+    {
+      "address": "0x06450dee7fd2fb8e39061434babcfc05599a6fb8",
+      "selector": "0x5bccb4c4",
+      "native_family": "xen-like",
+      "semantic_entrypoint": "execute::claim_mint_reward_and_stake",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 37,
+      "mapping_basis": "XEN ABI binds 0x5bccb4c4 to claimMintRewardAndStake(uint256,uint256), an atomic mint-reward/stake mutation. The native XEN implementation now performs the corresponding user-mint removal, reward credit/stake creation, and global supply/stake updates atomically.",
+      "evidence_sources": [
+        "https://pkg.go.dev/github.com/ethpandaops/spamoor/scenarios/xentoken/contract"
+      ]
+    },
+    {
+      "address": "0x06450dee7fd2fb8e39061434babcfc05599a6fb8",
+      "selector": "0x7b0472f0",
+      "native_family": "xen-like",
+      "semantic_entrypoint": "execute::stake",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 9,
+      "mapping_basis": "Etherscan decodes 0x7b0472f0 on the exact XEN token as stake(uint256,uint256). Reuse the existing native XEN balance/user-stake/global dependency implementation.",
+      "evidence_sources": [
+        "https://etherscan.io/address/0x06450dee7fd2fb8e39061434babcfc05599a6fb8"
+      ]
+    },
+    {
+      "address": "0x06450dee7fd2fb8e39061434babcfc05599a6fb8",
+      "selector": "0x3ccfd60b",
+      "native_family": "xen-like",
+      "semantic_entrypoint": "execute::withdraw",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 8,
+      "mapping_basis": "XEN ABI exposes withdraw() as the stake withdrawal path. Reuse the existing native XEN user-stake/balance/global state implementation.",
+      "evidence_sources": [
+        "https://etherscan.io/address/0x06450dee7fd2fb8e39061434babcfc05599a6fb8"
+      ]
+    },
+    {
+      "address": "0x844eb5c280f38c7462316aad3f338ef9bda62668",
+      "selector": "0xa34123a7",
+      "native_family": "v3-pool-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 12,
+      "mapping_basis": "0xa34123a7 is the canonical Uniswap V3 pool burn(int24,int24,uint128) mutator. Reuse the already-reviewed per-pool singleton dependency guard; no tick/liquidity math equivalence is claimed.",
+      "evidence_sources": [
+        "https://github.com/Uniswap/v3-core/blob/main/contracts/UniswapV3Pool.sol"
+      ]
+    },
+    {
+      "address": "0x844eb5c280f38c7462316aad3f338ef9bda62668",
+      "selector": "0x3c8a7d8d",
+      "native_family": "v3-pool-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 2,
+      "mapping_basis": "0x3c8a7d8d is the canonical Uniswap V3 pool mint(address,int24,int24,uint128,bytes) mutator. Reuse the reviewed per-pool singleton dependency guard only.",
+      "evidence_sources": [
+        "https://github.com/Uniswap/v3-core/blob/main/contracts/UniswapV3Pool.sol"
+      ]
+    },
+    {
+      "address": "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032",
+      "selector": "0x23b872dd",
+      "native_family": "synthetix-system-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 3,
+      "mapping_basis": "Standard transferFrom(address,address,uint256) on the reviewed legacy Synthetix implementation is state-mutating. Reuse only the existing per-owner singleton system dependency, consistent with the already-reviewed transfer path.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-selector-review-batch2.v1.json"
+      ]
+    }
+  ],
+  "deferred": [
+    {
+      "address": "0xb912cfd8cd814988b794b5301785c12c71b51651",
+      "selectors": [
+        "0xfbd75753",
+        "0x27193bc4",
+        "0xf576f539"
+      ],
+      "reason": "OnBot custom selector identities remain unresolved. The family review only authorizes standard ERC20 dependency classes, so these remain opaque even though each has non-trivial residual gain."
+    },
+    {
+      "address": "0xdb5889e35e379ef0498aae126fc2cce1fbd23216",
+      "selector": "0x244a7353",
+      "reason": "Banana Gun selector semantics remain insufficiently supported for execution; keep opaque."
+    }
+  ]
+}

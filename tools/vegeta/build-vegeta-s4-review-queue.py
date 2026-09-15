@@ -78,11 +78,11 @@ def main():
       'review_seed_source':str(ns.review_seeds) if ns.review_seeds else None,
       'priority_review_batch':[r for r in queue if r.get('seed_priority') is not None],
       'top_unmapped_state_gas_owners':sorted(queue,key=lambda r:(-r.get('gas_attributions',0),-r.get('owner_pair_attributions',0)))[:20],
-      'publication_rule':'Do not promote the candidate family map until new mappings/selectors are manually reviewed and the S4 all-storage-access + conflict + median conflict-bearing-block family-freeze gates pass. Conflict-relevant access and gas remain diagnostics.',
+      'publication_rule':'Do not promote the candidate family map until new mappings/selectors are manually reviewed and the S4 scheduler-fidelity family-freeze gates pass: corpus integrity, >=95% conflict coverage, and >=80% median conflict-bearing-block coverage. All-storage, conflict-relevant access, and gas remain diagnostics.',
     }
     write(ns.output_json,report)
     gas=float((cov.get('gas_weighted_family_coverage') or {}).get('fully_selected_family_state_gas_coverage') or 0.0)
-    lines=['# Vegeta S4 semantic review queue','',f"Current conflict coverage: {100*report['current_conflict_coverage']:.2f}%",f"Median conflict-bearing block coverage: {100*report['current_block_median_coverage']:.2f}%",f"All storage-access coverage: {100*report['current_storage_access_coverage']:.2f}%",f"Conflict-relevant storage-access coverage: {100*report['current_conflict_relevant_access_coverage']:.2f}% (diagnostic)",f"Fully mapped source-state gas coverage: {100*gas:.2f}% (conservative diagnostic; not a gate)",'']
+    lines=['# Vegeta S4 semantic review queue','',f"Current conflict coverage: {100*report['current_conflict_coverage']:.2f}%",f"Median conflict-bearing block coverage: {100*report['current_block_median_coverage']:.2f}%",f"All storage-access coverage: {100*report['current_storage_access_coverage']:.2f}% (diagnostic)",f"Conflict-relevant storage-access coverage: {100*report['current_conflict_relevant_access_coverage']:.2f}% (diagnostic)",f"Fully mapped source-state gas coverage: {100*gas:.2f}% (conservative diagnostic; not a gate)",'']
     if report['priority_review_batch']:
         lines += ['## First review batch (human-attested; suggestions are not executable mappings)']
         for row in sorted(report['priority_review_batch'],key=lambda r:(int(r.get('seed_priority') or 9999),-r['owner_pair_attributions'])):

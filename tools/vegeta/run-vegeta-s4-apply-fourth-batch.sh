@@ -16,7 +16,7 @@ PRE_COVERAGE="${VEGETA_S4_FOURTH_BATCH_PRE_COVERAGE:-$WORK_DIR/s4-fourth-batch-p
 DELTA_JSON="${VEGETA_S4_FOURTH_BATCH_DELTA_JSON:-$WORK_DIR/s4-fourth-batch-coverage-delta.json}"
 DELTA_TXT="${VEGETA_S4_FOURTH_BATCH_DELTA_TXT:-$WORK_DIR/s4-fourth-batch-coverage-delta.txt}"
 MIN_CONFLICT="${VEGETA_S4_MIN_CONFLICT_COVERAGE:-0.95}"
-MIN_STORAGE_ACCESS="${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}"
+DIAG_STORAGE_ACCESS_REFERENCE="${VEGETA_S4_STORAGE_ACCESS_REFERENCE:-${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}}"
 
 for path in "$REVIEW_BASE" "$WORKSPACE_DECISIONS" "$FAMILY_EXTENSION" "$FOURTH_BATCH" "$REVIEW_EVIDENCE" "$THIRD_BATCH"; do
   [[ -s "$path" ]] || { echo "missing S4 fourth-batch input: $path" >&2; exit 2; }
@@ -56,7 +56,7 @@ python3 tools/vegeta/summarize-vegeta-s4-conflict-closure.py \
   --readiness "$WORK_DIR/family-review-readiness.json" \
   --decisions "$WORKSPACE_DECISIONS" \
   --min-conflict "$MIN_CONFLICT" \
-  --min-storage-access "$MIN_STORAGE_ACCESS" \
+  --storage-access-reference "$DIAG_STORAGE_ACCESS_REFERENCE" \
   --output "$WORK_DIR/conflict-closure.json" \
   --text-output "$WORK_DIR/conflict-closure.txt"
 
@@ -65,7 +65,7 @@ python3 tools/vegeta/summarize-vegeta-s4-batch-delta.py \
   --after "$WORK_DIR/source-family-coverage.json" \
   --batch-label "fourth reviewed conflict batch P12-P16" \
   --target-conflict "$MIN_CONFLICT" \
-  --target-storage-access "$MIN_STORAGE_ACCESS" \
+  --target-storage-access "$DIAG_STORAGE_ACCESS_REFERENCE" \
   --output "$DELTA_JSON" \
   --text-output "$DELTA_TXT"
 

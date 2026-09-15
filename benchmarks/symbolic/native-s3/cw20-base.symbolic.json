@@ -4,7 +4,7 @@
   "source": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
   "analysis_provenance": {
     "method": "llm-source-derived",
-    "source_sha256": "d154c8499fb64988f3226afc4841163bc555a5a7a7f9292c8f3d1872d41cb374",
+    "source_sha256": "773dd6add33338a7fa1311a14fd834354bb518e35162125f779ed6d9ae755870",
     "source_scope": "complete native contract source",
     "historical_trace_keys_used": false,
     "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
@@ -21,6 +21,9 @@
     },
     "ALLOWANCES": {
       "key_semantic_name": "owner_spender"
+    },
+    "POLICY_MARKER": {
+      "key_semantic_name": "singleton"
     }
   },
   "dependency_kinds": {
@@ -52,8 +55,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 77,
-            "end_line": 77,
+            "start_line": 79,
+            "end_line": 79,
             "code": "BALANCES.save(deps.storage, address.as_str(), &initial.amount)?;"
           },
           "notes": []
@@ -71,11 +74,32 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 80,
-            "end_line": 80,
+            "start_line": 82,
+            "end_line": 82,
             "code": "TOTAL_SUPPLY.save(deps.storage, &total)?;"
           },
           "notes": []
+        },
+        {
+          "kind": "write",
+          "resource": "POLICY_MARKER",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
+            "start_line": 83,
+            "end_line": 83,
+            "code": "POLICY_MARKER.save(deps.storage, &false)?;"
+          },
+          "notes": [
+            "Owner-scoped custom policy selectors may use this marker without changing standard CW20 dependency profiles."
+          ]
         }
       ]
     },
@@ -103,8 +127,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 133,
-            "end_line": 133,
+            "start_line": 142,
+            "end_line": 142,
             "code": "let current = BALANCES.may_load(storage, address)?.unwrap_or_default();"
           },
           "notes": []
@@ -125,8 +149,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 135,
-            "end_line": 135,
+            "start_line": 144,
+            "end_line": 144,
             "code": "BALANCES.save(storage, address, &current.checked_sub(amount).map_err(StdError::overflow)?)?;"
           },
           "notes": []
@@ -147,8 +171,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 133,
-            "end_line": 133,
+            "start_line": 142,
+            "end_line": 142,
             "code": "let current = BALANCES.may_load(storage, address)?.unwrap_or_default();"
           },
           "notes": []
@@ -169,8 +193,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 141,
-            "end_line": 141,
+            "start_line": 150,
+            "end_line": 150,
             "code": "BALANCES.save(storage, address, &current.checked_add(amount).map_err(StdError::overflow)?)?;"
           },
           "notes": []
@@ -202,8 +226,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 105,
-            "end_line": 105,
+            "start_line": 109,
+            "end_line": 109,
             "code": "let allowance = ALLOWANCES.may_load(deps.storage, (owner.as_str(), spender.as_str()))?.unwrap_or_default();"
           },
           "notes": []
@@ -224,8 +248,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 107,
-            "end_line": 107,
+            "start_line": 111,
+            "end_line": 111,
             "code": "ALLOWANCES.save(deps.storage, (owner.as_str(), spender.as_str()), &allowance.checked_sub(amount).map_err(StdError::overflow)?)?;"
           },
           "notes": []
@@ -246,8 +270,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 133,
-            "end_line": 133,
+            "start_line": 142,
+            "end_line": 142,
             "code": "let current = BALANCES.may_load(storage, address)?.unwrap_or_default();"
           },
           "notes": []
@@ -268,8 +292,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 135,
-            "end_line": 135,
+            "start_line": 144,
+            "end_line": 144,
             "code": "BALANCES.save(storage, address, &current.checked_sub(amount).map_err(StdError::overflow)?)?;"
           },
           "notes": []
@@ -290,8 +314,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 141,
-            "end_line": 141,
+            "start_line": 150,
+            "end_line": 150,
             "code": "BALANCES.save(storage, address, &current.checked_add(amount).map_err(StdError::overflow)?)?;"
           },
           "notes": []
@@ -322,8 +346,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 115,
-            "end_line": 115,
+            "start_line": 119,
+            "end_line": 119,
             "code": "ALLOWANCES.save(deps.storage, (owner.as_str(), spender.as_str()), &amount)?;"
           },
           "notes": []
@@ -353,8 +377,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 133,
-            "end_line": 133,
+            "start_line": 142,
+            "end_line": 142,
             "code": "let current = BALANCES.may_load(storage, address)?.unwrap_or_default();"
           },
           "notes": []
@@ -375,8 +399,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 135,
-            "end_line": 135,
+            "start_line": 144,
+            "end_line": 144,
             "code": "BALANCES.save(storage, address, &current.checked_sub(amount).map_err(StdError::overflow)?)?;"
           },
           "notes": []
@@ -394,8 +418,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 121,
-            "end_line": 121,
+            "start_line": 125,
+            "end_line": 125,
             "code": "TOTAL_SUPPLY.update(deps.storage, |total| total.checked_sub(amount).map_err(StdError::overflow))?;"
           },
           "notes": []
@@ -424,8 +448,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 148,
-            "end_line": 148,
+            "start_line": 157,
+            "end_line": 157,
             "code": "QueryMsg::Balance { address } => to_json_binary(&AmountResponse { amount: BALANCES.may_load(deps.storage, &address)?.unwrap_or_default() }),"
           },
           "notes": []
@@ -455,8 +479,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 149,
-            "end_line": 149,
+            "start_line": 158,
+            "end_line": 158,
             "code": "QueryMsg::Allowance { owner, spender } => to_json_binary(&AmountResponse { amount: ALLOWANCES.may_load(deps.storage, (owner.as_str(), spender.as_str()))?.unwrap_or_default() }),"
           },
           "notes": []
@@ -480,8 +504,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 150,
-            "end_line": 150,
+            "start_line": 159,
+            "end_line": 159,
             "code": "QueryMsg::TotalSupply {} => to_json_binary(&AmountResponse { amount: TOTAL_SUPPLY.load(deps.storage)? }),"
           },
           "notes": []
@@ -505,11 +529,38 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
-            "start_line": 151,
-            "end_line": 151,
+            "start_line": 160,
+            "end_line": 160,
             "code": "QueryMsg::Decimals {} => to_json_binary(&DecimalsResponse { decimals: TOKEN_INFO.load(deps.storage)?.decimals }),"
           },
           "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "execute::SetPolicyMarker",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "write",
+          "resource": "POLICY_MARKER",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/cw20-base/src/lib.rs",
+            "start_line": 137,
+            "end_line": 137,
+            "code": "POLICY_MARKER.save(deps.storage, &true)?;"
+          },
+          "notes": [
+            "Conservative owner-local policy-state marker. It does not claim exact EVM policy values or authorization behavior."
+          ]
         }
       ]
     }

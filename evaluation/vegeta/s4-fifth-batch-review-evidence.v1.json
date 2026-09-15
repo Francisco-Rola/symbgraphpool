@@ -552,6 +552,36 @@
         "Proxy.sol:Proxy",
         "Starknet.sol:Starknet"
       ]
+    },
+    {
+      "blocker_runtime_code_family": "a98942a59ad55662b0e53997e985d47d5e72498bb4cc532930d32a87e8bddc34",
+      "call_frame_selectors": [
+        "0x70a08231",
+        "0xa9059cbb",
+        "0x23b872dd",
+        "0x095ea7b3",
+        "0xdd62ed3e"
+      ],
+      "decision_runtime_code_family": "a98942a59ad55662b0e53997e985d47d5e72498bb4cc532930d32a87e8bddc34",
+      "direct_selectors": [
+        "0x095ea7b3",
+        "0xa9059cbb"
+      ],
+      "evidence_id": "fifth-17-grok-fee-limit-erc20-token",
+      "priority": 33,
+      "review_conclusion": "Verified GROK fee/limit ERC20 with standard token selectors and no delegate targets; reuse fee-token-cw20 for the observed dependency surface.",
+      "sources": [
+        "generated s4-fifth-batch-evidence.json",
+        "generated s4-fifth-batch-source-resolution-cache.json",
+        "Etherscan verified ABI cross-check for 0x8390a1da07e376ef7add4be859ba74fb83aa02d5"
+      ],
+      "storage_owner": "0x8390a1da07e376ef7add4be859ba74fb83aa02d5",
+      "verified_contract_identifiers": [
+        "GROK.sol:GROK"
+      ],
+      "verified_source_files": [
+        "GROK.sol"
+      ]
     }
   ],
   "schema_version": 1

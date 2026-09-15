@@ -12,7 +12,7 @@ FAMILY_MAP="${VEGETA_S4_NATIVE_FAMILY_MAP:-evaluation/vegeta/s4-native-family-ma
 IMPL_MANIFEST="${VEGETA_S4_IMPLEMENTATION_MANIFEST:-evaluation/vegeta/s4-native-implementation-manifest.v1.json}"
 MIN_CONFLICT="${VEGETA_S4_MIN_CONFLICT_COVERAGE:-0.95}"
 MIN_MEDIAN="${VEGETA_S4_MIN_MEDIAN_BLOCK_COVERAGE:-0.80}"
-MIN_FAMILY_STORAGE_ACCESS="${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}"
+DIAG_FAMILY_STORAGE_ACCESS_REFERENCE="${VEGETA_S4_STORAGE_ACCESS_REFERENCE:-${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}}"
 DIAG_FAMILY_CONFLICT_RELEVANT_ACCESS_REFERENCE="${VEGETA_S4_MIN_CONFLICT_RELEVANT_ACCESS_COVERAGE:-0.90}"
 MIN_SEM_TX="${VEGETA_S4_MIN_SEMANTIC_TX_COVERAGE:-0.80}"
 MIN_CONTENTION_TX="${VEGETA_S4_MIN_CONTENTION_TX_COVERAGE:-0.80}"
@@ -88,9 +88,10 @@ python3 tools/vegeta/validate-vegeta-s4-readiness.py \
   --translation-coverage "$PLAN_DIR/translation-coverage.json" \
   --semantic-coverage "$PLAN_DIR/semantic-conflict-coverage.json" \
   --transaction-deficit "$PLAN_DIR/transaction-deficit.json" \
+  --profile scheduler-fidelity \
   --min-conflict "$MIN_CONFLICT" \
   --min-median-block "$MIN_MEDIAN" \
-  --min-family-storage-access "$MIN_FAMILY_STORAGE_ACCESS" \
+  --family-storage-access-reference "$DIAG_FAMILY_STORAGE_ACCESS_REFERENCE" \
   --min-family-conflict-relevant-access "$DIAG_FAMILY_CONFLICT_RELEVANT_ACCESS_REFERENCE" \
   --min-semantic-tx "$MIN_SEM_TX" \
   --min-contention-tx "$MIN_CONTENTION_TX" \

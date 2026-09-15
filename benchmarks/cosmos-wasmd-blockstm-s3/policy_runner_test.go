@@ -162,6 +162,25 @@ func TestResolveSymbolicKeyMatchesRustInputRules(t *testing.T) {
 	}
 }
 
+func TestSymbolicPredictorIgnoresSymbolicBundleManifest(t *testing.T) {
+	dir := t.TempDir()
+	profile := `{"contract":"cw20-base","profiles":[{"entrypoint":"execute::Transfer","accesses":[]}]}`
+	if err := os.WriteFile(filepath.Join(dir, "cw20-base.symbolic.json"), []byte(profile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundleManifest := `{"schema_version":1,"dataset":"vegeta-s4","profiles":[{"native_code_family":"cw20-base","file":"cw20-base.symbolic.json"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(bundleManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	predictor, err := loadSymbolicPredictor(".", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if predictor.documentCount != 1 || predictor.profileCount != 1 {
+		t.Fatalf("loaded documents/profiles=%d/%d want 1/1", predictor.documentCount, predictor.profileCount)
+	}
+}
+
 func TestSymbolicPredictorSyntheticProfileAndBankDependencies(t *testing.T) {
 	dir := t.TempDir()
 	profile := `{

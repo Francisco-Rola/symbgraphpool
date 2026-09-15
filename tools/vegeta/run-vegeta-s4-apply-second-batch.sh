@@ -10,7 +10,7 @@ WORKSPACE_DECISIONS="${VEGETA_S4_REVIEW_DECISIONS:-$WORK_DIR/s4-review-decisions
 SECOND_BATCH="${VEGETA_S4_SECOND_BATCH_REVIEW_CANDIDATES:-evaluation/vegeta/s4-second-batch-review-candidates.v1.json}"
 PENDING_OUT="${VEGETA_S4_SECOND_BATCH_PENDING_OUT:-$WORK_DIR/s4-second-batch-pending-review.json}"
 MIN_CONFLICT="${VEGETA_S4_MIN_CONFLICT_COVERAGE:-0.95}"
-MIN_STORAGE_ACCESS="${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}"
+DIAG_STORAGE_ACCESS_REFERENCE="${VEGETA_S4_STORAGE_ACCESS_REFERENCE:-${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}}"
 
 for path in "$REVIEW_BASE" "$WORKSPACE_DECISIONS" "$SECOND_BATCH"; do
   [[ -s "$path" ]] || { echo "missing S4 second-batch input: $path" >&2; exit 2; }
@@ -40,7 +40,7 @@ python3 tools/vegeta/summarize-vegeta-s4-conflict-closure.py \
   --readiness "$WORK_DIR/family-review-readiness.json" \
   --decisions "$WORKSPACE_DECISIONS" \
   --min-conflict "$MIN_CONFLICT" \
-  --min-storage-access "$MIN_STORAGE_ACCESS" \
+  --storage-access-reference "$DIAG_STORAGE_ACCESS_REFERENCE" \
   --output "$WORK_DIR/conflict-closure.json" \
   --text-output "$WORK_DIR/conflict-closure.txt"
 

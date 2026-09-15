@@ -3,9 +3,9 @@
 
 This is an offline planning aid.  It never mutates the reviewed/frozen family map.
 The key unit is the *complete unresolved family set* for a source transaction. The
-publication/family-freeze hard targets are all-storage-access coverage and exact source
-conflict-pair coverage. Conflict-relevant access and strict fully-mapped transaction gas
-remain diagnostics.
+scheduler-fidelity publication/family-freeze hard target is exact source conflict-pair
+coverage, matching S1. All-storage, conflict-relevant access, and strict fully-mapped
+transaction gas remain transparent diagnostics.
 """
 from __future__ import annotations
 
@@ -116,7 +116,7 @@ def main() -> int:
     ap.add_argument("--top-families", type=int, default=100)
     ap.add_argument(
         "--target-storage-access", type=float, default=0.90,
-        help="hard target for coverage of all concrete source storage-access records",
+        help="diagnostic reference for coverage of all concrete source storage-access records",
     )
     ap.add_argument(
         "--target-conflict-relevant-access", type=float, default=0.90,
@@ -304,7 +304,7 @@ def main() -> int:
 
     # Conflict-relevant semantic surface: every concrete storage access whose owner
     # participates in at least one observed cross-transaction source conflict. This is a
-    # useful secondary diagnostic; the hard storage gate uses the complete access surface.
+    # useful secondary diagnostic; all storage-volume views are diagnostic for scheduler-fidelity.
     total_conflict_relevant_access_records = sum(owner_access_records[o] for o in conflict_relevant_owners)
     currently_covered_conflict_relevant_access_records = sum(
         owner_access_records[o] for o in conflict_relevant_owners if o in mapped_storage_owners
@@ -370,7 +370,7 @@ def main() -> int:
     }
     write_json(ns.clusters_output, cluster_doc)
 
-    # Dual-gate set-cover planning: all source storage-access records and exact unique source
+    # Multi-view planning: exact unique source conflict coverage is the scheduler-fidelity gate; all source storage-access records are diagnostic.
     # conflict pairs are the hard targets. Access records are disjoint across blocker ids,
     # while conflict pairs can overlap across families, so projected conflict gain is
     # recomputed exactly from the union of selected blocker-pair sets at every step.
@@ -399,7 +399,13 @@ def main() -> int:
         for step_no in range(1, ns.max_greedy_steps + 1):
             access_cov = (covered_access_records / total_state_access_records if total_state_access_records else 1.0)
             conflict_cov = len(covered_pairs) / total_conflict_pairs if total_conflict_pairs else 1.0
-            if covered_access_records >= target_storage_access_records and len(covered_pairs) >= target_conflict_pairs:
+            if mode == "conflict-first":
+                if len(covered_pairs) >= target_conflict_pairs:
+                    break
+            elif mode == "access-first":
+                if covered_access_records >= target_storage_access_records:
+                    break
+            elif covered_access_records >= target_storage_access_records and len(covered_pairs) >= target_conflict_pairs:
                 break
 
             remaining_access_deficit = max(target_storage_access_records - covered_access_records, 0)
@@ -473,7 +479,7 @@ def main() -> int:
                 {
                     "step": step_no,
                     "plan_mode": mode,
-                    "selection_reason": "publication-gate-deficit-closure",
+                    "selection_reason": ("scheduler-fidelity-conflict-closure" if mode == "conflict-first" else "diagnostic-coverage-expansion"),
                     "newly_covered_storage_access_records": access_gain,
                     "newly_covered_all_storage_access_records": access_gain,
                     "newly_covered_all_storage_access_records_diagnostic": access_gain,  # compatibility alias
@@ -597,18 +603,19 @@ def main() -> int:
         ),
     )
     plan_doc = {
-        "schema_version": 4,
+        "schema_version": 5,
         "dataset": family_map.get("dataset"),
         "method": (
-            "Dual-gate set-cover planning over hard all-storage-access and exact source-conflict targets. "
-            "The balanced/access-first/conflict-first plans expose the tradeoff. Conflict-relevant access and strict fully "
-            "mapped transaction gas remain diagnostics; strict-gas complement lookahead never affects publication-gate ordering."
+            "S1-analogous scheduler-fidelity planning over the exact source-conflict target. "
+            "Conflict-first is the publication-oriented plan; balanced/access-first views preserve storage-volume diagnostics. "
+            "All-storage, conflict-relevant access, and strict fully mapped transaction gas are not publication gates."
         ),
         "safety_note": (
             "Planner suggestions never modify the family map. Runtime-family equivalence does not imply semantic "
             "equivalence; every selected family still requires explicit review and the normal exact coverage gate."
         ),
-        "target_storage_access_coverage": ns.target_storage_access,
+        "target_storage_access_coverage_diagnostic_reference": ns.target_storage_access,
+        "target_storage_access_coverage": ns.target_storage_access,  # compatibility alias
         "target_storage_access_records": target_storage_access_records,
         "target_conflict_relevant_access_coverage_diagnostic": ns.target_conflict_relevant_access,
         "target_conflict_relevant_access_records_diagnostic": target_conflict_relevant_access_records,
@@ -632,7 +639,8 @@ def main() -> int:
         "current_conflict_coverage": current_conflict_coverage,
         "total_conflict_pairs": total_conflict_pairs,
         "current_covered_conflict_pairs": currently_covered_conflict_pairs,
-        "remaining_storage_access_deficit_records": max(target_storage_access_records - currently_covered_access_records, 0),
+        "remaining_storage_access_deficit_records_diagnostic": max(target_storage_access_records - currently_covered_access_records, 0),
+        "remaining_storage_access_deficit_records": max(target_storage_access_records - currently_covered_access_records, 0),  # compatibility alias
         "remaining_conflict_relevant_access_deficit_records_diagnostic": max(
             target_conflict_relevant_access_records - currently_covered_conflict_relevant_access_records, 0
         ),
@@ -644,16 +652,16 @@ def main() -> int:
         "access_first_plan": access_plan,
         "conflict_first_plan": conflict_plan,
         "strict_gas_diagnostic_steps": strict_gas_diagnostic_steps,
-        # Backward-compatible alias: existing scripts that read greedy_steps now receive
-        # the balanced planning-reference plan.
-        "greedy_steps": balanced_plan["steps"],
-        "projected_storage_access_coverage_after_steps": balanced_plan["projected_storage_access_coverage"],
-        "projected_all_storage_access_coverage_after_steps_diagnostic": balanced_plan["projected_storage_access_coverage"],  # compatibility alias
-        "projected_conflict_relevant_access_coverage_after_steps": balanced_plan["projected_conflict_relevant_access_coverage"],
-        "projected_conflict_coverage_after_steps": balanced_plan["projected_conflict_coverage"],
-        "projected_state_gas_coverage_after_steps_diagnostic": balanced_plan["projected_fully_mapped_state_gas_coverage_diagnostic"],
-        "target_reached_by_plan": balanced_plan["both_targets_reached"],
-        "all_publication_gates_reached_by_plan": balanced_plan["both_targets_reached"],
+        # Backward-compatible alias: existing scripts that read greedy_steps receive the
+        # publication-oriented conflict-first plan, matching S1 family expansion.
+        "greedy_steps": conflict_plan["steps"],
+        "projected_storage_access_coverage_after_steps": conflict_plan["projected_storage_access_coverage"],
+        "projected_all_storage_access_coverage_after_steps_diagnostic": conflict_plan["projected_storage_access_coverage"],
+        "projected_conflict_relevant_access_coverage_after_steps": conflict_plan["projected_conflict_relevant_access_coverage"],
+        "projected_conflict_coverage_after_steps": conflict_plan["projected_conflict_coverage"],
+        "projected_state_gas_coverage_after_steps_diagnostic": conflict_plan["projected_fully_mapped_state_gas_coverage_diagnostic"],
+        "target_reached_by_plan": conflict_plan["conflict_target_reached"],
+        "scheduler_fidelity_conflict_target_reached_by_plan": conflict_plan["conflict_target_reached"],
         "top_blockers_by_attributed_gas": family_rows[: ns.top_families],
     }
     if ns.coverage and ns.coverage.exists():
@@ -685,11 +693,11 @@ def main() -> int:
     lines = [
         "Vegeta S4 semantic coverage planner",
         "",
-        f"current all storage-access coverage: {currently_covered_access_records}/{total_state_access_records} ({100*current_storage_access_coverage:.2f}%)",
+        f"current all storage-access coverage (diagnostic): {currently_covered_access_records}/{total_state_access_records} ({100*current_storage_access_coverage:.2f}%)",
         f"current conflict-relevant storage-access coverage (diagnostic): {currently_covered_conflict_relevant_access_records}/{total_conflict_relevant_access_records} ({100*current_conflict_relevant_access_coverage:.2f}%)",
         f"current fully mapped state gas (conservative diagnostic): {currently_covered_gas}/{source_state_gas} ({100*current_gas_coverage:.2f}%)",
         f"current conflict coverage: {currently_covered_conflict_pairs}/{total_conflict_pairs} ({100*current_conflict_coverage:.2f}%)",
-        f"remaining all-storage access deficit to {100*ns.target_storage_access:.1f}%: {max(target_storage_access_records-currently_covered_access_records,0)} records",
+        f"all-storage diagnostic shortfall to {100*ns.target_storage_access:.1f}% reference: {max(target_storage_access_records-currently_covered_access_records,0)} records",
         f"remaining conflict deficit to {100*ns.target_conflict:.1f}%: {max(target_conflict_pairs-currently_covered_conflict_pairs,0)} pairs",
         f"conflict-relevant access diagnostic deficit to {100*ns.target_conflict_relevant_access:.1f}%: {max(target_conflict_relevant_access_records-currently_covered_conflict_relevant_access_records,0)} records",
         f"unresolved blocker families/owners: {len(blockers)}",
@@ -724,12 +732,12 @@ def main() -> int:
             f"relevant-access-diagnostic={100*plan['projected_conflict_relevant_access_coverage']:.2f}% "
             f"conflict={100*plan['projected_conflict_coverage']:.2f}% "
             f"strict-gas={100*plan['projected_fully_mapped_state_gas_coverage_diagnostic']:.2f}% "
-            f"both-publication-gates={'YES' if plan['both_targets_reached'] else 'NO'}"
+            f"conflict-target={'YES' if plan['conflict_target_reached'] else 'NO'} storage-reference={'YES' if plan['storage_access_target_reached'] else 'NO'}"
         )
 
-    append_plan("Balanced dual-gate plan:", balanced_plan)
-    append_plan("Access-first plan:", access_plan, 25)
-    append_plan("Conflict-first plan:", conflict_plan, 25)
+    append_plan("Scheduler-fidelity conflict-closure plan:", conflict_plan)
+    append_plan("Balanced diagnostic tradeoff plan:", balanced_plan, 25)
+    append_plan("Access-first diagnostic plan:", access_plan, 25)
 
     lines.extend(["", "Strict fully-mapped gas diagnostic plan (NOT used for family-freeze ordering):"])
     for row in strict_gas_diagnostic_steps[:20]:
@@ -739,10 +747,9 @@ def main() -> int:
         )
     lines += [
         "",
-        f"balanced HARD storage-access target reached: {'YES' if balanced_plan['storage_access_target_reached'] else 'NO'}",
-        f"balanced HARD conflict target reached: {'YES' if balanced_plan['conflict_target_reached'] else 'NO'}",
-        f"balanced conflict-relevant-access diagnostic reference reached: {'YES' if balanced_plan['conflict_relevant_access_reference_reached'] else 'NO'}",
-        f"balanced both publication gates reached: {'YES' if balanced_plan['both_targets_reached'] else 'NO'}",
+        f"scheduler-fidelity HARD conflict target reached: {'YES' if conflict_plan['conflict_target_reached'] else 'NO'}",
+        f"all-storage diagnostic reference reached: {'YES' if conflict_plan['storage_access_target_reached'] else 'NO'}",
+        f"conflict-relevant-access diagnostic reference reached: {'YES' if conflict_plan['conflict_relevant_access_reference_reached'] else 'NO'}",
         "",
         "Planning only: no family is executable until human review updates the review decisions/base map and the exact review gate passes.",
     ]

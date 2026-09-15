@@ -4,7 +4,7 @@
   "source": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
   "analysis_provenance": {
     "method": "llm-source-derived",
-    "source_sha256": "ce5b368327ffa7e0c4d20e305ab84bba909c87736d5b18b11f396a109a744809",
+    "source_sha256": "687d45e82bccd7775fc615c008e06c79516de39cf650d2c144e43a6e67e99900",
     "source_scope": "complete native contract source",
     "historical_trace_keys_used": false,
     "note": "Profiles were derived from the checked-in native contract source after source/interface review of Seaport, Universal Router V1, and Blur Exchange semantics. Exact S3 attribution selected the pre-declared family extension, but no historical concrete EVM storage keys or per-transaction access sets were used as symbolic inputs."
@@ -47,8 +47,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 71,
-            "end_line": 71,
+            "start_line": 72,
+            "end_line": 72,
             "code": "ROUTER_LOCK.save(deps.storage, &false)?;"
           },
           "notes": []
@@ -66,8 +66,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 72,
-            "end_line": 72,
+            "start_line": 73,
+            "end_line": 73,
             "code": "BLUR_EXECUTION_GUARD.save(deps.storage, &false)?;"
           },
           "notes": []
@@ -96,8 +96,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 81,
-            "end_line": 81,
+            "start_line": 82,
+            "end_line": 82,
             "code": "ORDERS.save(deps.storage, order_id, &state)?;"
           },
           "notes": []
@@ -126,8 +126,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 81,
-            "end_line": 81,
+            "start_line": 82,
+            "end_line": 82,
             "code": "ORDERS.save(deps.storage, order_id, &state)?;"
           },
           "notes": []
@@ -156,8 +156,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 81,
-            "end_line": 81,
+            "start_line": 82,
+            "end_line": 82,
             "code": "ORDERS.save(deps.storage, order_id, &state)?;"
           },
           "notes": []
@@ -186,8 +186,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 81,
-            "end_line": 81,
+            "start_line": 82,
+            "end_line": 82,
             "code": "ORDERS.save(deps.storage, order_id, &state)?;"
           },
           "notes": []
@@ -216,8 +216,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 115,
-            "end_line": 115,
+            "start_line": 116,
+            "end_line": 116,
             "code": "COUNTERS.update(deps.storage, info.sender.as_str(), |old| -> StdResult<_> {"
           },
           "notes": []
@@ -243,8 +243,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 89,
-            "end_line": 89,
+            "start_line": 90,
+            "end_line": 90,
             "code": "let value = guard.may_load(storage)?.unwrap_or(false);"
           },
           "notes": []
@@ -262,8 +262,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 91,
-            "end_line": 91,
+            "start_line": 92,
+            "end_line": 92,
             "code": "guard.save(storage, &value)"
           },
           "notes": []
@@ -292,8 +292,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 89,
-            "end_line": 89,
+            "start_line": 90,
+            "end_line": 90,
             "code": "let value = guard.may_load(storage)?.unwrap_or(false);"
           },
           "notes": []
@@ -311,8 +311,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 91,
-            "end_line": 91,
+            "start_line": 92,
+            "end_line": 92,
             "code": "guard.save(storage, &value)"
           },
           "notes": []
@@ -338,8 +338,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 89,
-            "end_line": 89,
+            "start_line": 90,
+            "end_line": 90,
             "code": "let value = guard.may_load(storage)?.unwrap_or(false);"
           },
           "notes": []
@@ -357,8 +357,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 91,
-            "end_line": 91,
+            "start_line": 92,
+            "end_line": 92,
             "code": "guard.save(storage, &value)"
           },
           "notes": []
@@ -379,8 +379,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 126,
-            "end_line": 126,
+            "start_line": 127,
+            "end_line": 127,
             "code": "ORDERS.save(deps.storage, &order_id, &OrderState::Fulfilled)?;"
           },
           "notes": []
@@ -412,8 +412,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 136,
-            "end_line": 136,
+            "start_line": 137,
+            "end_line": 137,
             "code": "state: ORDERS.may_load(deps.storage, &order_id)?,"
           },
           "notes": []
@@ -442,11 +442,38 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
-            "start_line": 140,
-            "end_line": 140,
+            "start_line": 141,
+            "end_line": 141,
             "code": ".may_load(deps.storage, &address)?"
           },
           "notes": []
+        }
+      ]
+    },
+    {
+      "entrypoint": "query::ReadRouteLock",
+      "input_parameters": [],
+      "accesses": [
+        {
+          "kind": "read",
+          "resource": "ROUTER_LOCK",
+          "key": {
+            "semantic_name": "singleton",
+            "depends_on": null
+          },
+          "guard": {
+            "expression": "true",
+            "dependency_kind": "none"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/marketplace-router/src/lib.rs",
+            "start_line": 144,
+            "end_line": 144,
+            "code": "QueryMsg::ReadRouteLock {} => to_json_binary(&ROUTER_LOCK.may_load(deps.storage)?.unwrap_or(false))"
+          },
+          "notes": [
+            "Read-only system-family aliases use the same conservative per-instance route-lock dependency as reviewed mutators."
+          ]
         }
       ]
     }

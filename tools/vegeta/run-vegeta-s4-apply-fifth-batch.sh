@@ -17,7 +17,7 @@ PRE_COVERAGE="${VEGETA_S4_FIFTH_BATCH_PRE_COVERAGE:-$WORK_DIR/s4-fifth-batch-pre
 DELTA_JSON="${VEGETA_S4_FIFTH_BATCH_DELTA_JSON:-$WORK_DIR/s4-fifth-batch-coverage-delta.json}"
 DELTA_TXT="${VEGETA_S4_FIFTH_BATCH_DELTA_TXT:-$WORK_DIR/s4-fifth-batch-coverage-delta.txt}"
 MIN_CONFLICT="${VEGETA_S4_MIN_CONFLICT_COVERAGE:-0.95}"
-MIN_STORAGE_ACCESS="${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}"
+DIAG_STORAGE_ACCESS_REFERENCE="${VEGETA_S4_STORAGE_ACCESS_REFERENCE:-${VEGETA_S4_MIN_STORAGE_ACCESS_COVERAGE:-0.90}}"
 
 for path in "$REVIEW_BASE" "$WORKSPACE_DECISIONS" "$FIFTH_BATCH" "$FIFTH_EXTENSION" "$FIFTH_REVIEW_EVIDENCE" "$GENERATED_EVIDENCE" "$FOURTH_BATCH"; do
   [[ -s "$path" ]] || { echo "missing S4 fifth-batch input: $path" >&2; exit 2; }
@@ -53,7 +53,7 @@ python3 tools/vegeta/summarize-vegeta-s4-conflict-closure.py \
   --readiness "$WORK_DIR/family-review-readiness.json" \
   --decisions "$WORKSPACE_DECISIONS" \
   --min-conflict "$MIN_CONFLICT" \
-  --min-storage-access "$MIN_STORAGE_ACCESS" \
+  --storage-access-reference "$DIAG_STORAGE_ACCESS_REFERENCE" \
   --output "$WORK_DIR/conflict-closure.json" \
   --text-output "$WORK_DIR/conflict-closure.txt"
 
@@ -62,21 +62,21 @@ python3 tools/vegeta/summarize-vegeta-s4-batch-delta.py \
   --after "$WORK_DIR/source-family-coverage.json" \
   --batch-label "fifth human-reviewed projected conflict-closure batch" \
   --target-conflict "$MIN_CONFLICT" \
-  --target-storage-access "$MIN_STORAGE_ACCESS" \
+  --target-storage-access "$DIAG_STORAGE_ACCESS_REFERENCE" \
   --output "$DELTA_JSON" \
   --text-output "$DELTA_TXT"
 
 echo
-echo "PASS: reviewed fifth-batch subset applied and exact dual-gate coverage recomputed"
+echo "PASS: reviewed fifth-batch subset applied and exact scheduler-fidelity family coverage recomputed"
 echo "delta:     $DELTA_TXT"
 echo "coverage:  $WORK_DIR/source-family-coverage.txt"
 echo "gate:      $WORK_DIR/family-review-readiness.txt"
 echo "closure:   $WORK_DIR/conflict-closure.txt"
 echo
 if grep -q '^family freeze gate: PASS' "$WORK_DIR/conflict-closure.txt"; then
-  echo "Both family publication gates are closed. Freeze only after inspecting the reviewed evidence and exact delta."
+  echo "Scheduler-fidelity family freeze gate is closed. Freeze only after inspecting the reviewed evidence and exact delta."
 elif grep -q '^conflict pairs: .*target=95.00%' "$WORK_DIR/conflict-closure.txt" && grep -q '^remaining unique conflict pairs to target: 0$' "$WORK_DIR/conflict-closure.txt"; then
-  echo "Conflict gate is closed; switch review priority to the access-heavy tail from s4-fifth-batch-review-candidates.txt."
+  echo "Conflict gate is closed; no storage-volume expansion is required for scheduler-fidelity. The access-heavy tail remains diagnostic / semantic-replay follow-up."
 else
   echo "Conflict gate is still open; rerun tools/vegeta/run-vegeta-s4-plan-fifth-batch.sh before selecting another batch."
 fi

@@ -1713,6 +1713,72 @@ class NativeS3ExecutionPreparationTests(unittest.TestCase):
         self.assertEqual(resolved["statistics"]["token_approvals_resolved"], 1)
         self.assertEqual(resolved["statistics"]["operator_approvals_true"], 1)
 
+    def test_historical_eth_call_cache_retries_http_429_and_persists_progress(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_path = Path(td) / "state-cache.json"
+            resolver = native_execution_preparer.HistoricalEthCallCache(
+                "https://rpc.invalid", 123, cache_path,
+                min_interval=0, max_retries=2, progress_every=1,
+            )
+            http429 = native_execution_preparer.urllib.error.HTTPError(
+                "https://rpc.invalid", 429, "Too Many Requests", {"Retry-After": "0"}, None
+            )
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "result": "0x" + ("00" * 12) + ("11" * 20),
+            }).encode()
+            with mock.patch.object(native_execution_preparer.urllib.request, "urlopen", side_effect=[http429, response]) as urlopen, \
+                 mock.patch.object(native_execution_preparer.time, "sleep"):
+                result = resolver.call("0x" + "aa" * 20, "0x6352211e" + "00" * 32)
+            self.assertTrue(result.startswith("0x"))
+            self.assertEqual(resolver.rate_limits, 1)
+            self.assertEqual(resolver.remote_calls, 1)
+            self.assertTrue(cache_path.exists())
+            # A rerun must reuse the successful call without touching the provider.
+            with mock.patch.object(native_execution_preparer.urllib.request, "urlopen") as cached_urlopen:
+                again = resolver.call("0x" + "aa" * 20, "0x6352211e" + "00" * 32)
+            self.assertEqual(again, result)
+            cached_urlopen.assert_not_called()
+
+    def test_execution_resume_reconstructs_completed_translation_without_retranslating(self):
+        owner = "0x" + "11" * 20
+        caller = "0x" + "22" * 20
+        recipient = "0x" + "33" * 20
+        iid = "cw721-drop:0x" + "aa" * 20
+        raw_tid = (1 << 256) - 1
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            source_plan = td / "native-plan.jsonl"
+            prepared = td / "execution-plan.jsonl.tmp"
+            source_plan.write_text(json.dumps({
+                "block_number": 100,
+                "transactions": [{"tx_hash": "0x" + "44" * 32, "native_actions": [{"ethereum_msg_sender": caller}]}],
+            }) + "\n")
+            prepared.write_text(json.dumps({
+                "block_number": 100, "timestamp": 1,
+                "transactions": [{
+                    "tx_index": 0, "tx_hash": "0x" + "44" * 32,
+                    "source_failed": False, "skipped_actions": 0,
+                    "calls": [{
+                        "kind": "execute", "family": "cw721-drop", "instance_id": iid,
+                        "sender": caller, "source_owner": owner, "source_token_id": raw_tid,
+                        "msg": {"transfer_nft": {"recipient": recipient, "token_id": 1}},
+                    }],
+                }],
+            }) + "\n")
+            recovered = native_execution_preparer.recover_translated_execution_state(
+                prepared, source_plan, native_execution_preparer.Cw721DropMintSequence(None),
+                progress_every=1,
+            )
+            self.assertEqual(recovered["block_count"], 1)
+            self.assertEqual(recovered["stats"]["transactions"], 1)
+            self.assertEqual(recovered["nft_source_tokens"][iid][1], raw_tid)
+            self.assertIn((iid, owner, caller), recovered["nft_operator_pairs"])
+            self.assertEqual(recovered["token_ids"].map(iid, raw_tid), 1)
+            self.assertEqual(recovered["stats"]["explicit_msg_senders"], 1)
+
     def test_abi_erc721_initial_state_helpers_decode_addresses_and_bool(self):
         addr = "0x" + ("ab" * 20)
         self.assertEqual(
@@ -1921,6 +1987,150 @@ class NativeS3ExecutionPreparationTests(unittest.TestCase):
         native_1155 = call_1155["msg"]["send_from"]["token_id"]
         self.assertEqual(native_1155, 1)
         self.assertLessEqual(native_1155, native_execution_preparer.U64_MAX)
+
+    def test_s4_cw721_drop_uint256_token_id_uses_dense_mapping_without_sequence_audit(self):
+        mapper = native_execution_preparer.TokenIdRemapper()
+        owner = "0x" + "aa" * 20
+        spender = "0x" + "bb" * 20
+        huge = (1 << 256) - 1
+        action = {
+            "action_id": 1,
+            "native_instance_id": "cw721-drop:" + owner,
+            "ethereum_input": "0x095ea7b3" + (("00" * 12) + spender[2:]) + huge.to_bytes(32, "big").hex(),
+            "arguments": {"spender": spender, "token_id": huge},
+        }
+        call = native_execution_preparer.translate(
+            "cw721-drop", "execute::ApproveNft", "approve(address,uint256)",
+            {}, action, owner, mapper, None, None,
+        )
+        self.assertEqual(call["source_token_id"], huge)
+        self.assertEqual(call["msg"]["approve_nft"]["token_id"], 1)
+        self.assertLessEqual(call["msg"]["approve_nft"]["token_id"], native_execution_preparer.U64_MAX)
+        # Repeated references to the same uint256 token must share the same native key.
+        again = native_execution_preparer.translate(
+            "cw721-drop", "query::OwnerOf", "ownerOf(uint256)",
+            {}, {
+                "action_id": 2,
+                "native_instance_id": "cw721-drop:" + owner,
+                "ethereum_input": "0x6352211e" + huge.to_bytes(32, "big").hex(),
+                "arguments": {"token_id": huge},
+            }, owner, mapper, None, None,
+        )
+        self.assertEqual(again["msg"]["owner_of"]["token_id"], 1)
+
+    def test_s4_reviewed_sequential_drop_instance_preserves_source_u64_identity(self):
+        mapper = native_execution_preparer.TokenIdRemapper()
+        owner = "0x" + "ab" * 20
+        iid = "cw721-drop:" + owner
+        token_id = 2247
+        call = native_execution_preparer.translate(
+            "cw721-drop", "execute::ApproveNft", "approve(address,uint256)",
+            {}, {
+                "action_id": 1,
+                "native_instance_id": iid,
+                "ethereum_input": "0x",
+                "arguments": {"spender": "0x" + "cd" * 20, "token_id": token_id},
+            }, owner, mapper, None, None, {iid},
+        )
+        self.assertEqual(call["source_token_id"], token_id)
+        self.assertEqual(call["msg"]["approve_nft"]["token_id"], token_id)
+
+        # A generic cw721-drop alias without a reviewed sequential mint path still supports
+        # arbitrary uint256 IDs through the dense remapper.
+        generic = "cw721-drop:0x" + "ef" * 20
+        huge = (1 << 256) - 1
+        dense = native_execution_preparer.translate(
+            "cw721-drop", "query::OwnerOf", "ownerOf(uint256)",
+            {}, {
+                "action_id": 2, "native_instance_id": generic, "ethereum_input": "0x",
+                "arguments": {"token_id": huge},
+            }, owner, mapper, None, None, {iid},
+        )
+        self.assertEqual(dense["msg"]["owner_of"]["token_id"], 1)
+
+    def test_discovers_sequential_cw721_drop_instances_from_reviewed_mint_plan(self):
+        owner = "0x" + "12" * 20
+        iid = "cw721-drop:" + owner
+        with tempfile.TemporaryDirectory() as td:
+            plan = Path(td) / "native-plan.jsonl"
+            plan.write_text(json.dumps({
+                "block_number": 1,
+                "transactions": [{"native_actions": [{
+                    "action_id": 1,
+                    "native_code_family": "cw721-drop",
+                    "native_entrypoint": "execute::archetype_mint_drop",
+                    "native_instance_id": iid,
+                    "storage_context_address": owner,
+                }]}],
+            }) + "\n")
+            self.assertEqual(
+                native_execution_preparer.discover_sequential_cw721_drop_instances(plan),
+                {iid},
+            )
+
+    def test_cw721_token_lifecycle_preflight_catches_mint_cursor_misalignment(self):
+        owner = "0x" + "34" * 20
+        iid = "cw721-drop:" + owner
+        prime = [{
+            "kind": "execute", "family": "cw721-drop", "instance_id": iid,
+            "sender": "native-s3-admin", "msg": {"seed_mint": {"owner": owner, "token_id": 2000}},
+        }]
+        block = {
+            "block_number": 18581737,
+            "transactions": [
+                {
+                    "tx_index": 119, "tx_hash": "0x" + "11" * 32, "source_failed": False,
+                    "calls": [{
+                        "kind": "execute", "family": "cw721-drop", "instance_id": iid,
+                        "sender": owner, "msg": {"mint_drop": {"recipient": owner, "quantity": 1, "stage_key": None, "nonce_key": None}},
+                    }],
+                },
+                {
+                    "tx_index": 120, "tx_hash": "0x" + "22" * 32, "source_failed": False,
+                    "calls": [{
+                        "kind": "execute", "family": "cw721-drop", "instance_id": iid,
+                        "sender": owner, "msg": {"approve_nft": {"spender": "0x" + "56" * 20, "token_id": 2248}},
+                    }],
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            execution = Path(td) / "execution-plan.jsonl.tmp"
+            execution.write_text(json.dumps(block) + "\n")
+            bad_instances = [{
+                "instance_id": iid, "family": "cw721-drop",
+                "instantiate_msg": {"admin": "native-s3-admin", "name": "D", "symbol": "D", "next_token_id": 1},
+            }]
+            with self.assertRaisesRegex(RuntimeError, "token-lifecycle preflight failed"):
+                native_execution_preparer.validate_cw721_token_lifecycle(execution, bad_instances, prime)
+
+            good_instances = [{
+                "instance_id": iid, "family": "cw721-drop",
+                "instantiate_msg": {"admin": "native-s3-admin", "name": "D", "symbol": "D", "next_token_id": 2248},
+            }]
+            stats = native_execution_preparer.validate_cw721_token_lifecycle(execution, good_instances, prime)
+            self.assertEqual(stats["blocks"], 1)
+            self.assertEqual(stats["transactions"], 2)
+
+    def test_cw721_drop_sequence_audit_still_preserves_source_u64_identity(self):
+        class SequenceStub:
+            @staticmethod
+            def owner_for_instance(instance_id):
+                return instance_id.split(":", 1)[1]
+
+        mapper = native_execution_preparer.TokenIdRemapper()
+        owner = "0x" + "cc" * 20
+        token_id = 3210
+        call = native_execution_preparer.translate(
+            "cw721-drop", "query::OwnerOf", "ownerOf(uint256)",
+            {}, {
+                "action_id": 1,
+                "native_instance_id": "cw721-drop:" + owner,
+                "ethereum_input": "0x6352211e" + token_id.to_bytes(32, "big").hex(),
+                "arguments": {"token_id": token_id},
+            }, owner, mapper, None, SequenceStub(),
+        )
+        self.assertEqual(call["msg"]["owner_of"]["token_id"], token_id)
 
     def test_selector_rule_matching_respects_address_scope(self):
         family = "11" * 32

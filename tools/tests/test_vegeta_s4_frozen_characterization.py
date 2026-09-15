@@ -126,20 +126,20 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
             self.assertAlmostEqual(plan['current_state_gas_coverage'],0.1)
             self.assertAlmostEqual(plan['current_conflict_relevant_access_coverage'],0.0)
             self.assertAlmostEqual(plan['current_storage_access_coverage'],0.25)
-            self.assertEqual(plan['schema_version'],4)
+            self.assertEqual(plan['schema_version'],5)
             self.assertEqual(plan['target_storage_access_records'],4)
             self.assertEqual(plan['target_conflict_pairs'],1)
-            self.assertEqual(plan['greedy_steps'],plan['balanced_plan']['steps'])
+            self.assertEqual(plan['greedy_steps'],plan['conflict_first_plan']['steps'])
             self.assertEqual(plan['greedy_steps'][0]['runtime_code_family'],fam_b)
             self.assertEqual(plan['greedy_steps'][0]['newly_unlocked_gas'],300)
             self.assertEqual(plan['greedy_steps'][0]['newly_covered_conflict_pairs'],1)
             self.assertAlmostEqual(plan['greedy_steps'][0]['cumulative_projected_state_gas_coverage'],0.4)
             self.assertAlmostEqual(plan['greedy_steps'][0]['cumulative_projected_conflict_relevant_access_coverage'],1.0)
-            self.assertAlmostEqual(plan['greedy_steps'][0]['cumulative_projected_storage_access_coverage'],0.75)
+            self.assertAlmostEqual(plan['greedy_steps'][0]['cumulative_storage_access_coverage'] if 'cumulative_storage_access_coverage' in plan['greedy_steps'][0] else plan['greedy_steps'][0]['cumulative_projected_storage_access_coverage'],0.75)
             self.assertAlmostEqual(plan['greedy_steps'][0]['cumulative_projected_conflict_coverage'],1.0)
-            self.assertEqual(plan['greedy_steps'][1]['runtime_code_family'],fam_c)
-            self.assertAlmostEqual(plan['greedy_steps'][1]['cumulative_projected_storage_access_coverage'],1.0)
-            self.assertEqual(len(plan['greedy_steps']),2)
+            self.assertEqual(len(plan['greedy_steps']),1)
+            self.assertEqual(plan['balanced_plan']['steps'][1]['runtime_code_family'],fam_c)
+            self.assertAlmostEqual(plan['balanced_plan']['steps'][1]['cumulative_projected_storage_access_coverage'],1.0)
             self.assertEqual(plan['strict_gas_diagnostic_steps'][0]['runtime_code_family'],fam_b)
             self.assertEqual(plan['strict_gas_diagnostic_steps'][1]['runtime_code_family'],fam_c)
             self.assertEqual(plan['strict_gas_diagnostic_steps'][1]['newly_unlocked_gas'],600)
@@ -183,7 +183,8 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
             self.assertEqual(len(diag[0]['lookahead_group']),2)
             self.assertEqual(diag[0]['newly_unlocked_gas'],0)
             self.assertEqual(diag[1]['newly_unlocked_gas'],1200)
-            self.assertTrue(all(r['selection_reason']=='publication-gate-deficit-closure' for r in plan['greedy_steps']))
+            self.assertEqual(plan['greedy_steps'],[])
+            self.assertTrue(all(r['selection_reason']=='diagnostic-coverage-expansion' for r in plan['balanced_plan']['steps']))
 
     def test_semantic_coverage_planner_emits_balanced_access_and_conflict_plans(self):
         with tempfile.TemporaryDirectory() as td:
@@ -219,9 +220,10 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
             self.assertEqual(plan['balanced_plan']['steps'][1]['runtime_code_family'],fam[access_owner])
             self.assertTrue(plan['balanced_plan']['both_targets_reached'])
             text=(d/'plan.txt').read_text()
-            self.assertIn('Balanced dual-gate plan',text)
-            self.assertIn('Access-first plan',text)
-            self.assertIn('Conflict-first plan',text)
+            self.assertIn('Scheduler-fidelity conflict-closure plan',text)
+            self.assertIn('Balanced diagnostic tradeoff plan',text)
+            self.assertIn('Access-first diagnostic plan',text)
+            self.assertIn('Scheduler-fidelity conflict-closure plan',text)
             self.assertIn('NOT used for family-freeze ordering',text)
 
     def test_semantic_coverage_planner_does_not_double_count_overlapping_conflict_pairs(self):
@@ -249,10 +251,13 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
             plan=json.loads((d/'plan.json').read_text())
             self.assertEqual(plan['total_conflict_pairs'],1)
             steps=plan['conflict_first_plan']['steps']
+            self.assertEqual(len(steps),1)
             self.assertEqual(steps[0]['newly_covered_conflict_pairs'],1)
-            self.assertEqual(steps[1]['newly_covered_conflict_pairs'],0)
             self.assertAlmostEqual(steps[0]['cumulative_projected_conflict_coverage'],1.0)
-            self.assertAlmostEqual(steps[1]['cumulative_projected_conflict_coverage'],1.0)
+            balanced=plan['balanced_plan']['steps']
+            self.assertEqual(balanced[0]['newly_covered_conflict_pairs'],1)
+            self.assertEqual(balanced[1]['newly_covered_conflict_pairs'],0)
+            self.assertAlmostEqual(balanced[1]['cumulative_projected_conflict_coverage'],1.0)
 
     def test_checked_in_first_batch_installs_six_reviewed_mappings_and_custom_router_alias(self):
         with tempfile.TemporaryDirectory() as td:
@@ -464,7 +469,7 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
             self.assertFalse(out['publication_gates']['storage_access'])
             self.assertEqual(out['remaining']['storage_access_records'],41)
 
-    def test_conflict_closure_report_tracks_dual_freeze_policy(self):
+    def test_conflict_closure_report_tracks_scheduler_fidelity_freeze_policy(self):
         with tempfile.TemporaryDirectory() as td:
             d=Path(td)
             coverage={
@@ -475,20 +480,23 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
                 'gas_weighted_family_coverage':{'fully_selected_family_state_gas_coverage':0.05,'fully_selected_family_state_transaction_coverage':0.06},
                 'top_unmapped_conflict_owners':[{'address':'0x'+'11'*20,'owner_pair_attributions':3,'access_records':7,'gas_attributions':9}],
             }
-            readiness={'ready_to_freeze_family_map':False}
+            readiness={'ready_to_freeze_family_map':True}
             decisions={'dataset':'vegeta-s4','decisions':[{'review_status':'reviewed','runtime_code_family':'aa'},{'review_status':'pending','runtime_code_family':'bb'}]}
             for name,obj in [('coverage',coverage),('ready',readiness),('decisions',decisions)]: (d/f'{name}.json').write_text(json.dumps(obj))
             subprocess.run([sys.executable,str(ROOT/'tools/vegeta/summarize-vegeta-s4-conflict-closure.py'),
                 '--coverage',str(d/'coverage.json'),'--readiness',str(d/'ready.json'),'--decisions',str(d/'decisions.json'),
                 '--output',str(d/'out.json'),'--text-output',str(d/'out.txt')],check=True)
             out=json.loads((d/'out.json').read_text())
-            self.assertFalse(out['ready_to_freeze_family_map'])
+            self.assertTrue(out['ready_to_freeze_family_map'])
             self.assertEqual(out['conflict']['remaining_pairs_to_target'],0)
+            self.assertTrue(out['storage_access']['diagnostic'])
             self.assertEqual(out['storage_access']['remaining_records_to_target'],80)
             self.assertAlmostEqual(out['diagnostics']['conflict_relevant_storage_access_coverage'],0.20)
-            self.assertIn('reported, not family-freeze gates',(d/'out.txt').read_text())
+            text=(d/'out.txt').read_text()
+            self.assertIn('reported, not family-freeze gates',text)
+            self.assertIn('structural conflict target is closed',text)
 
-    def test_review_decisions_remain_candidate_until_gated_freeze(self):
+    def test_review_decisions_remain_candidate_until_scheduler_fidelity_freeze(self):
         with tempfile.TemporaryDirectory() as td:
             d=Path(td)
             family='aa'*32
@@ -505,9 +513,9 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
             self.assertEqual(len(draft['profile_mappings']),1)
             self.assertEqual(draft['s4_pending_seed_runtime_families'],['bb'*32])
 
-            coverage={'source_conflict_coverage':{'coverage':0.96},'block_balanced_conflict_coverage':{'median_coverage':0.85},
-                'conflict_relevant_storage_access_coverage':{'access_record_coverage':0.91},
-                'storage_access_coverage':{'access_record_coverage':0.50,'state_owner_occurrence_coverage':0.82},
+            coverage={'source_conflict_coverage':{'coverage':0.94},'block_balanced_conflict_coverage':{'median_coverage':0.85},
+                'conflict_relevant_storage_access_coverage':{'access_record_coverage':0.20},
+                'storage_access_coverage':{'access_record_coverage':0.50,'state_owner_occurrence_coverage':0.22},
                 'gas_weighted_family_coverage':{'fully_selected_family_state_gas_coverage':0.10,'fully_selected_family_state_transaction_coverage':0.08}}
             provenance={'internal_integrity':{'pass':True}}
             (d/'coverage.json').write_text(json.dumps(coverage)); (d/'provenance.json').write_text(json.dumps(provenance))
@@ -516,66 +524,67 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
                 '--output',str(d/'gate.json'),'--text-output',str(d/'gate.txt'),'--allow-low'],check=True)
             gate=json.loads((d/'gate.json').read_text())
             self.assertFalse(gate['ready_to_freeze_family_map'])
-            self.assertTrue(gate['gates']['conflict_coverage'])
-            self.assertFalse(gate['gates']['storage_access_coverage'])
+            self.assertFalse(gate['gates']['conflict_coverage'])
+            self.assertNotIn('storage_access_coverage',gate['gates'])
 
-            coverage['storage_access_coverage']['access_record_coverage']=0.91
+            coverage['source_conflict_coverage']['coverage']=0.96
             (d/'coverage.json').write_text(json.dumps(coverage))
             subprocess.run([sys.executable,str(ROOT/'tools/vegeta/check-vegeta-s4-family-review-readiness.py'),
                 '--family-map',str(d/'draft.json'),'--coverage',str(d/'coverage.json'),'--provenance',str(d/'provenance.json'),
                 '--output',str(d/'gate.json'),'--text-output',str(d/'gate.txt')],check=True)
-            self.assertTrue(json.loads((d/'gate.json').read_text())['ready_to_freeze_family_map'])
+            gate=json.loads((d/'gate.json').read_text())
+            self.assertTrue(gate['ready_to_freeze_family_map'])
+            self.assertAlmostEqual(gate['metrics']['storage_access_coverage'],0.50)
             subprocess.run([sys.executable,str(ROOT/'tools/vegeta/freeze-vegeta-s4-family-map.py'),
                 '--draft-map',str(d/'draft.json'),'--freeze-readiness',str(d/'gate.json'),'--coverage',str(d/'coverage.json'),
                 '--provenance',str(d/'provenance.json'),'--output',str(d/'frozen.json'),'--reviewed'],check=True)
             frozen=json.loads((d/'frozen.json').read_text())
             self.assertFalse(frozen['candidate_only'])
-            self.assertIn('freeze_evidence',frozen)
+            self.assertIn('scheduler-fidelity',frozen['review_status'])
 
-    def test_final_s4_readiness_gates_all_storage_but_keeps_gas_diagnostic(self):
+    def test_final_s4_scheduler_fidelity_uses_contention_profile_and_keeps_storage_diagnostic(self):
         with tempfile.TemporaryDirectory() as td:
             d=Path(td)
             fmap={'dataset':'vegeta-s4','candidate_only':False,'freeze_evidence':{'x':'y'}}
             family={'source_conflict_coverage':{'coverage':0.96},'block_balanced_conflict_coverage':{'median_coverage':0.85},
-                'conflict_relevant_storage_access_coverage':{'access_record_coverage':0.95},
-                'storage_access_coverage':{'access_record_coverage':0.95,'state_owner_occurrence_coverage':0.90},
-                'gas_weighted_family_coverage':{'fully_selected_family_state_gas_coverage':0.10}}
-            trans={'implementation_readiness':{'native_execution_ready':True}}
+                'conflict_relevant_storage_access_coverage':{'access_record_coverage':0.10},
+                'storage_access_coverage':{'access_record_coverage':0.44,'state_owner_occurrence_coverage':0.43},
+                'gas_weighted_family_coverage':{'fully_selected_family_state_gas_coverage':0.15}}
+            trans={'implementation_readiness':{'native_execution_ready':True},'calls':{'reviewed_state_touch_frame_coverage':0.52}}
             sem={'coverage':0.96,'block_balanced':{'median_coverage':0.85}}
             deficit={'denominators':{
-                'all_source_transactions':{'successful_reviewed_state_coverage':0.9},
-                'source_storage_access_transactions':{'successful_reviewed_state_gas_coverage':0.50},
-                'source_conflict_participating_transactions':{'successful_reviewed_state_coverage':0.9}}}
+                'all_source_transactions':{'successful_reviewed_state_coverage':0.30,'successful_reviewed_state_transactions':30,'transactions':100},
+                'source_storage_access_transactions':{'successful_reviewed_state_gas_coverage':0.20},
+                'source_conflict_participating_transactions':{'successful_reviewed_state_coverage':0.90,'successful_reviewed_state_transactions':90,'transactions':100}}}
             for name,obj in [('map',fmap),('family',family),('trans',trans),('sem',sem),('deficit',deficit)]: (d/f'{name}.json').write_text(json.dumps(obj))
             subprocess.run([sys.executable,str(ROOT/'tools/vegeta/validate-vegeta-s4-readiness.py'),
                 '--family-map',str(d/'map.json'),'--family-coverage',str(d/'family.json'),'--translation-coverage',str(d/'trans.json'),
                 '--semantic-coverage',str(d/'sem.json'),'--transaction-deficit',str(d/'deficit.json'),
                 '--output',str(d/'ready.json'),'--text-output',str(d/'ready.txt')],check=True)
             out=json.loads((d/'ready.json').read_text())
+            self.assertEqual(out['selected_profile'],'scheduler-fidelity')
             self.assertTrue(out['ready'])
-            self.assertNotIn('semantic_state_gas',out['gates'])
-            self.assertNotIn('family_state_gas',out['gates'])
-            self.assertNotIn('family_conflict_relevant_access',out['gates'])
-            self.assertTrue(out['gates']['family_storage_access'])
-            self.assertAlmostEqual(out['metrics']['family_conflict_relevant_access'],0.95)
-            self.assertAlmostEqual(out['metrics']['family_storage_access'],0.95)
-            self.assertAlmostEqual(out['metrics']['family_fully_mapped_state_gas_diagnostic'],0.10)
-            self.assertAlmostEqual(out['metrics']['semantic_state_gas_diagnostic'],0.50)
+            self.assertTrue(out['profiles']['scheduler-fidelity']['ready'])
+            self.assertFalse(out['profiles']['semantic-replay']['ready'])
+            self.assertNotIn('family_storage_access',out['gates'])
+            self.assertAlmostEqual(out['metrics']['family_storage_access_diagnostic'],0.44)
+            self.assertAlmostEqual(out['metrics']['contention_tx'],0.90)
+            self.assertAlmostEqual(out['metrics']['semantic_tx'],0.30)
 
-    def test_final_s4_readiness_fails_when_conflict_passes_but_all_storage_is_low(self):
+    def test_final_s4_scheduler_fidelity_fails_low_contention_even_when_storage_is_high(self):
         with tempfile.TemporaryDirectory() as td:
             d=Path(td)
             fmap={'dataset':'vegeta-s4','candidate_only':False,'freeze_evidence':{'x':'y'}}
             family={'source_conflict_coverage':{'coverage':0.96},'block_balanced_conflict_coverage':{'median_coverage':0.85},
                 'conflict_relevant_storage_access_coverage':{'access_record_coverage':0.95},
-                'storage_access_coverage':{'access_record_coverage':0.50},
-                'gas_weighted_family_coverage':{'fully_selected_family_state_gas_coverage':0.10}}
+                'storage_access_coverage':{'access_record_coverage':0.99},
+                'gas_weighted_family_coverage':{'fully_selected_family_state_gas_coverage':0.90}}
             trans={'implementation_readiness':{'native_execution_ready':True}}
             sem={'coverage':0.96,'block_balanced':{'median_coverage':0.85}}
             deficit={'denominators':{
-                'all_source_transactions':{'successful_reviewed_state_coverage':0.9},
-                'source_storage_access_transactions':{'successful_reviewed_state_gas_coverage':0.50},
-                'source_conflict_participating_transactions':{'successful_reviewed_state_coverage':0.9}}}
+                'all_source_transactions':{'successful_reviewed_state_coverage':0.90},
+                'source_storage_access_transactions':{'successful_reviewed_state_gas_coverage':0.90},
+                'source_conflict_participating_transactions':{'successful_reviewed_state_coverage':0.79}}}
             for name,obj in [('map',fmap),('family',family),('trans',trans),('sem',sem),('deficit',deficit)]: (d/f'{name}.json').write_text(json.dumps(obj))
             subprocess.run([sys.executable,str(ROOT/'tools/vegeta/validate-vegeta-s4-readiness.py'),
                 '--family-map',str(d/'map.json'),'--family-coverage',str(d/'family.json'),'--translation-coverage',str(d/'trans.json'),
@@ -583,34 +592,34 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
                 '--output',str(d/'ready.json'),'--text-output',str(d/'ready.txt'),'--allow-low'],check=True)
             out=json.loads((d/'ready.json').read_text())
             self.assertFalse(out['ready'])
-            self.assertTrue(out['gates']['family_conflict'])
-            self.assertFalse(out['gates']['family_storage_access'])
+            self.assertFalse(out['gates']['successful_reviewed_conflict_participant_tx_coverage'])
+            self.assertAlmostEqual(out['metrics']['family_storage_access_diagnostic'],0.99)
 
-    def test_final_s4_readiness_does_not_fail_low_conflict_relevant_access_diagnostic(self):
+    def test_final_s4_semantic_replay_profile_gates_all_transaction_semantics_not_storage_volume(self):
         with tempfile.TemporaryDirectory() as td:
             d=Path(td)
             fmap={'dataset':'vegeta-s4','candidate_only':False,'freeze_evidence':{'x':'y'}}
             family={'source_conflict_coverage':{'coverage':0.96},'block_balanced_conflict_coverage':{'median_coverage':0.85},
                 'conflict_relevant_storage_access_coverage':{'access_record_coverage':0.10},
-                'storage_access_coverage':{'access_record_coverage':0.95},
+                'storage_access_coverage':{'access_record_coverage':0.44},
                 'gas_weighted_family_coverage':{'fully_selected_family_state_gas_coverage':0.05}}
             trans={'implementation_readiness':{'native_execution_ready':True}}
             sem={'coverage':0.96,'block_balanced':{'median_coverage':0.85}}
             deficit={'denominators':{
-                'all_source_transactions':{'successful_reviewed_state_coverage':0.9},
+                'all_source_transactions':{'successful_reviewed_state_coverage':0.81},
                 'source_storage_access_transactions':{'successful_reviewed_state_gas_coverage':0.05},
-                'source_conflict_participating_transactions':{'successful_reviewed_state_coverage':0.9}}}
+                'source_conflict_participating_transactions':{'successful_reviewed_state_coverage':0.90}}}
             for name,obj in [('map',fmap),('family',family),('trans',trans),('sem',sem),('deficit',deficit)]: (d/f'{name}.json').write_text(json.dumps(obj))
             subprocess.run([sys.executable,str(ROOT/'tools/vegeta/validate-vegeta-s4-readiness.py'),
                 '--family-map',str(d/'map.json'),'--family-coverage',str(d/'family.json'),'--translation-coverage',str(d/'trans.json'),
-                '--semantic-coverage',str(d/'sem.json'),'--transaction-deficit',str(d/'deficit.json'),
+                '--semantic-coverage',str(d/'sem.json'),'--transaction-deficit',str(d/'deficit.json'),'--profile','semantic-replay',
                 '--output',str(d/'ready.json'),'--text-output',str(d/'ready.txt')],check=True)
             out=json.loads((d/'ready.json').read_text())
             self.assertTrue(out['ready'])
-            self.assertNotIn('family_conflict_relevant_access',out['gates'])
-            self.assertTrue(out['gates']['family_storage_access'])
-            self.assertAlmostEqual(out['metrics']['family_conflict_relevant_access'],0.10)
-            self.assertAlmostEqual(out['metrics']['family_storage_access'],0.95)
+            self.assertEqual(out['selected_profile'],'semantic-replay')
+            self.assertNotIn('family_storage_access',out['gates'])
+            self.assertAlmostEqual(out['metrics']['family_conflict_relevant_access_diagnostic'],0.10)
+            self.assertAlmostEqual(out['metrics']['family_storage_access_diagnostic'],0.44)
 
     def test_fifth_batch_scaffold_selects_minimum_conflict_prefix_and_keeps_rows_pending(self):
         with tempfile.TemporaryDirectory() as td:
@@ -775,14 +784,14 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
             self.assertEqual(row['storage_activity']['reads'],1)
             self.assertEqual(row['storage_activity']['writes'],1)
 
-    def test_checked_in_fifth_batch_reviews_fifteen_keeps_one_unresolved_and_avoids_proxy_runtime_aliases(self):
+    def test_checked_in_fifth_batch_reviews_sixteen_keeps_one_unresolved_and_avoids_proxy_runtime_aliases(self):
         batch=json.loads((ROOT/'evaluation/vegeta/s4-fifth-batch-reviewed-decisions.v1.json').read_text())
         evidence=json.loads((ROOT/'evaluation/vegeta/s4-fifth-batch-review-evidence.v1.json').read_text())
         ext=json.loads((ROOT/'evaluation/vegeta/s4-fifth-batch-native-family-extension.v1.json').read_text())
-        self.assertEqual(len(batch['decisions']),16)
+        self.assertEqual(len(batch['decisions']),17)
         reviewed=[r for r in batch['decisions'] if r['review_status']=='reviewed']
         unresolved=[r for r in batch['decisions'] if r['review_status']!='reviewed']
-        self.assertEqual(len(reviewed),15)
+        self.assertEqual(len(reviewed),16)
         self.assertEqual([r['runtime_code_family'] for r in unresolved],['d124079c81bccc739fb75764c300034a3ea8da46a1fea0b8a497e32e381cfdcf'])
         self.assertFalse(unresolved[0].get('reviewed_native_family'))
         by_priority={r['priority']:r for r in batch['decisions']}
@@ -792,6 +801,8 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
         self.assertEqual(by_priority[32]['blocker_runtime_code_family'],'dbc6bd2a5b33cdae1c0d0bca27ba9bde66832cca035e1f592c821e6d82179fb9')
         self.assertEqual(by_priority[32]['runtime_code_family'],'044d6332da1b79172c779e718e485de3fba43e367eb494fa1b456678ac0e6eec')
         self.assertEqual(by_priority[32]['reviewed_native_family'],'starknet-l1-system-lock')
+        self.assertEqual(by_priority[33]['runtime_code_family'],'a98942a59ad55662b0e53997e985d47d5e72498bb4cc532930d32a87e8bddc34')
+        self.assertEqual(by_priority[33]['reviewed_native_family'],'fee-token-cw20')
         ids={r['evidence_id'] for r in evidence['records']}
         self.assertEqual(ids,{r['evidence_id'] for r in batch['decisions']})
         self.assertEqual(set(ext['native_code_families']),{'synthetix-system-lock','starknet-l1-system-lock'})
@@ -843,7 +854,26 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
                 '--family-extension',str(d/'ext.json'),'--fifth-batch-decisions',str(d/'batch.json'),
                 '--review-evidence',str(d/'evidence.json'),'--generated-evidence',str(d/'generated.json'),
                 '--pending-output',str(d/'pending.json')]
-            subprocess.run(cmd,check=True); subprocess.run(cmd,check=True)
+            # A genuinely new reviewed row must fail if its current generated evidence drifts.
+            broken=json.loads((d/'generated.json').read_text())
+            broken['families'][0]['delegate_targets_exact'][0]['target_address']='0x'+'77'*20
+            (d/'broken-generated.json').write_text(json.dumps(broken))
+            bad=cmd.copy(); bad[bad.index(str(d/'generated.json'))]=str(d/'broken-generated.json')
+            self.assertNotEqual(subprocess.run(bad).returncode,0)
+            self.assertEqual(json.loads((d/'workspace.json').read_text())['decisions'],[])
+
+            subprocess.run(cmd,check=True)
+
+            # Regression for incremental shortlist dossiers: once the reviewed mapping is in the
+            # cumulative workspace, rerunning the same batch must not require that historical
+            # blocker family to still exist in the newly generated evidence dossier.
+            (d/'generated-current-only.json').write_text(json.dumps({
+                'dataset':'vegeta-s4',
+                'families':[generated['families'][1]],
+            }))
+            rerun=cmd.copy(); rerun[rerun.index(str(d/'generated.json'))]=str(d/'generated-current-only.json')
+            subprocess.run(rerun,check=True)
+
             workspace=json.loads((d/'workspace.json').read_text())
             by_family={r['runtime_code_family']:r for r in workspace['decisions']}
             self.assertEqual(by_family[impl]['review_status'],'reviewed')
@@ -860,10 +890,5 @@ class VegetaS4FrozenCharacterizationTests(unittest.TestCase):
             self.assertEqual(row['storage_owner_scope'],[owner])
             self.assertFalse(any(r.get('ethereum_profile_family')==unresolved for r in mapped['profile_mappings']))
 
-            # Drift in the freshly generated delegate target must fail before changing reviewed state.
-            broken=json.loads((d/'generated.json').read_text()); broken['families'][0]['delegate_targets_exact'][0]['target_address']='0x'+'77'*20
-            (d/'broken-generated.json').write_text(json.dumps(broken))
-            bad=cmd.copy(); bad[bad.index(str(d/'generated.json'))]=str(d/'broken-generated.json')
-            self.assertNotEqual(subprocess.run(bad).returncode,0)
 
 if __name__=='__main__': unittest.main()

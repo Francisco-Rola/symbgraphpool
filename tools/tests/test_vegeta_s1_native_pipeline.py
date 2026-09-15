@@ -480,6 +480,312 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
         self.assertNotIn("0xf4acd740", planner.S1_ENTRYPOINT_EXTENSIONS["marketplace-router"])
         self.assertIn("0xf4acd740", planner.S1_OWNER_ENTRYPOINT_EXTENSIONS[blur])
 
+    def test_s4_owner_scoped_cw721_mint_selector_reviews(self):
+        planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
+        sys.path.insert(0, str(ROOT / "tools/vegeta"))
+        spec = importlib.util.spec_from_file_location("vegeta_build_native_s4_cw721_selectors", planner_path)
+        planner = importlib.util.module_from_spec(spec); spec.loader.exec_module(planner)
+        collection = "0x45c77068a17ac94f56b7fd59dca0d4bd50457216"
+        archetype_a = "0x1c67d8f07d7ef2d637e61ed3fbc3fa9aaf7a6267"
+        archetype_b = "0xc374a204334d4edd4c6a62f0867c752d65e9579c"
+        unreviewed = "0x" + "de" * 20
+        frozen = {
+            "dataset": "vegeta-s4",
+            "profile_mappings": [
+                {"ethereum_profile_family": "collection", "native_code_family": "cw721-drop", "storage_owner_scope": [collection]},
+                {"ethereum_profile_family": "archetype-a", "native_code_family": "cw721-drop", "storage_owner_scope": [archetype_a]},
+                {"ethereum_profile_family": "archetype-b", "native_code_family": "cw721-drop", "storage_owner_scope": [archetype_b]},
+                {"ethereum_profile_family": "other", "native_code_family": "cw721-drop", "storage_owner_scope": [unreviewed]},
+            ],
+        }
+        cache = {owner: {"code": "0x6000"} for owner in (collection, archetype_a, archetype_b, unreviewed)}
+        resolver = planner.FamilyResolver(frozen, cache, {"resolution_records": []})
+        def w(n): return int(n).to_bytes(32, "big").hex()
+        caller = "0x" + "11" * 20
+        recipient = "0x" + "22" * 20
+
+        # Collection mint(bytes16,address,uint16,uint32,bytes): collection word, recipient, q, nonce, sig offset.
+        collection_word = (bytes.fromhex("ab" * 16) + bytes(16)).hex()
+        address_word = (bytes(12) + bytes.fromhex(recipient[2:])).hex()
+        data = "0xd2e8281f" + collection_word + address_word + w(3) + w(9) + w(160) + w(0)
+        action = planner.translate_call_tree({"type":"CALL","from":caller,"to":collection,"input":data,"value":"0x0"}, resolver)[0]
+        self.assertEqual(action["dispatch"], "mapped-entrypoint")
+        self.assertEqual(action["native_entrypoint"], "execute::collection_mint_drop")
+        self.assertEqual(action["arguments"]["recipient"], recipient)
+        self.assertEqual(action["arguments"]["quantity"], 3)
+        self.assertEqual(action["arguments"]["nonce"], 9)
+        opaque = planner.translate_call_tree({"type":"CALL","from":caller,"to":unreviewed,"input":data,"value":"0x0"}, resolver)[0]
+        self.assertEqual(opaque["dispatch"], "mapped-opaque-selector")
+
+        # Archetype mint(Auth,uint256,address,bytes): auth tuple offset, quantity, affiliate, sig offset.
+        key = bytes.fromhex("33" * 32)
+        zero_addr = bytes(32).hex()
+        archetype_data = "0x4a21a2df" + w(128) + w(5) + zero_addr + w(224) + key.hex() + w(64) + w(0) + w(0)
+        for owner in (archetype_a, archetype_b):
+            action = planner.translate_call_tree({"type":"CALL","from":caller,"to":owner,"input":archetype_data,"value":"0x0"}, resolver)[0]
+            self.assertEqual(action["dispatch"], "mapped-entrypoint")
+            self.assertEqual(action["native_entrypoint"], "execute::archetype_mint_drop")
+            self.assertEqual(action["arguments"]["quantity"], 5)
+        opaque = planner.translate_call_tree({"type":"CALL","from":caller,"to":unreviewed,"input":archetype_data,"value":"0x0"}, resolver)[0]
+        self.assertEqual(opaque["dispatch"], "mapped-opaque-selector")
+        self.assertNotIn("0x4a21a2df", planner.S4_ENTRYPOINT_EXTENSIONS["cw721-drop"])
+
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_native_s4_cw721_selectors", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        iid = "cw721-drop:" + collection
+        call = mod.translate("cw721-drop", "execute::collection_mint_drop", None, {}, {
+            "ethereum_input": data,
+            "arguments": {
+                "collection_id": "0x" + collection_word, "recipient": recipient, "quantity": 3, "nonce": 9, "signature": "0x"
+            },
+            "native_instance_id": iid, "action_id": 1,
+        }, caller, mod.TokenIdRemapper())
+        self.assertEqual(call["msg"]["mint_drop"]["recipient"], recipient)
+        self.assertEqual(call["msg"]["mint_drop"]["quantity"], 3)
+        self.assertIsNone(call["msg"]["mint_drop"]["stage_key"])
+        self.assertIsNone(call["msg"]["mint_drop"]["nonce_key"])
+
+        archetype_action = {
+            "ethereum_input": archetype_data,
+            "arguments": {"auth_offset": 128, "quantity": 5, "affiliate": "0x" + "00" * 20, "signature": "0x"},
+            "native_instance_id": "cw721-drop:" + archetype_a, "action_id": 2,
+        }
+        call = mod.translate("cw721-drop", "execute::archetype_mint_drop", None, {}, archetype_action, caller, mod.TokenIdRemapper())
+        self.assertEqual(call["msg"]["mint_drop"]["recipient"], caller)
+        self.assertEqual(call["msg"]["mint_drop"]["quantity"], 5)
+        self.assertEqual(call["msg"]["mint_drop"]["stage_key"], "invite:0x" + key.hex())
+        self.assertIsNone(call["msg"]["mint_drop"]["nonce_key"])
+
+    def test_s4_selector_closure_batch2_reviews(self):
+        planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
+        sys.path.insert(0, str(ROOT / "tools/vegeta"))
+        spec = importlib.util.spec_from_file_location("vegeta_build_native_s4_selector_batch2", planner_path)
+        planner = importlib.util.module_from_spec(spec); spec.loader.exec_module(planner)
+
+        archetype = "0x5a7c3aedaf077accd041799f01264dcacb17eea2"
+        l3e7 = "0x20577896ea6113ed8c94b2f08f3893bdc08eba22"
+        bridge = "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a"
+        sequencer = "0x1c479675ad559dc151f6ec7ed3fbf8cee79582b6"
+        banana = "0xdb5889e35e379ef0498aae126fc2cce1fbd23216"
+        synthetix = "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032"
+        starknet = "0xc662c410c0ecf747543f5ba90660f6abebd9c8c4"
+        xen = "0x06450dee7fd2fb8e39061434babcfc05599a6fb8"
+        usdc = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        unrelated = "0x" + "de" * 20
+        families = {
+            archetype: "cw721-drop", l3e7: "cw721-drop", bridge: "arbitrum-bridge-lock",
+            sequencer: "arbitrum-bridge-lock", banana: "custom-swap-router",
+            synthetix: "synthetix-system-lock", starknet: "starknet-l1-system-lock",
+            xen: "xen-like", usdc: "fiat-token-cw20", unrelated: "cw721-drop",
+        }
+        frozen = {
+            "dataset": "vegeta-s4",
+            "profile_mappings": [
+                {"ethereum_profile_family": f"p{i}", "native_code_family": fam, "storage_owner_scope": [owner]}
+                for i, (owner, fam) in enumerate(families.items())
+            ],
+        }
+        cache = {owner: {"code": "0x6000"} for owner in families}
+        resolver = planner.FamilyResolver(frozen, cache, {"resolution_records": []})
+        caller = "0x" + "11" * 20
+        def w(n): return int(n).to_bytes(32, "big").hex()
+        def action(owner, selector, tail=""):
+            return planner.translate_call_tree({"type":"CALL","from":caller,"to":owner,"input":selector+tail,"value":"0x0"}, resolver)[0]
+
+        # Same reviewed Archetype runtime as batch 1: owner scope expands, family-wide selector does not.
+        a = action(archetype, "0x4a21a2df", w(128)+w(2)+w(0)+w(224)+("33"*32)+w(64)+w(0)+w(0))
+        self.assertEqual(a["native_entrypoint"], "execute::archetype_mint_drop")
+        self.assertEqual(a["arguments"]["quantity"], 2)
+        self.assertEqual(action(unrelated, "0x4a21a2df")["dispatch"], "mapped-opaque-selector")
+
+        # L3E7 whitelistMint(uint256,bytes32[]) preserves quantity and stays owner-scoped.
+        a = action(l3e7, "0xd2cab056", w(3)+w(64)+w(0))
+        self.assertEqual(a["native_entrypoint"], "execute::whitelist_mint_drop")
+        self.assertEqual(a["arguments"]["quantity"], 3)
+        self.assertEqual(action(unrelated, "0xd2cab056")["dispatch"], "mapped-opaque-selector")
+
+        for selector in ("0x7a88b107", "0x86598a56"):
+            self.assertEqual(action(bridge, selector)["native_entrypoint"], "execute::execute_route")
+        # Final residual closure later promotes delayedMessageCount as a read of the same bridge lock.
+        self.assertEqual(action(bridge, "0xeca067ad")["native_entrypoint"], "query::read_route_lock")
+        self.assertEqual(action(sequencer, "0x8f111f3c")["native_entrypoint"], "execute::execute_route")
+        self.assertEqual(action(banana, "0xfa461e33")["native_entrypoint"], "execute::v3_swap_callback")
+        self.assertEqual(action(banana, "0x244a7353")["dispatch"], "mapped-opaque-selector")
+        for selector in ("0xbc67f832", "0xa9059cbb"):
+            self.assertEqual(action(synthetix, selector)["native_entrypoint"], "execute::execute_route")
+        self.assertEqual(action(starknet, "0x3e3aa6c5")["native_entrypoint"], "execute::execute_route")
+        self.assertEqual(action(xen, "0x52c7f8dc")["native_entrypoint"], "execute::claim_mint_reward")
+        self.assertEqual(action(usdc, "0x42966c68", w(7))["native_entrypoint"], "execute::burn")
+        self.assertEqual(action(usdc, "0x40c10f19", w(0)+w(9))["native_entrypoint"], "execute::mint")
+
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_native_s4_selector_batch2", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        token_ids = mod.TokenIdRemapper()
+        for family, ep, owner in (
+            ("arbitrum-bridge-lock", "execute::execute_route", bridge),
+            ("custom-swap-router", "execute::v3_swap_callback", banana),
+            ("synthetix-system-lock", "execute::execute_route", synthetix),
+            ("starknet-l1-system-lock", "execute::execute_route", starknet),
+        ):
+            call = mod.translate(family, ep, None, {}, {
+                "ethereum_input":"0x12345678", "arguments":{}, "native_instance_id":family+":"+owner, "action_id":1
+            }, caller, token_ids)
+            self.assertIsNotNone(call)
+            self.assertEqual(call["kind"], "execute")
+
+        whitelist = mod.translate("cw721-drop", "execute::whitelist_mint_drop", None, {}, {
+            "ethereum_input":"0xd2cab056"+w(3)+w(64)+w(0), "arguments":{"quantity":3},
+            "native_instance_id":"cw721-drop:"+l3e7, "action_id":2,
+        }, caller, token_ids)
+        self.assertEqual(whitelist["msg"]["mint_drop"]["recipient"], caller)
+        self.assertEqual(whitelist["msg"]["mint_drop"]["quantity"], 3)
+        self.assertIsNotNone(whitelist["msg"]["mint_drop"]["stage_key"])
+
+        xen_call = mod.translate("xen-like", "execute::claim_mint_reward", None, {}, {
+            "ethereum_input":"0x52c7f8dc", "arguments":{}, "native_instance_id":"xen-like:"+xen, "action_id":3,
+        }, caller, token_ids)
+        self.assertIn("claim_mint_reward", xen_call["msg"])
+
+    def test_s4_selector_closure_final_residual_reviews(self):
+        planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
+        sys.path.insert(0, str(ROOT / "tools/vegeta"))
+        spec = importlib.util.spec_from_file_location("vegeta_build_native_s4_selector_final", planner_path)
+        planner = importlib.util.module_from_spec(spec); spec.loader.exec_module(planner)
+
+        zksync = "0x32400084c286cf3e17e7b677ea9583e60a000324"
+        bridge = "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a"
+        linea = "0xd19d4b5d358258f05d7b411e21a1460d11b0876f"
+        v3 = "0x844eb5c280f38c7462316aad3f338ef9bda62668"
+        betit = "0xa3c519683010d59fa54a4a6c4cac0f55cb20bb3f"
+        xen = "0x06450dee7fd2fb8e39061434babcfc05599a6fb8"
+        synthetix = "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032"
+        unrelated_zk = "0x" + "ac" * 20
+        unrelated_cw20 = "0x" + "ad" * 20
+        families = {
+            zksync: "zksync-l1-system-lock", bridge: "arbitrum-bridge-lock",
+            linea: "linea-rollup-lock", v3: "v3-pool-lock", betit: "cw20-base",
+            xen: "xen-like", synthetix: "synthetix-system-lock",
+            unrelated_zk: "zksync-l1-system-lock", unrelated_cw20: "cw20-base",
+        }
+        frozen = {
+            "dataset": "vegeta-s4",
+            "profile_mappings": [
+                {"ethereum_profile_family": f"final{i}", "native_code_family": fam, "storage_owner_scope": [owner]}
+                for i, (owner, fam) in enumerate(families.items())
+            ],
+        }
+        cache = {owner: {"code": "0x6000"} for owner in families}
+        resolver = planner.FamilyResolver(frozen, cache, {"resolution_records": []})
+        caller = "0x" + "11" * 20
+        def w(n): return int(n).to_bytes(32, "big").hex()
+        def action(owner, selector, tail=""):
+            return planner.translate_call_tree({"type":"CALL","from":caller,"to":owner,"input":selector+tail,"value":"0x0"}, resolver)[0]
+
+        for selector in ("0x7739cbe7", "0x0c4dd810", "0xce9dcf16"):
+            self.assertEqual(action(zksync, selector)["native_entrypoint"], "execute::execute_route")
+            self.assertEqual(action(unrelated_zk, selector)["dispatch"], "mapped-opaque-selector")
+        self.assertEqual(action(bridge, "0x8db5993b")["native_entrypoint"], "execute::execute_route")
+        for selector in ("0xeca067ad", "0x0084120c"):
+            self.assertEqual(action(bridge, selector)["native_entrypoint"], "query::read_route_lock")
+        self.assertEqual(action(bridge, "0x16bf5579", w(3))["native_entrypoint"], "query::read_route_lock")
+        self.assertEqual(action(linea, "0x9f3ce55a")["native_entrypoint"], "execute::execute_route")
+        for selector in ("0xa34123a7", "0x3c8a7d8d"):
+            self.assertEqual(action(v3, selector)["native_entrypoint"], "execute::execute_route")
+        self.assertEqual(action(betit, "0x8a8c523c")["native_entrypoint"], "execute::set_policy_marker")
+        self.assertEqual(action(unrelated_cw20, "0x8a8c523c")["dispatch"], "mapped-opaque-selector")
+        self.assertEqual(action(xen, "0x5bccb4c4", w(50)+w(7))["native_entrypoint"], "execute::claim_mint_reward_and_stake")
+        self.assertEqual(action(xen, "0x7b0472f0", w(10)+w(7))["native_entrypoint"], "execute::stake")
+        self.assertEqual(action(xen, "0x3ccfd60b")["native_entrypoint"], "execute::withdraw")
+        self.assertEqual(action(synthetix, "0x23b872dd")["native_entrypoint"], "execute::execute_route")
+
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_native_s4_selector_final", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        token_ids = mod.TokenIdRemapper()
+        read_call = mod.translate("arbitrum-bridge-lock", "query::read_route_lock", None, {}, {
+            "ethereum_input":"0xeca067ad", "arguments":{}, "native_instance_id":"arbitrum-bridge-lock:"+bridge, "action_id":1,
+        }, caller, token_ids)
+        self.assertEqual(read_call["kind"], "query")
+        self.assertEqual(read_call["msg"], {"read_route_lock": {}})
+        policy_call = mod.translate("cw20-base", "execute::set_policy_marker", None, {}, {
+            "ethereum_input":"0x8a8c523c", "arguments":{}, "native_instance_id":"cw20-base:"+betit, "action_id":2,
+        }, caller, token_ids)
+        self.assertEqual(policy_call["kind"], "execute")
+        self.assertEqual(policy_call["msg"], {"set_policy_marker": {}})
+        self.assertEqual(policy_call["source_policy_adapter"], "source-successful-owner-scoped-policy-marker")
+        xen_call = mod.translate("xen-like", "execute::claim_mint_reward_and_stake", None, {}, {
+            "ethereum_input":"0x5bccb4c4"+w(50)+w(7), "arguments":{"pct":50,"term":7},
+            "native_instance_id":"xen-like:"+xen, "action_id":3,
+        }, caller, token_ids)
+        self.assertEqual(xen_call["msg"]["claim_mint_reward_and_stake"]["pct"], 50)
+        self.assertIn("term_days", xen_call["msg"]["claim_mint_reward_and_stake"])
+
+    def test_s4_selector_microclosure_owner_scoped_policy_dependencies(self):
+        planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
+        sys.path.insert(0, str(ROOT / "tools/vegeta"))
+        spec = importlib.util.spec_from_file_location("vegeta_build_native_s4_microclosure", planner_path)
+        planner = importlib.util.module_from_spec(spec); spec.loader.exec_module(planner)
+
+        onbot = "0xb912cfd8cd814988b794b5301785c12c71b51651"
+        spacecraft = "0xc8d2f14c33064c810efa29ee7648ccca0cd1f772"
+        pepe = "0x224da25c58574b852876a1c4e289be9eb7345322"
+        scoped = "0x0b3ddf435d7e0a3cad97d85f94633a0e3a69fc01"
+        betit = "0xa3c519683010d59fa54a4a6c4cac0f55cb20bb3f"
+        minter = "0x143d7a700a533b4baf6d693449b278a8a2f5927d"
+        linea_small = "0xf64bae65f6f2a5277571143a24faafdfc0c2a737"
+        linea_approve = "0x046eee2cc3188071c02bfc1745a6b17c656e3f3d"
+        unrelated = "0x" + "ef" * 20
+        owners = [onbot, spacecraft, pepe, scoped, betit, minter, unrelated]
+        frozen = {
+            "dataset": "vegeta-s4",
+            "profile_mappings": [
+                {"ethereum_profile_family": f"micro{i}", "native_code_family": "cw20-base", "storage_owner_scope": [owner]}
+                for i, owner in enumerate(owners)
+            ] + [
+                {"ethereum_profile_family": "micro-linea-small", "native_code_family": "linea-rollup-lock", "storage_owner_scope": [linea_small]},
+                {"ethereum_profile_family": "micro-linea-approve", "native_code_family": "linea-rollup-lock", "storage_owner_scope": [linea_approve]},
+            ],
+        }
+        cache = {owner: {"code": "0x6000"} for owner in owners + [linea_small, linea_approve]}
+        resolver = planner.FamilyResolver(frozen, cache, {"resolution_records": []})
+        caller = "0x" + "11" * 20
+        def action(owner, selector, tail=""):
+            return planner.translate_call_tree({"type":"CALL","from":caller,"to":owner,"input":selector+tail,"value":"0x0"}, resolver)[0]
+
+        for selector in ("0xfbd75753", "0x27193bc4", "0xf576f539"):
+            self.assertEqual(action(onbot, selector)["native_entrypoint"], "execute::set_policy_marker")
+            self.assertEqual(action(unrelated, selector)["dispatch"], "mapped-opaque-selector")
+        for selector in ("0x1006ee0c", "0x715018a6", "0xf319ae77"):
+            self.assertEqual(action(spacecraft, selector)["native_entrypoint"], "execute::set_policy_marker")
+        self.assertEqual(action(pepe, "0x715018a6")["native_entrypoint"], "execute::set_policy_marker")
+        self.assertEqual(action(scoped, "0x751039fc")["native_entrypoint"], "execute::set_policy_marker")
+        self.assertEqual(action(betit, "0x02dbd8f8" + "0"*128)["native_entrypoint"], "execute::set_policy_marker")
+        self.assertEqual(action(minter, "0x40c10f19" + "0"*128)["native_entrypoint"], "execute::mint")
+        self.assertEqual(action(linea_small, "0xf6a3c090")["native_entrypoint"], "execute::execute_route")
+        self.assertEqual(action(linea_approve, "0x095ea7b3" + "0"*128)["native_entrypoint"], "execute::execute_route")
+        self.assertEqual(action(unrelated, "0x715018a6")["dispatch"], "mapped-opaque-selector")
+        self.assertEqual(action(unrelated, "0x751039fc")["dispatch"], "mapped-opaque-selector")
+
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_native_s4_microclosure", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        call = mod.translate("cw20-base", "execute::set_policy_marker", None, {}, {
+            "ethereum_input":"0xfbd75753", "arguments":{}, "native_instance_id":"cw20-base:"+onbot, "action_id":1,
+        }, caller, mod.TokenIdRemapper())
+        self.assertEqual(call["kind"], "execute")
+        self.assertEqual(call["msg"], {"set_policy_marker": {}})
+        self.assertEqual(call["source_policy_adapter"], "source-successful-owner-scoped-policy-marker")
+        mint_call = mod.translate("cw20-base", "execute::mint", None, {}, {
+            "ethereum_input":"0x40c10f19" + "0"*24 + "22"*20 + (9).to_bytes(32, "big").hex(),
+            "arguments":{"recipient":"0x"+"22"*20,"amount":9},
+            "native_instance_id":"cw20-base:"+minter, "action_id":2,
+        }, caller, mod.TokenIdRemapper())
+        self.assertEqual(mint_call["kind"], "execute")
+        self.assertEqual(mint_call["msg"]["mint"]["amount"], "10")
+        self.assertEqual(mint_call["source_authorization_adapter"], "source-successful-owner-scoped-cw20-mint")
+
     def test_reviewed_s1_selector_extensions_and_execution_adapters(self):
         planner_path = ROOT / "tools/vegeta/build-native-s3-plan.py"
         sys.path.insert(0, str(ROOT / "tools/vegeta"))

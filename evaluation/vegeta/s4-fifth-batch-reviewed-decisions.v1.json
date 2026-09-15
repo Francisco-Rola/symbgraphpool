@@ -288,6 +288,25 @@
       "reviewed_native_family": "starknet-l1-system-lock",
       "runtime_code_family": "044d6332da1b79172c779e718e485de3fba43e367eb494fa1b456678ac0e6eec",
       "semantic_notes": "Mapping is implementation-aware; the generic Proxy runtime hash itself is not assigned Starknet semantics."
+    },
+    {
+      "address": "0x8390a1da07e376ef7add4be859ba74fb83aa02d5",
+      "blocker_runtime_code_family": "a98942a59ad55662b0e53997e985d47d5e72498bb4cc532930d32a87e8bddc34",
+      "evidence_id": "fifth-17-grok-fee-limit-erc20-token",
+      "evidence_sources": [
+        "native-characterization/s4-fifth-batch-evidence.json",
+        "Sourcify verified source: GROK.sol:GROK",
+        "Etherscan verified ABI: GROK tax/limit/bot/trading controls"
+      ],
+      "identity_hint": "GROK fee/limit ERC20 token",
+      "mapping_basis": "Verified source identifies GROK.sol:GROK. The verified ABI exposes max-tax-swap, max-transaction, max-wallet, tax-swap-threshold, bot-list, trading-open, limit-removal, ownership, and standard ERC20 balance/allowance/transfer functions. Frozen S4 directly exercises approve/transfer and standard balanceOf/transferFrom/allowance call frames with no delegate targets. Reuse fee-token-cw20 as the conservative fungible balance/allowance plus shared transfer-policy dependency abstraction; exact tax rates, swap execution, bot policy, and EVM execution equivalence are not claimed.",
+      "priority": 33,
+      "review_class": "existing-native-family-alias",
+      "review_conclusion": "Safe fee-token-cw20 reuse for the observed GROK fee/limit-token dependency surface.",
+      "review_status": "reviewed",
+      "reviewed_native_family": "fee-token-cw20",
+      "runtime_code_family": "a98942a59ad55662b0e53997e985d47d5e72498bb4cc532930d32a87e8bddc34",
+      "semantic_notes": "Family-level dependency classification for the frozen S4 campaign; later selector/native execution readiness remains fail-closed."
     }
   ],
   "evidence_artifact": "benchmarks/corpora/vegeta-ethereum/s4/native-characterization/s4-fifth-batch-evidence.json",

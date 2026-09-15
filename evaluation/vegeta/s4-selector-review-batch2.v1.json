@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "dataset": "vegeta-s4",
+  "purpose": "Second post-family-freeze S4 selector-semantic closure batch, prioritized from the exact residual after selector batch 1.",
+  "policy": "Only owner/runtime-supported selector semantics become executable. System-family entries reuse the already-reviewed conservative per-owner/per-bridge singleton lock; no EVM execution or storage-layout equivalence is claimed. Exact coverage must be recomputed after application.",
+  "baseline": {
+    "selector_reviewed_conflict_pairs": 435065,
+    "total_conflict_pairs": 468252,
+    "coverage": 0.9291090347,
+    "target": 0.95,
+    "remaining_pairs": 9775
+  },
+  "reviews": [
+    {
+      "address": "0x5a7c3aedaf077accd041799f01264dcacb17eea2",
+      "selector": "0x4a21a2df",
+      "native_family": "cw721-drop",
+      "semantic_entrypoint": "execute::archetype_mint_drop",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 2324,
+      "mapping_basis": "Frozen family evidence records runtime family 18c16c15... for this owner, exactly matching the already source-reviewed Project AEON Archetype runtime in selector batch 1. Reuse the same owner-scoped mint(Auth,uint256,address,bytes) dependency adapter.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-fourth-batch-review-evidence.v1.json",
+        "evaluation/vegeta/s4-selector-review-batch1.v1.json"
+      ]
+    },
+    {
+      "address": "0x20577896ea6113ed8c94b2f08f3893bdc08eba22",
+      "selector": "0xd2cab056",
+      "native_family": "cw721-drop",
+      "semantic_entrypoint": "execute::whitelist_mint_drop",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 1446,
+      "mapping_basis": "The owner is the already-reviewed L3E7 Worlds ERC721 proxy. Public selector decoding identifies 0xd2cab056 as whitelistMint(uint256,bytes32[]), while the frozen audit classifies all 530 successful frames as state-capable. Preserve caller/quantity mint dependencies and a deterministic proof-derived whitelist key; Merkle verification and historical implementation layout are not claimed.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-second-batch-review-candidates.v1.json",
+        "https://etherscan.io/address/0x20577896ea6113ed8c94b2f08f3893bdc08eba22",
+        "https://etherscan.io/tx/0x64ca7a2c30875642f853c06c873cdd62a9a586d35ba114a08a3856d2672aac26"
+      ]
+    },
+    {
+      "address": "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+      "selector": "0x7a88b107",
+      "native_family": "arbitrum-bridge-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 1636,
+      "mapping_basis": "Official/derived Arbitrum Bridge ABI identifies submitBatchSpendingReport(address,bytes32) as a mutator. Reuse the frozen Arbitrum per-bridge singleton dependency abstraction.",
+      "evidence_sources": [
+        "https://pkg.go.dev/github.com/cornerstone-labs/acorus/event/arb/abi/mocksgen",
+        "evaluation/vegeta/s4-fourth-batch-native-family-extension.v1.json"
+      ]
+    },
+    {
+      "address": "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+      "selector": "0x86598a56",
+      "native_family": "arbitrum-bridge-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 1636,
+      "mapping_basis": "Arbitrum Bridge interface/source defines enqueueSequencerMessage(bytes32,uint256,uint256,uint256) as a state-mutating sequencer-inbox path. Reuse the frozen per-bridge singleton dependency abstraction.",
+      "evidence_sources": [
+        "https://github.com/OffchainLabs/nitro-contracts/blob/main/src/bridge/IBridge.sol",
+        "evaluation/vegeta/s4-fourth-batch-native-family-extension.v1.json"
+      ]
+    },
+    {
+      "address": "0x1c479675ad559dc151f6ec7ed3fbf8cee79582b6",
+      "selector": "0x8f111f3c",
+      "native_family": "arbitrum-bridge-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 540,
+      "mapping_basis": "Arbitrum SequencerInbox source identifies addSequencerL2BatchFromOrigin(uint256,bytes,uint256,address,uint256,uint256), which advances sequencer/bridge state. Reuse the reviewed Arbitrum singleton lock abstraction.",
+      "evidence_sources": [
+        "https://github.com/OffchainLabs/nitro-contracts/blob/main/src/bridge/SequencerInbox.sol"
+      ]
+    },
+    {
+      "address": "0xdb5889e35e379ef0498aae126fc2cce1fbd23216",
+      "selector": "0xfa461e33",
+      "native_family": "custom-swap-router",
+      "semantic_entrypoint": "execute::v3_swap_callback",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 796,
+      "mapping_basis": "0xfa461e33 is the canonical uniswapV3SwapCallback(int256,int256,bytes) selector and is observed on the already-reviewed Banana Gun custom router owner. Reuse the existing router-global callback dependency adapter; 0x244a7353 remains opaque.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-third-batch-reviewed-decisions.v1.json",
+        "https://www.4byte.directory/signatures/?bytes4_signature=0xfa461e33"
+      ]
+    },
+    {
+      "address": "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032",
+      "selector": "0xbc67f832",
+      "native_family": "synthetix-system-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 473,
+      "mapping_basis": "Verified Synthetix Proxyable source exposes setMessageSender(address), which writes proxy bookkeeping state. The fifth-batch family review intentionally models this owner through a singleton system-lock namespace.",
+      "evidence_sources": [
+        "https://etherscan.io/token/0xc011a73ee8576fb46f5e1c5751ca3b9fe0af2a6f",
+        "evaluation/vegeta/s4-fifth-batch-native-family-extension.v1.json"
+      ]
+    },
+    {
+      "address": "0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032",
+      "selector": "0xa9059cbb",
+      "native_family": "synthetix-system-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 453,
+      "mapping_basis": "Standard transfer(address,uint256) on the reviewed legacy Synthetix implementation mutates token/proxy state. Preserve only the already-reviewed per-owner singleton system dependency, not ERC20 storage-layout equivalence.",
+      "evidence_sources": [
+        "https://etherscan.io/address/0xd0da9cbea9c3852c5d63a95f9abcc4f6ea0f9032",
+        "evaluation/vegeta/s4-fifth-batch-native-family-extension.v1.json"
+      ]
+    },
+    {
+      "address": "0xc662c410c0ecf747543f5ba90660f6abebd9c8c4",
+      "selector": "0x3e3aa6c5",
+      "native_family": "starknet-l1-system-lock",
+      "semantic_entrypoint": "execute::execute_route",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 447,
+      "mapping_basis": "Starknet messaging documentation identifies sendMessageToL2(uint256,uint256,uint256[]) as a payable state-changing L1-to-L2 message publication path returning a message hash and nonce. Reuse the reviewed per-owner Starknet singleton lock.",
+      "evidence_sources": [
+        "https://docs.starknet.io/learn/cheatsheets/messaging-reference",
+        "evaluation/vegeta/s4-fifth-batch-native-family-extension.v1.json"
+      ]
+    },
+    {
+      "address": "0x06450dee7fd2fb8e39061434babcfc05599a6fb8",
+      "selector": "0x52c7f8dc",
+      "native_family": "xen-like",
+      "semantic_entrypoint": "execute::claim_mint_reward",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 424,
+      "mapping_basis": "Verified XEN transactions decode 0x52c7f8dc as claimMintReward(); the native xen-like adapter already implements that reviewed reward-claim dependency class for S1, so S4 reuses it without new semantics.",
+      "evidence_sources": [
+        "https://etherscan.io/tx/0xc18ed9d6bf2787313c6e921c2a550c30baa8242555c92aae0a1f2ad66d8ec918"
+      ]
+    },
+    {
+      "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "selector": "0x42966c68",
+      "native_family": "fiat-token-cw20",
+      "semantic_entrypoint": "execute::burn",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 14,
+      "mapping_basis": "Standard FiatToken burn(uint256); reuse the already-implemented controlled supply mutation adapter.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-fifth-batch-reviewed-decisions.v1.json"
+      ]
+    },
+    {
+      "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "selector": "0x40c10f19",
+      "native_family": "fiat-token-cw20",
+      "semantic_entrypoint": "execute::mint",
+      "review_status": "reviewed",
+      "observed_direct_gain_pairs": 11,
+      "mapping_basis": "Standard FiatToken mint(address,uint256); reuse the already-implemented controlled supply mutation adapter.",
+      "evidence_sources": [
+        "evaluation/vegeta/s4-fifth-batch-reviewed-decisions.v1.json"
+      ]
+    }
+  ],
+  "deferred": [
+    {
+      "address": "0x8315177ab297ba92a06054ce80a67ed4dbd7ed3a",
+      "selector": "0xeca067ad",
+      "observed_direct_gain_pairs": 1636,
+      "reason": "delayedMessageCount() is read-only. Do not coerce it into the write-lock adapter merely for coverage."
+    },
+    {
+      "address": "0x32400084c286cf3e17e7b677ea9583e60a000324",
+      "selector": "0x7739cbe7",
+      "observed_direct_gain_pairs": 1535,
+      "reason": "Frozen frames are state-capable, but exact function identity/source semantics remain unresolved; retain fail-closed opacity."
+    },
+    {
+      "address": "0xdb5889e35e379ef0498aae126fc2cce1fbd23216",
+      "selector": "0x244a7353",
+      "observed_direct_gain_pairs": 796,
+      "reason": "Exact application-level selector identity remains insufficiently supported; retain opacity."
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 """Build an evidence dossier for the S4 fifth-batch review shortlist.
 
 The dossier is analysis-only. It never creates or applies a native-family mapping. It combines the
-wide dual-gate shortlist with exact local corpus/callTracer evidence so human review can identify
+wide scheduler-fidelity conflict shortlist plus diagnostic access tail with exact local corpus/callTracer evidence so human review can identify
 runtime families without repeated grep work:
 
 * every observed storage owner for each shortlisted runtime family;

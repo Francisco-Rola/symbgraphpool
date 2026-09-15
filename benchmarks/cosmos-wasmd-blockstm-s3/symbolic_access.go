@@ -75,6 +75,13 @@ func resolveRepoPath(repoRoot, path string) string {
 	return filepath.Join(repoRoot, path)
 }
 
+func isSymbolicBundleMetadata(name string) bool {
+	// Workload-local symbolic bundles carry a manifest alongside the actual
+	// contract profile JSON files. It describes copied profiles and checksums;
+	// it is not itself a symbolic contract document.
+	return name == "manifest.json"
+}
+
 func loadSymbolicPredictor(repoRoot, symbolicDir string) (*SymbolicPredictor, error) {
 	if strings.TrimSpace(symbolicDir) == "" {
 		symbolicDir = "benchmarks/symbolic/native-s3"
@@ -90,7 +97,7 @@ func loadSymbolicPredictor(repoRoot, symbolicDir string) (*SymbolicPredictor, er
 		sourceDir: symbolicDir,
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" || isSymbolicBundleMetadata(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
