@@ -1308,7 +1308,7 @@ def instantiate_msg(
             first = drop_next_token_id_overrides.get(iid or '')
         return {'admin':'native-s3-admin','name':'S1Drop','symbol':'S1D','next_token_id':int(first if first is not None else 1)}
     if fam=='astroport-pair': return {'asset0':'asset0','asset1':'asset1'}
-    if fam=='xen-like': return {'genesis_ts':0}
+    if fam=='xen-like': return {'genesis_ts':0,'initial_balances':bals}
     return {}
 
 
@@ -1731,6 +1731,91 @@ def validate_cw721_mint_constraint_lifecycle(
     return dict(stats)
 
 
+def validate_xen_balance_lifecycle(
+    execution_path: Path,
+    manifest_instances: list[dict[str,Any]],
+    priming_calls: list[dict[str,Any]],
+    *,
+    progress_every: int = 500,
+) -> dict[str,int]:
+    """Replay the normalized XEN balance subset needed to prevent Wasmd spend underflow.
+
+    XEN is an ERC20 as well as the rank/stake state machine. Every retained participant gets the
+    same large predecessor-balance sentinel used by the other native fungible-token analogues.
+    The preflight checks that represented committed stake/transfer spends cannot exhaust that
+    normalized balance before Wasmd setup. Reward credits only increase balances, so they do not
+    need exact source-value reconstruction for this scheduler-fidelity invariant.
+    """
+    families={str(row['instance_id']):str(row['family']) for row in manifest_instances}
+    balances: dict[tuple[str,str],int] = {}
+    stakes: dict[tuple[str,str],int] = {}
+    stats=defaultdict(int)
+
+    for row in manifest_instances:
+        if str(row.get('family') or '')!='xen-like': continue
+        iid=str(row.get('instance_id') or '')
+        for initial in (row.get('instantiate_msg') or {}).get('initial_balances') or []:
+            address=norm_addr(initial.get('address'))
+            if address:
+                balances[(iid,address)]=intv(initial.get('amount'))
+                stats['seeded_balances']+=1
+
+    def apply(call: dict[str,Any], state: dict[tuple[str,str],int], stake_state: dict[tuple[str,str],int], *, block: dict[str,Any] | None, tx: dict[str,Any] | None, index: int, validate: bool) -> None:
+        if call.get('kind')!='execute': return
+        iid=str(call.get('instance_id') or '')
+        if families.get(iid)!='xen-like': return
+        sender=norm_addr(call.get('sender')); msg=call.get('msg') or {}
+        if not sender or not msg: return
+        op=next(iter(msg)); body=msg.get(op) or {}; key=(iid,sender)
+        if op in {'stake','transfer'}:
+            n=intv(body.get('amount')); have=state.get(key,0)
+            if validate and have<n:
+                raise RuntimeError(
+                    'XEN balance-lifecycle preflight failed before Wasmd setup: '
+                    f"block={None if block is None else block.get('block_number')} tx_index={None if tx is None else tx.get('tx_index')} "
+                    f"tx_hash={None if tx is None else tx.get('tx_hash')} call={index} instance={iid} "
+                    f"sender={sender} balance={have} spend={n} msg={json.dumps(msg,sort_keys=True)}"
+                )
+            state[key]=max(have-n,0); stats['spends']+=1
+            if op=='stake': stake_state[key]=n
+            else:
+                recipient=norm_addr(body.get('recipient'))
+                if recipient: state[(iid,recipient)]=state.get((iid,recipient),0)+n
+        elif op=='withdraw':
+            n=stake_state.pop(key,0)
+            if n: state[key]=state.get(key,0)+n
+
+    for index,call in enumerate(priming_calls):
+        apply(call,balances,stakes,block=None,tx=None,index=index,validate=True)
+
+    blocks=0
+    with execution_path.open(encoding='utf-8') as fh:
+        for line in fh:
+            if not line.strip(): continue
+            block=json.loads(line); blocks+=1
+            for tx in block.get('transactions',[]):
+                stats['transactions']+=1
+                if bool(tx.get('source_failed')):
+                    stats['source_failed_transactions']+=1; continue
+                tx_balances=dict(balances); tx_stakes=dict(stakes)
+                for index,call in enumerate(tx.get('calls') or []):
+                    if call.get('source_revert_scope_action_id') is not None:
+                        stats['reverted_calls_ignored']+=1; continue
+                    apply(call,tx_balances,tx_stakes,block=block,tx=tx,index=index,validate=True)
+                balances=tx_balances; stakes=tx_stakes
+            if blocks % progress_every==0:
+                print(
+                    f"XEN balance-lifecycle preflight: blocks={blocks} tx={stats['transactions']} seeded={stats['seeded_balances']} spends={stats['spends']}",
+                    flush=True,
+                )
+    stats['blocks']=blocks; stats['tracked_balances']=len(balances)
+    print(
+        f"XEN balance-lifecycle preflight PASS: blocks={blocks} tx={stats['transactions']} seeded={stats['seeded_balances']} spends={stats['spends']}",
+        flush=True,
+    )
+    return dict(stats)
+
+
 def validate_cw20_allowance_lifecycle(
     execution_path: Path,
     manifest_instances: list[dict[str,Any]],
@@ -2037,18 +2122,23 @@ def build(argv=None):
     for iid,owner,op in sorted(multi_approvals): prime.append(contract_call('execute','cw1155-like',iid,owner,{'approve_all':{'operator':op,'approved':True}},{'action_id':None}))
     for (iid,user),first in sorted(xen_first.items()):
         if first in {'claim_mint_reward','claim_mint_reward_and_share','claim_mint_reward_and_stake'}:
+            # A first reward-claim implies a predecessor-window active mint. Preserve only that
+            # lifecycle state; fungible predecessor balances are seeded independently through the
+            # xen-like instantiate message just like the other ERC20/CW20 families.
             prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None}))
-        elif first in {'transfer','stake'}:
-            prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'claim_mint_reward':{}},{'action_id':None}))
         elif first=='withdraw':
-            prime.append(contract_call('execute','xen-like',iid,user,{'claim_rank':{'term_days':0}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'claim_mint_reward':{}},{'action_id':None})); prime.append(contract_call('execute','xen-like',iid,user,{'stake':{'amount':'1','term_days':0}},{'action_id':None}))
+            # A first withdraw implies a predecessor-window active stake. Build it using the
+            # normalized predecessor balance rather than inventing a mint-reward credit.
+            prime.append(contract_call('execute','xen-like',iid,user,{'stake':{'amount':'1','term_days':0}},{'action_id':None}))
     lifecycle_stats=validate_cw721_token_lifecycle(execution_work_path,manifest_instances,prime)
     authorization_lifecycle_stats=validate_cw721_authorization_lifecycle(execution_work_path,manifest_instances,prime)
     mint_constraint_stats=validate_cw721_mint_constraint_lifecycle(execution_work_path,manifest_instances,prime)
+    xen_balance_lifecycle_stats=validate_xen_balance_lifecycle(execution_work_path,manifest_instances,prime)
     allowance_lifecycle_stats=validate_cw20_allowance_lifecycle(execution_work_path,manifest_instances,prime)
     initial_state_meta['cw721_token_lifecycle_preflight']=lifecycle_stats
     initial_state_meta['cw721_authorization_lifecycle_preflight']=authorization_lifecycle_stats
     initial_state_meta['cw721_mint_constraint_preflight']=mint_constraint_stats
+    initial_state_meta['xen_balance_lifecycle_preflight']=xen_balance_lifecycle_stats
     initial_state_meta['cw20_allowance_lifecycle_preflight']=allowance_lifecycle_stats
     final_execution=out/'execution-plan.jsonl'
     if execution_work_path != final_execution:
@@ -2062,7 +2152,7 @@ def build(argv=None):
             if _first: first_timestamp=int(_first.get('timestamp',0) or 0)
     except (OSError, StopIteration, json.JSONDecodeError):
         first_timestamp=0
-    man={'schema_version':2,'dataset':ns.dataset_label,'source_plan':str(ns.plan),'selector_map':str(ns.selector_map),'readiness':readiness_meta,'wasm_artifacts':wasm,'instances':manifest_instances,'bank_seeds':[{'address':a,'denom':'unative','amount':str(SEED*4)} for a in sorted(bank_senders) if a],'priming_calls':prime,'logical_addresses':sorted(workload_logical_addresses),'blocks':block_count,'transactions':int(stats['transactions']),'first_timestamp':first_timestamp,'normalization':{'amount_policy':'positive EVM transfer amounts mapped to 1+(amount mod 1,000,000); zero remains zero','approval_policy':'zero approval remains zero; every positive ERC20-style approval maps to SEED so normalization cannot invert allowance>=spend for canonically successful transferFrom calls','nft_authorization_policy':'RPC mode reconstructs predecessor-block ERC721 ownerOf/getApproved/isApprovedForAll via high-level eth_call and primes only that logical state; heuristic mode remains an explicit non-publication fallback','caller_provenance':{'mode':ns.caller_mode,'source':'derived-geth-callTracer-effective-msg.sender' if ns.caller_mode=='exact' else 'legacy-frame-from-or-parent-context-fallback','delegatecall_rule':'inherit parent execution-scope msg.sender (EIP-7)' if ns.caller_mode=='exact' else None,'explicit_actions':stats.get('explicit_msg_senders',0),'missing_actions':stats.get('missing_msg_senders',0)},'initial_state':initial_state_meta,'cw721_drop_mint_sequence':drop_mint_sequence.summary(),'cw721_drop_mint_translation_validation':drop_mint_validation,'erc721_selector_mint_audits':selector_mints.summary(),'token_ids':token_ids.summary(),'seed_balance':str(SEED),'pair_reserve':str(PAIR_RESERVE),'marketplace_order_key_policy':'sha256 of public calldata only; never source trace storage keys','purpose':'preserve storage/control-path key topology while avoiding uint256/u128, allowance-ordering, historical-state availability, caught-internal-revert artifacts, and trace-key leakage'},'statistics':dict(stats)}
+    man={'schema_version':2,'dataset':ns.dataset_label,'source_plan':str(ns.plan),'selector_map':str(ns.selector_map),'readiness':readiness_meta,'wasm_artifacts':wasm,'instances':manifest_instances,'bank_seeds':[{'address':a,'denom':'unative','amount':str(SEED*4)} for a in sorted(bank_senders) if a],'priming_calls':prime,'logical_addresses':sorted(workload_logical_addresses),'blocks':block_count,'transactions':int(stats['transactions']),'first_timestamp':first_timestamp,'normalization':{'amount_policy':'positive EVM transfer amounts mapped to 1+(amount mod 1,000,000); zero remains zero','approval_policy':'zero approval remains zero; every positive ERC20-style approval maps to SEED so normalization cannot invert allowance>=spend for canonically successful transferFrom calls','nft_authorization_policy':'RPC mode reconstructs predecessor-block ERC721 ownerOf/getApproved/isApprovedForAll via high-level eth_call and primes only that logical state; heuristic mode remains an explicit non-publication fallback','caller_provenance':{'mode':ns.caller_mode,'source':'derived-geth-callTracer-effective-msg.sender' if ns.caller_mode=='exact' else 'legacy-frame-from-or-parent-context-fallback','delegatecall_rule':'inherit parent execution-scope msg.sender (EIP-7)' if ns.caller_mode=='exact' else None,'explicit_actions':stats.get('explicit_msg_senders',0),'missing_actions':stats.get('missing_msg_senders',0)},'initial_state':initial_state_meta,'cw721_drop_mint_sequence':drop_mint_sequence.summary(),'cw721_drop_mint_translation_validation':drop_mint_validation,'erc721_selector_mint_audits':selector_mints.summary(),'token_ids':token_ids.summary(),'seed_balance':str(SEED),'xen_balance_policy':'every retained xen-like participant starts with the normalized SEED balance; predecessor active mint/stake lifecycle is primed separately','pair_reserve':str(PAIR_RESERVE),'marketplace_order_key_policy':'sha256 of public calldata only; never source trace storage keys','purpose':'preserve storage/control-path key topology while avoiding uint256/u128, allowance-ordering, historical-state availability, caught-internal-revert artifacts, and trace-key leakage'},'statistics':dict(stats)}
     (out/'execution-manifest.json').write_text(json.dumps(man,indent=2,sort_keys=True)+'\n')
     print(f"wrote {out/'execution-plan.jsonl'}")
     print(f"dataset={ns.dataset_label} blocks={block_count} instances={len(manifest_instances)} priming_calls={len(prime)} tx={stats['transactions']} contract_calls={stats['contract_calls']} skipped_actions={stats['skipped_actions']}")

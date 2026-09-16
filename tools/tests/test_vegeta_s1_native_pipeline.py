@@ -1532,5 +1532,49 @@ class VegetaS1NativePipelineTests(unittest.TestCase):
 
 
 
+    def test_xen_instantiate_seeds_normalized_participant_balances(self):
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_xen_balance_seed", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        alice = "0x" + "11" * 20
+        bob = "0x" + "22" * 20
+        msg = mod.instantiate_msg("xen-like", {bob, alice}, "xen-like:0x" + "06" * 20)
+        self.assertEqual(msg["genesis_ts"], 0)
+        self.assertEqual(
+            msg["initial_balances"],
+            [{"address": alice, "amount": str(mod.SEED)}, {"address": bob, "amount": str(mod.SEED)}],
+        )
+
+    def test_xen_balance_preflight_catches_unseeded_stake_before_wasmd(self):
+        path = ROOT / "tools/vegeta/prepare-native-s3-execution.py"
+        spec = importlib.util.spec_from_file_location("vegeta_prepare_xen_balance_preflight", path)
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        alice = "0x" + "11" * 20
+        iid = "xen-like:0x06450dee7fd2fb8e39061434babcfc05599a6fb8"
+        with tempfile.TemporaryDirectory() as td:
+            plan = Path(td) / "execution.jsonl"
+            plan.write_text(json.dumps({
+                "block_number": 18586157,
+                "transactions": [{
+                    "tx_index": 144,
+                    "tx_hash": "0x" + "ab" * 32,
+                    "source_failed": False,
+                    "calls": [{
+                        "kind": "execute", "family": "xen-like", "instance_id": iid,
+                        "sender": alice, "msg": {"stake": {"amount": "1", "term_days": 1}},
+                    }],
+                }],
+            }) + "\n")
+            seeded = [{
+                "instance_id": iid, "family": "xen-like",
+                "instantiate_msg": {"genesis_ts": 0, "initial_balances": [{"address": alice, "amount": str(mod.SEED)}]},
+            }]
+            stats = mod.validate_xen_balance_lifecycle(plan, seeded, [])
+            self.assertEqual(stats["spends"], 1)
+            unseeded = [{"instance_id": iid, "family": "xen-like", "instantiate_msg": {"genesis_ts": 0}}]
+            with self.assertRaisesRegex(RuntimeError, "XEN balance-lifecycle preflight failed"):
+                mod.validate_xen_balance_lifecycle(plan, unseeded, [])
+
+
 if __name__ == "__main__":
     unittest.main()

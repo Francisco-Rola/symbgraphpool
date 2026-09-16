@@ -4,7 +4,7 @@
   "source": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
   "analysis_provenance": {
     "method": "llm-source-derived",
-    "source_sha256": "61245cb6f3a08704ce984f7ed6c192d84aa2c61a2593c4a7750d40b138181e71",
+    "source_sha256": "ce06745e59cf854b57c475fca2126a36cae92946b913d39d5ef0bbec06f9debe",
     "source_scope": "complete native contract source",
     "historical_trace_keys_used": false,
     "note": "Profiles were derived from the checked-in CosmWasm source. Ethereum trace reads/writes were not used as analyzer inputs."
@@ -33,9 +33,34 @@
     {
       "entrypoint": "instantiate",
       "input_parameters": [
-        "msg.genesis_ts"
+        "msg.genesis_ts",
+        "msg.initial_balances"
       ],
       "accesses": [
+        {
+          "kind": "write",
+          "resource": "BALANCES",
+          "key": {
+            "semantic_name": "address",
+            "depends_on": {
+              "dependency_kind": "input",
+              "origin_input": "msg.initial_balances[i].address"
+            }
+          },
+          "guard": {
+            "expression": "for each initial balance",
+            "dependency_kind": "input"
+          },
+          "evidence": {
+            "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
+            "start_line": 12,
+            "end_line": 12,
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{let mut total=Uint128::zero();for initial in msg.initial_balances{let address=deps.api.addr_validate(&initial.address)?;BALANCES.save(deps.storage,address.as_str(),&initial.amount)?;total=total.checked_add(initial.amount).map_err(StdError::overflow)?;}GLOBAL.save(deps.storage,&Global{genesis_ts:msg.genesis_ts,global_rank:1,total_supply:total,total_staked:Uint128::zero()})?;Ok(Response::new())}"
+          },
+          "notes": [
+            "Setup-only predecessor balance seeding; runtime stake/transfer profiles remain unchanged."
+          ]
+        },
         {
           "kind": "write",
           "resource": "GLOBAL",
@@ -51,9 +76,11 @@
             "file": "benchmarks/contracts/native-s3/xen-like/src/lib.rs",
             "start_line": 12,
             "end_line": 12,
-            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{GLOBAL.save(deps.storage,&Global{genesis_ts:msg.genesis_ts,global_rank:1,total_supply:Uint128::zero(),total_staked:Uint128::zero()})?;Ok(Response::new())}"
+            "code": "#[entry_point]pub fn instantiate(deps:DepsMut,_:Env,_:MessageInfo,msg:InstantiateMsg)->Result<Response,ContractError>{let mut total=Uint128::zero();for initial in msg.initial_balances{let address=deps.api.addr_validate(&initial.address)?;BALANCES.save(deps.storage,address.as_str(),&initial.amount)?;total=total.checked_add(initial.amount).map_err(StdError::overflow)?;}GLOBAL.save(deps.storage,&Global{genesis_ts:msg.genesis_ts,global_rank:1,total_supply:total,total_staked:Uint128::zero()})?;Ok(Response::new())}"
           },
-          "notes": []
+          "notes": [
+            "Initial total_supply is the sum of normalized predecessor balances."
+          ]
         }
       ]
     },
