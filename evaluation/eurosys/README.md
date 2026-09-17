@@ -46,20 +46,20 @@ Each machine gets an independent result root under `benchmark-results/eurosys/<m
 
 | Figure | Inputs | Intended claim |
 |---|---|---|
-| `fig01-real-workload-headline.pdf` | S1/S4 headline + canonical overlap metrics | Real-derived workloads: replay benefit, 300-ms execution-tail benefit, and modeled proposal-to-commit benefit are reported separately. |
-| `fig02-scalability-and-tail-distribution.pdf` | S1/S4 raw records | Worker scaling plus per-block tail CDFs; averages are not hiding a small set of winning blocks. |
-| `fig03-generality-contention-ceiling.pdf` | native apps, contention sweep, zero-conflict upper bound | Generality beyond translated traces, controlled degradation with contention, and machine/executor scaling ceiling. |
-| `fig04-cost-and-overheads.pdf` | S3 phase records, S1/S4 economics, peak RSS, block-size sweep | Where ACG time goes, how much local elapsed service it consumes, memory cost, and fixed-overhead break-even. |
-| `fig05-prediction-and-adaptation.pdf` | S3 exact oracle + ConflictLab prediction/adaptation | Remaining oracle headroom, precision/performance tradeoff, hidden-key recovery, and workload-regime adaptation. |
-| `fig06-consensus-robustness.pdf` | S1 consensus-window postprocessing + divergence grid | The 300-ms point is not cherry-picked and candidate/decided divergence degrades performance gracefully. |
+| `fig01-real-workload-headline.pdf` | S1/S4 headline + canonical overlap metrics | Replay-only speedup is separated from Tail(C) and Commit(C); Vegeta is shown beside the system on the overlap-aware panels. |
+| `fig02-scalability-and-tail-distribution.pdf` | S1/S4 raw records | Worker-count tradeoff plus per-block Tail(C) CDFs. Multi-sample campaigns use the median Tail(C) for each block rather than selecting sample 0. |
+| `fig03-generality-contention-ceiling.pdf` | native apps, contention sweep, zero-conflict upper bound | Tail(C) exposes the high-contention regime where speculation stops paying off; the machine ceiling is read from the dedicated upper-bound report. |
+| `fig04-cost-and-overheads.pdf` | S3 phase records, S1/S4 economics, peak RSS, block-size sweep | Exclusive phase costs (without double-counting validation/replay inside reconciliation), local elapsed-work amplification, memory, and Tail(C) block-size sensitivity. |
+| `fig05-prediction-and-adaptation.pdf` | S3 exact oracle + ConflictLab prediction/adaptation | Residual post-order oracle headroom, measured prediction precision only, hidden-key recovery, and cost-aware workload-regime adaptation. |
+| `fig06-consensus-robustness.pdf` | S1 ordering-window postprocessing + divergence grid | Ordering-window sensitivity plus four representative candidate/final divergence cases under the cost-aware policy. |
 
 Two supplementary figures are produced when data is available: compute-intensity sensitivity and real-workload cold-start/adaptation trajectories.
 
 ## Two main tables
 
-`table1-workloads-fidelity.csv/.tex` records workload provenance, executed block/transaction counts, scheduler-facing translation coverage, all-transaction semantic coverage, and exact-oracle scope.  The table deliberately distinguishes scheduler fidelity from full EVM semantic equivalence.
+`table1-workloads-fidelity.csv` retains the detailed workload/fidelity audit, while `table1-workloads-fidelity.tex` is a compact single-column workload index suitable for the paper. Translation precision/recall and cost-correlation results should be discussed in prose rather than compressed into a wide table.
 
-`table2-semantics-correctness.csv/.tex` contains every accepted ConflictLab semantic case (range/delete, bank/funds, state-derived operations, etc.) with throughput, replay, miss counts, and the release acceptance status.  Rows slower than Serial remain visible.
+`table2-semantics-correctness.csv` retains every accepted ConflictLab configuration. `table2-semantics-correctness.tex` collapses those configurations into seven semantic classes and reports the number of checked runs, whether replay or a candidate miss was exercised, and serial-state correctness. The acceptance total remains explicit in the caption.
 
 ## Postprocess without rerunning
 
@@ -75,3 +75,10 @@ The postprocessor derives per-block metrics, reuse/reexecution/attempt-amplifica
 ## Publication protocol
 
 The 5,000-block S1/S4 headline remains five samples under `PAPER_EVAL_PROFILE=paper`.  Sensitivity experiments may use explicitly documented prefixes because they test robustness of a parameter rather than estimate the headline effect.  Run the final campaign from a clean Git tree, pin the machine governor/NUMA policy externally if required by the publication host, and archive each machine-tag result tree verbatim.
+
+
+## Plot interpretation notes
+
+The paper-facing plots use `Ours` rather than the internal `Rust-ACG` strategy label. Line styles and markers are intentionally distinct so the figures remain readable in grayscale. A local campaign with one repetition per configuration is annotated as such and suppresses meaningless zero-width confidence intervals; the annotation disappears automatically once the final multi-sample campaign is postprocessed.
+
+The main S1/S4 campaign currently uses compute scale 4. The compute-sensitivity supplement reports Tail(C) across the configured scale sweep and should be cited when explaining why the design point is not dependent on one synthetic compute setting. S1/S4 translated workloads remain scheduler/contention studies on native Wasmd, not EVM performance reproductions.
