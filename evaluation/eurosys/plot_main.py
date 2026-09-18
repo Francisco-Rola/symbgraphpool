@@ -494,33 +494,34 @@ def main():
     panel_title(axes[0], "a", "Application contention")
     clean_axis(axes[0], grid="y")
 
-    contention = []
+    contention = {label: [] for label in STRATEGIES}
+    lane_ticks = set()
     for directory in (root / "06-contention").glob("lanes-*"):
         rows = read_csv(directory / "summary/summary.csv")
         workers = max_workers(rows)
         lanes = int(directory.name.split("-")[-1])
-        row = row_for(rows, "Rust-ACG", workers)
-        if row:
-            contention.append((lanes, num(row, "pre_max_ms")))
-    contention = sorted(contention, reverse=True)
-    if contention:
-        axes[1].plot(
-            [x for x, _ in contention],
-            [y for _, y in contention],
-            **line_kwargs("Rust-ACG", emphasize=True),
-        )
-    lane_ticks = [x for x, _ in contention]
+        lane_ticks.add(lanes)
+        for label in STRATEGIES:
+            row = row_for(rows, label, workers)
+            if row:
+                contention[label].append((lanes, num(row, "commit_x")))
+    for label in STRATEGIES:
+        points = sorted(contention[label], reverse=True)
+        if points:
+            axes[1].plot(
+                [x for x, _ in points],
+                [y for _, y in points],
+                label=display(label),
+                **line_kwargs(label),
+            )
+    lane_ticks = sorted(lane_ticks, reverse=True)
     axes[1].set_xscale("log", base=2)
     if lane_ticks:
         axes[1].set_xticks(lane_ticks, [str(value) for value in lane_ticks])
     axes[1].invert_xaxis()
-    axes[1].axhline(300, color="#9CA3AF", linestyle="--", linewidth=0.8)
-    axes[1].text(
-        0.98, 0.93, "$C$=300 ms", transform=axes[1].transAxes,
-        ha="right", va="top", fontsize=6.1, color="#6B7280"
-    )
+    axes[1].axhline(1, color="#9CA3AF", linestyle="--", linewidth=0.8)
     axes[1].set_xlabel("Independent lanes (fewer = hotter)")
-    axes[1].set_ylabel("Pre-execution critical path (ms)")
+    axes[1].set_ylabel("Modeled commit speedup")
     panel_title(axes[1], "b", "Controlled contention")
     clean_axis(axes[1], grid="y")
 

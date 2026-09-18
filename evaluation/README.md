@@ -103,7 +103,7 @@ commit(C) = max(C,P) + R
 commit-x(C) = Serial_commit(C) / commit(C)
 ```
 
-where `P` is eligible pre-consensus work and `R` is intrinsic post-consensus work. `replay-x` remains the Vegeta-comparable metric. The fixed-window headline additionally reports pre-consensus completion coverage and overrun.
+where `P` is eligible pre-consensus work and `R` is consensus-visible post-order work. If the evaluator must perform a canonical fallback to obtain the committed blockchain state, that fallback is charged to `R` while remaining separately reported in the raw diagnostics. `replay-x` remains the Vegeta-comparable metric. The fixed-window headline additionally reports pre-consensus completion coverage and overrun.
 
 Only `14_consensus_window_sensitivity.sh` sweeps `C`. It re-summarizes the already collected S1 per-block `P/R` records and therefore does not multiply benchmark runtime. Its default grid is `0,50,100,150,200,250,300,400,500,750,1000 ms`; override with `PAPER_EVAL_CONSENSUS_SWEEP_MS`. Use that one figure to demonstrate that conclusions are not an artifact of the 300 ms choice.
 

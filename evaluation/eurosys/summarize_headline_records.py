@@ -15,7 +15,21 @@ LABELS = {
 }
 BASELINES = {"cosmos-wasmd-block-stm", "cosmos-wasmd-aria-fb", "cosmos-wasmd-vegeta"}
 ACG = "cosmos-wasmd-symbgraph-rust"
+PRECONSENSUS = {"cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-rust", "cosmos-wasmd-symbgraph-rust-exact-trace-oracle"}
 T95 = {1:12.706,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,8:2.306,9:2.262,10:2.228}
+
+
+def post_nanos(record: dict) -> int:
+    if 'post_consensus_nanos' in record:
+        post = int(record.get('post_consensus_nanos', 0) or 0)
+    elif record.get('strategy') in PRECONSENSUS:
+        post = 0
+    else:
+        post = int(record.get('strategy_total_nanos', 0) or 0)
+    if not bool(record.get('post_consensus_includes_canonical_fallback', False)):
+        post += int(record.get('aria_historical_fallback_nanos', 0) or 0)
+        post += int(record.get('vegeta_historical_fallback_nanos', 0) or 0)
+    return post
 
 
 def mean_ci(values: list[float]) -> tuple[float,float]:
@@ -71,7 +85,7 @@ def main() -> None:
             rs=sorted(rs,key=lambda r:int(r['block_number']))
             tx=sum(int(r.get('transactions',0)) for r in rs)
             pre=sum(int(r.get('pre_consensus_nanos',0) or 0) for r in rs)
-            post=sum(int(r.get('post_consensus_nanos',0) or r.get('strategy_total_nanos',0) or 0) for r in rs)
+            post=sum(post_nanos(r) for r in rs)
             spec=sum(int(r.get('speculated_transactions',0) or 0) for r in rs)
             reused=sum(int(r.get('reused_transactions',0) or 0) for r in rs)
             reexec=sum(int(r.get('reexecutions',0) or 0) for r in rs)
@@ -90,7 +104,7 @@ def main() -> None:
             econ_by_key[(strategy,w,sample)]=row; economics_samples.append(row)
             for ordinal,r in enumerate(rs):
                 pre_ms=int(r.get('pre_consensus_nanos',0) or 0)/1e6
-                post_ms=int(r.get('post_consensus_nanos',0) or r.get('strategy_total_nanos',0) or 0)/1e6
+                post_ms=post_nanos(r)/1e6
                 tail=post_ms+max(0.0,pre_ms-C); commit=max(C,pre_ms)+post_ms
                 block_rows.append({
                     'dataset':dataset,'strategy':strategy,'label':LABELS.get(strategy,strategy),'workers':w,'sample':sample,

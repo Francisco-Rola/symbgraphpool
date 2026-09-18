@@ -44,6 +44,29 @@ CONSENSUS_WINDOW_STRATEGIES = {"cosmos-wasmd-vegeta", "cosmos-wasmd-symbgraph-ru
 DEFAULT_CONSENSUS_WINDOW_MS = 300.0
 DEFAULT_CONSENSUS_WINDOWS_MS = (DEFAULT_CONSENSUS_WINDOW_MS,)
 
+
+def record_post_consensus_nanos(row: dict[str, Any]) -> int:
+    """Return consensus-visible post-order work without treating zero as missing.
+
+    Older raw records kept harness-required Aria/Vegeta canonical restoration in a
+    dedicated diagnostic but excluded it from ``post_consensus_nanos``.  New records
+    mark that the fallback has already been charged; this compatibility path repairs
+    old records exactly once so postprocessing remains reproducible.
+    """
+    if "post_consensus_nanos" in row:
+        post = int(row.get("post_consensus_nanos", 0) or 0)
+    elif row.get("strategy") in PRECONSENSUS:
+        # The Go encoder historically omitted an explicit zero.  For pre-consensus
+        # strategies that means zero post work, not "fall back to total wall time".
+        post = 0
+    else:
+        post = int(row.get("strategy_total_nanos", 0) or 0)
+
+    if not bool(row.get("post_consensus_includes_canonical_fallback", False)):
+        post += int(row.get("aria_historical_fallback_nanos", 0) or 0)
+        post += int(row.get("vegeta_historical_fallback_nanos", 0) or 0)
+    return post
+
 # Two-sided 95% Student-t critical values by degrees of freedom. For larger n,
 # the normal approximation is sufficient for the reporting precision here.
 T95 = {
@@ -411,7 +434,8 @@ def build_consensus_window_sweep(
     """Evaluate externally supplied consensus windows without pretending they were measured.
 
     P is local pre-consensus planning/speculation for algorithms that can overlap it
-    with consensus. R is intrinsic post-consensus work. For a constant external
+    with consensus. R is consensus-visible post-consensus work, including any
+    canonical fallback required to obtain committed state. For a constant external
     consensus window C per block:
 
         tail(C)   = R + max(0, P-C)
@@ -437,10 +461,10 @@ def build_consensus_window_sweep(
             raise SystemExit(f"missing Serial rows for consensus sweep workers={workers} sample={sample}")
         txs = sum(int(r.get("transactions", 0)) for r in rs)
         blocks = len(rs)
-        serial_post_ns = sum(int(r.get("post_consensus_nanos", 0) or r.get("strategy_total_nanos", 0)) for r in serial_rs)
+        serial_post_ns = sum(record_post_consensus_nanos(r) for r in serial_rs)
         pre_eligible = strategy in PRECONSENSUS
         pre_values = [int(r.get("pre_consensus_nanos", 0)) if pre_eligible else 0 for r in rs]
-        post_values = [int(r.get("post_consensus_nanos", 0) or r.get("strategy_total_nanos", 0)) for r in rs]
+        post_values = [record_post_consensus_nanos(r) for r in rs]
         total_pre_ns = sum(pre_values)
 
         for c_ms in windows_ms:
@@ -778,7 +802,7 @@ def build_per_sample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         blocks = len(rs)
         txs = sum(int(r.get("transactions", 0)) for r in rs)
         wall_ns = sum(int(r.get("strategy_total_nanos", 0)) for r in rs)
-        post_values = [int(r.get("post_consensus_nanos", 0) or r.get("strategy_total_nanos", 0)) for r in rs]
+        post_values = [record_post_consensus_nanos(r) for r in rs]
         post_ns = sum(post_values)
         pre_values = [int(r.get("pre_consensus_nanos", 0)) for r in rs]
         replay_exec_ns = sum(int(r.get("replay_execution_nanos", 0)) for r in rs)
@@ -876,7 +900,7 @@ def render_preconsensus(rows: list[dict[str, Any]], windows_ms: list[float]) -> 
     lines = [
         "",
         "Pre-consensus timing diagnostics",
-        "  P = local planning/speculation/preexecution; R = intrinsic post-consensus work.",
+        "  P = local planning/speculation/preexecution; R = consensus-visible post-consensus work.",
         "  For an external consensus window C: tail(C)=R+max(0,P-C), commit(C)=max(C,P)+R.",
         "  tail-x(C) compares the remaining execution tail to Serial; commit-x(C) compares proposal-to-commit time under the same C.",
         "  C is an externally fixed model parameter in this single-node harness, not measured consensus latency.",
@@ -930,7 +954,7 @@ def render(
         "Replay throughput (Vegeta NSDI'25 single-node comparability):",
         "  replay-tps = transactions / consensus-visible post phase.",
         "  replay-x   = replay-tps / Serial replay-tps (common historical Serial baseline).",
-        "  Pre-consensus speculation/planning is excluded; intrinsic replay validation/re-execution is included.",
+        "  Pre-consensus speculation/planning is excluded; required post-order validation/re-execution/canonical fallback is included.",
         "  Normal paper runs also mirror tail-x / commit-x / coverage for the canonical fixed consensus window into this table.",
         "",
         (
@@ -1001,9 +1025,9 @@ def render(
     if not rust_acg_only:
         lines += [
             "  * AriaFB ports the attached repository's exact Rule-2 abort condition and completion-driven hot-chain DAG fallback to Wasmd (successors launch as soon as their last predecessor completes).",
-            "  * AriaFB replay-tps includes its initial post-consensus batch, Rule-2 analysis/fallback, and intrinsic Wasmd safety replay, but excludes the harness-only whole-block historical-state restoration.",
+            "  * AriaFB replay-tps includes its initial post-consensus batch, Rule-2 analysis/fallback, intrinsic Wasmd safety replay, and any whole-block canonical restoration required to commit historical state; the restoration remains separately reported.",
             "  * Vegeta ports Algorithm 1 full longest-to-shortest dependency-chain ordering, BuildDAG dependency classes, Rule-2 replay batches, and access-change handling to Wasmd.",
-            "  * Vegeta replay-tps includes Algorithm-3 validation and intrinsic re-execution, but excludes the harness-only historical-state fallback because upstream Vegeta permits its reordered serializable state to differ from historical Ethereum state.",
+            "  * Vegeta replay-tps includes Algorithm-3 validation, intrinsic re-execution, and any historical-state fallback required by this fixed-history evaluator; intrinsic and evaluator-required fallback counters remain separate.",
         ]
     if exact_oracle:
         lines += [
@@ -1087,7 +1111,7 @@ def main() -> None:
         "exact_oracle_enabled": not args.no_exact_oracle,
         "throughput_definition": {
             "primary_all_strategies": "transactions / sum(post_consensus_nanos)",
-            "primary_reference": "Vegeta NSDI'25 single-node methodology: compare replay-phase throughput against Serial execution; pre-consensus speculation is excluded from the primary replay-throughput numerator/denominator.",
+            "primary_reference": "Vegeta NSDI'25 single-node methodology: compare consensus-visible post-order throughput against Serial execution; pre-consensus speculation is excluded, while evaluator-required canonical restoration is charged to post-order work.",
             "interpretation": (
                 "ACG-Oracle uses exact source accesses plus frozen translation-only RAW compensation, but the same ACG execution/validation design."
                 if not args.no_exact_oracle

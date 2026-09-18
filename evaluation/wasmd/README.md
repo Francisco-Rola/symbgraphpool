@@ -9,7 +9,7 @@ replay-tps = transactions / consensus-visible post phase
 replay-x   = replay-tps / Serial replay-tps
 ```
 
-Pre-consensus speculation/planning is excluded. Intrinsic post-decision validation, fallback and re-execution required by the algorithm are included. Harness-only historical-state restoration for reordered fixed-history traces is recorded separately. `pre_consensus_nanos` is local speculation/planning time, **not measured consensus latency**.
+Pre-consensus speculation/planning is excluded. Post-decision validation, fallback and re-execution required by the algorithm are included. If the fixed-history evaluator must restore canonical historical state, that work is also charged to the post phase because it is required to obtain the committed blockchain state, while remaining separately recorded as a diagnostic. `pre_consensus_nanos` is local speculation/planning time, **not measured consensus latency**.
 
 For normal paper runs (one canonical `C`, 300 ms by default), the primary table is:
 
@@ -25,4 +25,4 @@ Use `evaluation/README.md` for runnable commands and `evaluation/PAPER_PLAN.md` 
 
 ## Overlap-aware reporting
 
-The summarizer retains replay-x for Vegeta comparability and additionally evaluates one canonical external consensus window, `C=300 ms`, for normal paper experiments. With prework `P` and intrinsic post work `R`, `tail(C)=R+max(0,P-C)` and `commit(C)=max(C,P)+R`. The canonical point is reported directly in the main summary table and machine-readable summary rows; `consensus-sweep.csv` retains the more detailed hidden-work/overrun accounting. `C` is not measured by this single-node harness. Only `evaluation/experiments/14_consensus_window_sensitivity.sh` sweeps `C`, reusing the already collected S1 raw records without rerunning execution.
+The summarizer retains replay-x for Vegeta comparability and additionally evaluates one canonical external consensus window, `C=300 ms`, for normal paper experiments. With prework `P` and consensus-visible post work `R`, `tail(C)=R+max(0,P-C)` and `commit(C)=max(C,P)+R`; evaluator-required canonical fallback is included in `R` because it is required to obtain committed state. The canonical point is reported directly in the main summary table and machine-readable summary rows; `consensus-sweep.csv` retains the more detailed hidden-work/overrun accounting. `C` is not measured by this single-node harness. Only `evaluation/experiments/14_consensus_window_sensitivity.sh` sweeps `C`, reusing the already collected S1 raw records without rerunning execution.

@@ -15,6 +15,7 @@ for hot in $HOTNESS; do
   dir="$RESULT_ROOT/04-native/inputs/miniwarehouse-hot${hot}"
   python3 evaluation/workloads/generate_native_apps.py miniwarehouse --output-dir "$dir" --blocks "$BLOCKS" --transactions "$TX" --hot-warehouse-bps "$hot"
   run_native "miniwarehouse-hot${hot}" "$dir" "$dir/symbolic"
+  python3 evaluation/eurosys/validate_native_contention.py "$RESULT_ROOT/04-native/miniwarehouse-hot${hot}/records.jsonl"
 done
 dir="$RESULT_ROOT/04-native/inputs/native-mix"
 python3 evaluation/workloads/generate_native_apps.py native-mix --output-dir "$dir" --blocks "$BLOCKS" --transactions "$TX"

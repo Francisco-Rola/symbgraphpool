@@ -388,8 +388,8 @@
           },
           "evidence": {
             "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
-            "start_line": 522,
-            "end_line": 530,
+            "start_line": 428,
+            "end_line": 430,
             "code": "let mut district = DISTRICTS.may_load(...)?;"
           },
           "notes": []
@@ -405,14 +405,14 @@
             }
           },
           "guard": {
-            "expression": "lines is non-empty && DISTRICTS[(warehouse_id, district_id)].next_order_id == order_id",
-            "dependency_kind": "input_and_state"
+            "expression": "lines is non-empty",
+            "dependency_kind": "input"
           },
           "evidence": {
             "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
-            "start_line": 433,
-            "end_line": 440,
-            "code": "district.next_order_id += 1; DISTRICTS.save(...)?;"
+            "start_line": 436,
+            "end_line": 437,
+            "code": "district.next_order_id = district.next_order_id.saturating_add(1); DISTRICTS.save(...)?;"
           },
           "notes": []
         },
@@ -427,13 +427,13 @@
             }
           },
           "guard": {
-            "expression": "lines is non-empty && district order id matches",
-            "dependency_kind": "input_and_state"
+            "expression": "lines is non-empty",
+            "dependency_kind": "input"
           },
           "evidence": {
             "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
-            "start_line": 532,
-            "end_line": 540,
+            "start_line": 440,
+            "end_line": 442,
             "code": "let mut customer = CUSTOMERS.may_load(...)?;"
           },
           "notes": []
@@ -449,14 +449,14 @@
             }
           },
           "guard": {
-            "expression": "lines is non-empty && district order id matches",
-            "dependency_kind": "input_and_state"
+            "expression": "lines is non-empty",
+            "dependency_kind": "input"
           },
           "evidence": {
             "file": "benchmarks/contracts/miniwarehouse/src/lib.rs",
             "start_line": 446,
-            "end_line": 447,
-            "code": "customer.last_order_id = Some(order_id); CUSTOMERS.save(...)?;"
+            "end_line": 451,
+            "code": "customer.last_order_id = max(customer.last_order_id, order_id); CUSTOMERS.save(...)?;"
           },
           "notes": []
         },

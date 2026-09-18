@@ -160,7 +160,8 @@ type Record struct {
 	HistoricalSerialNanos                uint64  `json:"historical_serial_nanos"`
 	StrategyTotalNanos                   uint64  `json:"strategy_total_nanos"`
 	PreConsensusNanos                    uint64  `json:"pre_consensus_nanos,omitempty"`
-	PostConsensusNanos                   uint64  `json:"post_consensus_nanos,omitempty"`
+	PostConsensusNanos                   uint64  `json:"post_consensus_nanos"`
+	PostIncludesCanonicalFallback        bool    `json:"post_consensus_includes_canonical_fallback,omitempty"`
 	MatchedSerialSpeedup                 float64 `json:"matched_serial_speedup"`
 	Transactions                         int     `json:"transactions"`
 	ExecutionAttempts                    uint64  `json:"execution_attempts"`
@@ -2431,12 +2432,10 @@ func main() {
 						ariaHistoricalFallbackNanos = canonicalReplayNanos
 						ariaHistoricalFallbackTransactions = uint64(len(block.Transactions))
 						ariaCanonicalFallbackReason = reason
-						// The whole-block historical replay is a fixed-trace state-equivalence
-						// adaptation, not part of AriaFB's Rule-2/Fallback algorithm. Keep it
-						// visible in StrategyTotalNanos and dedicated raw diagnostics, but do
-						// not charge it to paper-style post_consensus_nanos, reexecutions, or
-						// replay_execution_nanos. This is the same accounting boundary used
-						// for Vegeta's historical-state gate below.
+						// This whole-block replay is an evaluator adaptation rather than an
+						// intrinsic AriaFB replay, so keep the dedicated diagnostics separate.
+						// It is nevertheless required to obtain the canonical blockchain state,
+						// so it must be charged to consensus-visible post-order latency.
 					} else {
 						ariaBranch.Write()
 					}
@@ -2449,7 +2448,7 @@ func main() {
 					}
 					ariaRec := Record{
 						SchemaVersion: 1, Dataset: *datasetLabel, Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-aria-fb", Workers: *workers,
-						MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: strategyNanos, PostConsensusNanos: ariaStats.PostConsensusNanos, Transactions: len(block.Transactions),
+						MatchedSerialNanos: serialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: strategyNanos, PostConsensusNanos: ariaStats.PostConsensusNanos + ariaHistoricalFallbackNanos, PostIncludesCanonicalFallback: true, Transactions: len(block.Transactions),
 						ExecutionAttempts: ariaStats.Attempts, Reexecutions: ariaStats.Reexecutions, SerialEquivalent: ariaEq, SerialReferenceScope: "historical-block-order", ComputeMetric: cal.Metric, ComputeScale: *scale,
 						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, IAVLCacheSize: benchmarkIAVLCacheSize, IAVLSyncPruning: benchmarkIAVLSyncPruning, EvaluatorSHA256: evaluatorSHA256, BaselineScope: ariaFBScope, BlockSTMPreEstimate: false,
 						SpeculatedTransactions: ariaStats.Speculated, ReusedTransactions: ariaStats.Reused, ValidationNanos: ariaStats.ValidationNanos, ReplayExecutionNanos: ariaStats.ReplayExecutionNanos,
@@ -2627,9 +2626,10 @@ func main() {
 						strategyNanos += canonicalReplayNanos
 						vegetaStats.Attempts += uint64(len(block.Transactions))
 						// Historical-state gating is our fixed-trace adaptation, not part of
-						// Vegeta Algorithm 3 replay. Keep it in StrategyTotalNanos and the
-						// dedicated historical-fallback metric, but do not contaminate the
-						// paper replay throughput or intrinsic re-execution counters.
+						// Vegeta Algorithm 3 replay, so keep the dedicated fallback metric and
+						// intrinsic re-execution counters separate.  The fallback is still
+						// required after ordering to obtain canonical state and therefore belongs
+						// in consensus-visible post-order latency.
 						// The matched serial baseline must follow the state actually committed.
 						// Normal Vegeta blocks use the derived serialization reference; canonical
 						// fallback blocks commit historical order, so compare them to the measured
@@ -2648,7 +2648,7 @@ func main() {
 					}
 					cumulativeVegetaNanos += strategyNanos
 					cumulativeVegetaPreNanos += vegetaStats.PreConsensusNanos
-					cumulativeVegetaPostNanos += vegetaStats.PostConsensusNanos
+					cumulativeVegetaPostNanos += vegetaStats.PostConsensusNanos + canonicalFallbackNanos
 					cumulativeVegetaReferenceNanos += vegetaSerialNanos
 					cumulativeVegetaReexecutions += vegetaStats.Reexecutions
 					cumulativeVegetaSafetyReplays += vegetaStats.SafetyReplays
@@ -2676,7 +2676,7 @@ func main() {
 					}
 					vegetaRec := Record{
 						SchemaVersion: 1, Dataset: *datasetLabel, Sample: sample, BlockNumber: block.BlockNumber, Strategy: "cosmos-wasmd-vegeta", Workers: *workers,
-						MatchedSerialNanos: vegetaSerialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: strategyNanos, PreConsensusNanos: vegetaStats.PreConsensusNanos, PostConsensusNanos: vegetaStats.PostConsensusNanos, Transactions: len(block.Transactions),
+						MatchedSerialNanos: vegetaSerialNanos, HistoricalSerialNanos: serialNanos, StrategyTotalNanos: strategyNanos, PreConsensusNanos: vegetaStats.PreConsensusNanos, PostConsensusNanos: vegetaStats.PostConsensusNanos + canonicalFallbackNanos, PostIncludesCanonicalFallback: true, Transactions: len(block.Transactions),
 						ExecutionAttempts: vegetaStats.Attempts, Reexecutions: vegetaStats.Reexecutions, SerialEquivalent: vegetaEq, SerialReferenceScope: "vegeta-derived-serialization+historical-state-gate", ComputeMetric: cal.Metric, ComputeScale: *scale,
 						GoIterationsPerNano: *iterPerNs, CosmosSDKVersion: cosmosSDKVersion, WasmdVersion: wasmdVersion, IAVLCacheSize: benchmarkIAVLCacheSize, IAVLSyncPruning: benchmarkIAVLSyncPruning, EvaluatorSHA256: evaluatorSHA256, BaselineScope: vegetaScope, BlockSTMPreEstimate: false,
 						SpeculatedTransactions: vegetaStats.Speculated, ReusedTransactions: vegetaStats.Reused, ValidationNanos: vegetaStats.ValidationNanos, ReplayExecutionNanos: vegetaStats.ReplayExecutionNanos,

@@ -37,6 +37,41 @@ class EuroSysEvaluationLayerTests(unittest.TestCase):
             with (out/'winloss-summary.csv').open() as fh: wins=next(csv.DictReader(fh))
             self.assertAlmostEqual(float(wins['win_pct']),100.0)
 
+    def test_headline_summary_treats_explicit_zero_post_as_zero(self):
+        with tempfile.TemporaryDirectory() as td:
+            td=Path(td); records=td/'records.jsonl'; out=td/'out'
+            rows=[
+                {'strategy':'cosmos-wasmd-direct-serial','workers':2,'sample':0,'block_number':1,'transactions':1,'post_consensus_nanos':10_000_000,'strategy_total_nanos':10_000_000},
+                {'strategy':'cosmos-wasmd-symbgraph-rust','workers':2,'sample':0,'block_number':1,'transactions':1,'pre_consensus_nanos':2_000_000,'post_consensus_nanos':0,'strategy_total_nanos':2_000_000},
+            ]
+            records.write_text(''.join(json.dumps(r)+'\n' for r in rows))
+            self.run_py('evaluation/eurosys/summarize_headline_records.py','--dataset',f'S1={records}','--output-dir',out,'--consensus-window-ms','300')
+            with (out/'economics-summary.csv').open() as fh: econ=list(csv.DictReader(fh))
+            acg=next(r for r in econ if r['label']=='Rust-ACG')
+            self.assertEqual(float(acg['post_ms']),0.0)
+
+    def test_miniwarehouse_contention_gate_rejects_baseline_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            td=Path(td); records=td/'records.jsonl'
+            clean=[
+                {'strategy':'cosmos-wasmd-aria-fb','sample':0,'block_number':1,'post_consensus_nanos':10},
+                {'strategy':'cosmos-wasmd-vegeta','sample':0,'block_number':1,'post_consensus_nanos':10},
+            ]
+            records.write_text(''.join(json.dumps(r)+'\n' for r in clean))
+            self.run_py('evaluation/eurosys/validate_native_contention.py',records)
+            dirty=list(clean)
+            dirty[1]=dict(dirty[1],vegeta_canonical_fallback=True,vegeta_historical_fallback_transactions=384,vegeta_historical_fallback_nanos=123)
+            records.write_text(''.join(json.dumps(r)+'\n' for r in dirty))
+            proc=subprocess.run([sys.executable,str(ROOT/'evaluation/eurosys/validate_native_contention.py'),str(records)],cwd=ROOT,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            self.assertNotEqual(proc.returncode,0)
+            self.assertIn('canonical fallback',proc.stdout+proc.stderr)
+
+    def test_contention_panel_compares_commit_speedup_for_all_systems(self):
+        text=(ROOT/'evaluation/eurosys/plot_main.py').read_text()
+        self.assertIn('contention = {label: [] for label in STRATEGIES}',text)
+        self.assertIn('contention[label].append((lanes, num(row, "commit_x")))',text)
+        self.assertIn('axes[1].set_ylabel("Modeled commit speedup")',text)
+
     def test_compute_sensitivity_summary_reads_scale_directories(self):
         with tempfile.TemporaryDirectory() as td:
             td=Path(td); root=td/'root'; out=td/'out'

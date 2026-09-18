@@ -163,6 +163,67 @@ class WasmdPublicationEvalTests(unittest.TestCase):
             self.assertIn("commit-x", fixed_text)
             self.assertIn("cover-%", fixed_text)
 
+    def test_post_accounting_preserves_zero_and_charges_legacy_canonical_fallback(self):
+        strategies = [
+            "cosmos-wasmd-direct-serial",
+            "cosmos-wasmd-block-stm",
+            "cosmos-wasmd-aria-fb",
+            "cosmos-wasmd-vegeta",
+            "cosmos-wasmd-symbgraph-rust",
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            records = td / "records.jsonl"
+            rows = []
+            for strategy in strategies:
+                row = {
+                    "strategy": strategy,
+                    "workers": 2,
+                    "sample": 0,
+                    "block_number": 1,
+                    "transactions": 10,
+                    "matched_serial_nanos": 100,
+                    "strategy_total_nanos": 100,
+                    "serial_equivalent": True,
+                }
+                if strategy == "cosmos-wasmd-direct-serial":
+                    row["post_consensus_nanos"] = 100
+                elif strategy == "cosmos-wasmd-block-stm":
+                    row["post_consensus_nanos"] = 80
+                elif strategy == "cosmos-wasmd-aria-fb":
+                    # Legacy record: intrinsic post excludes the required historical replay.
+                    row.update({
+                        "post_consensus_nanos": 40,
+                        "aria_historical_fallback_nanos": 60,
+                        "aria_historical_fallback_transactions": 10,
+                    })
+                elif strategy == "cosmos-wasmd-vegeta":
+                    # Legacy zero was omitted by Go's `omitempty`; it must remain zero before
+                    # charging the required historical replay rather than becoming total wall.
+                    row.update({
+                        "pre_consensus_nanos": 30,
+                        "vegeta_historical_fallback_nanos": 70,
+                        "vegeta_historical_fallback_transactions": 10,
+                    })
+                else:
+                    row.update({
+                        "pre_consensus_nanos": 25,
+                        "post_consensus_nanos": 0,
+                        "strategy_total_nanos": 25,
+                    })
+                rows.append(row)
+            records.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            out = td / "out"
+            subprocess.run([
+                sys.executable, str(SUMMARIZER), "--records", str(records),
+                "--output-dir", str(out), "--no-exact-oracle",
+            ], check=True)
+            obj = json.loads((out / "summary.json").read_text())
+            by = {row["strategy"]: row for row in obj["rows"]}
+            self.assertEqual(by["cosmos-wasmd-aria-fb"]["post_ms"], 0.0001)
+            self.assertEqual(by["cosmos-wasmd-vegeta"]["post_ms"], 0.00007)
+            self.assertEqual(by["cosmos-wasmd-symbgraph-rust"]["post_ms"], 0.0)
+
     def test_summarizer_rejects_partial_strategy_campaign(self):
         strategies = [
             "cosmos-wasmd-direct-serial",

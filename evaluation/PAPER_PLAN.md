@@ -59,7 +59,7 @@ Use three complementary views rather than collapsing the architecture into one t
 
 `replay_x = replay_tps / Serial replay_tps`
 
-where `R = post_consensus_nanos`. This follows the Vegeta NSDI'25 single-node replay convention and remains the direct baseline-comparison metric. Pre-consensus speculation/planning is excluded. Intrinsic validation/fallback/re-execution is included; harness-only historical-state restoration remains separate.
+where `R = post_consensus_nanos`. This follows the Vegeta NSDI'25 single-node replay convention and remains the direct baseline-comparison metric. Pre-consensus speculation/planning is excluded. Intrinsic validation/fallback/re-execution is included, and any evaluator-required canonical restoration is also charged to `R` because it is required to obtain the canonical blockchain state; dedicated fallback counters remain separate diagnostics.
 
 **Overlap-aware execution tail (architecture-facing metric).** For a consensus window `C` supplied externally to the single-node harness and pre-consensus phase `P = pre_consensus_nanos`, define per block:
 
