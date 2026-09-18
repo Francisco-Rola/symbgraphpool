@@ -65,8 +65,8 @@ Main figures:
   fig05-prediction-and-adaptation.pdf
   fig06-consensus-robustness.pdf
 Main tables:
-  table1-workloads-fidelity.csv/.tex
-  table2-semantics-correctness.csv/.tex
+  table1-workloads-fidelity.csv
+  table2-semantics-correctness.csv
 Supplementary outputs are emitted when the corresponding experiment is present.
 EOF
 

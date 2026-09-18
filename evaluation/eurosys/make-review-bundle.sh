@@ -40,8 +40,7 @@ copy_tree_filtered() {
             -o -name '*.json' \
             -o -name '*.jsonl' \
             -o -name '*.txt' \
-            -o -name '*.pdf' \
-            -o -name '*.tex' \) \
+            -o -name '*.pdf' \) \
             -print0
     )
 }
@@ -137,7 +136,7 @@ if [[ -d evaluation/eurosys ]]; then
         cp -a "$f" "$DEST/code/$rel"
     done < <(
         find "$ROOT/evaluation/eurosys" -type f \
-            \( -name '*.py' -o -name '*.sh' -o -name '*.tex' \) \
+            \( -name '*.py' -o -name '*.sh' \) \
             -print0
     )
 fi

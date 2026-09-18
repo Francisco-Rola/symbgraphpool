@@ -7,7 +7,8 @@ class PaperEvaluationArtifactTests(unittest.TestCase):
         names=[p.name for p in (ROOT/'evaluation/experiments').glob('*.sh')]
         for prefix in expected:
             self.assertTrue(any(n.startswith(prefix) for n in names), prefix)
-        self.assertTrue((ROOT/'evaluation/experiments/run-all.sh').exists())
+        self.assertTrue((ROOT/'evaluation/eurosys/run-cluster-paper.sh').exists())
+        self.assertTrue((ROOT/'evaluation/eurosys/plot_main.py').exists())
         self.assertTrue((ROOT/'evaluation/PAPER_PLAN.md').exists())
     def test_conflictlab_generator_makes_independent_key_dataset(self):
         with tempfile.TemporaryDirectory() as td:
@@ -107,7 +108,7 @@ class PaperEvaluationArtifactTests(unittest.TestCase):
         self.assertIn('PAPER_EVAL_CONSENSUS_WINDOW_MS:-300', common)
         sensitivity=(ROOT/'evaluation/experiments/14_consensus_window_sensitivity.sh').read_text()
         self.assertIn('PAPER_EVAL_CONSENSUS_SWEEP_MS', sensitivity)
-        self.assertTrue((ROOT/'evaluation/plots/plot_consensus_overlap.py').exists())
+        self.assertTrue((ROOT/'evaluation/eurosys/plot_main.py').exists())
         runner=(ROOT/'evaluation/lib/run_wasmd_campaign.sh').read_text()
         self.assertIn('--consensus-windows-ms', runner)
         self.assertIn('--cost-metric', runner)

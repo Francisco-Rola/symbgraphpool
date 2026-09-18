@@ -1,26 +1,26 @@
-# Adaptive Conflict Graph
+# Beacon
 
-Adaptive Conflict Graph (ACG) is a Rust/CosmWasm research runtime for speculative smart-contract execution across the consensus boundary. Offline symbolic profiles predict conflicts, Rust builds a compact risk-aware dependency plan, Wasmd/WasmVM preexecutes dependency-ready transactions, and concrete reconciliation plus selective replay preserve serial-equivalent state.
+Beacon is a Rust/CosmWasm research runtime for speculative smart-contract execution across the consensus boundary. Symbolic profiles predict conflicts, the runtime pre-executes transactions while ordering is in progress, and concrete validation plus selective replay allow valid speculative results to be reused after the canonical order is known.
 
 ## Start here
 
 ```bash
 bash scripts/test-all.sh
-PAPER_EVAL_PROFILE=debug bash evaluation/experiments/run-all.sh
+bash evaluation/eurosys/cluster-preflight.sh
 ```
 
-The paper artifact, workload preparation, metrics and figure plan live in [`evaluation/README.md`](evaluation/README.md) and [`evaluation/PAPER_PLAN.md`](evaluation/PAPER_PLAN.md). Publication entry points are only under `evaluation/experiments/`; historical preparation helpers under `tools/legacy-scripts/` are internal dependencies, not experiment interfaces.
+Run evaluation stages directly from `evaluation/experiments/`, or use `evaluation/eurosys/run-cluster-paper.sh` for the complete cluster campaign. See [`evaluation/README.md`](evaluation/README.md) and [`evaluation/eurosys/README.md`](evaluation/eurosys/README.md) for workload and cluster instructions.
 
 ## Repository map
 
 ```text
 crates/       symbolic profiles, candidate graph, adaptive feedback and scheduling
 runtime/      speculative execution, MVCC, reconciliation and Rust/Go bridge
-benchmarks/   CosmWasm contracts, Wasmd evaluator and prepared symbolic profiles
-evaluation/   canonical workloads, experiments, plotting and paper plan
+benchmarks/   CosmWasm contracts, Wasmd evaluator and symbolic profiles
+evaluation/   workloads, experiment drivers, cluster runners and plotting
 tools/        preparation, validation and summarization utilities
-scripts/      repository-wide validation only
-docs/         current architecture and implementation summary
+scripts/      repository-wide validation
+docs/         architecture and implementation summary
 ```
 
 See [`docs/implementation-summary.md`](docs/implementation-summary.md) for the current system design.

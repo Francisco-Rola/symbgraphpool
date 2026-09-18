@@ -65,6 +65,14 @@ for dataset in s1 s3 s4; do
   require_input "$exec/execution-manifest.json"
   require_input "$exec/execution-plan.jsonl"
 done
+require_input "$ROOT/benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl"
+require_input "$ROOT/benchmarks/corpora/vegeta-ethereum/s3/native-plan/native-plan.jsonl"
+require_directory "$ROOT/benchmarks/corpora/vegeta-ethereum/s3-exact-sload-sstore/tx-traces"
+if find "$ROOT/benchmarks/corpora/vegeta-ethereum/s3-exact-sload-sstore/tx-traces" -type f -print -quit 2>/dev/null | grep -q .; then
+  pass "S3 exact-access trace directory is non-empty"
+else
+  fail "S3 exact-access trace directory is empty"
+fi
 require_directory "$ROOT/benchmarks/symbolic/native-s3"
 require_directory "$ROOT/benchmarks/corpora/vegeta-ethereum/s4/native-execution/symbolic"
 

@@ -95,7 +95,7 @@ Main paper: Fig. 1 S1/S4 replay plus fixed-300ms overlap-aware headline; one sep
 
 ## EuroSys consolidated publication layout
 
-The artifact-facing `evaluation/eurosys/run.sh` consolidates the mechanism suite above into six main figures and two tables. Figure 1 is the only double-column main figure; Figures 2--6 are single-column PDFs with vertically stacked panels. The older per-claim PDFs remain useful appendix diagnostics; they are no longer the proposed main-paper layout.
+The current evaluation layer consolidates the mechanism suite into six main figures and two machine-readable tables. Figure 1 uses the wide headline layout; Figures 2--6 use vertically stacked narrow panels. The legacy per-claim plotting stack and checked-in generated figures have been removed.
 
 | Main item | Evidence |
 |---|---|

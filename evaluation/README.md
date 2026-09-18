@@ -1,120 +1,86 @@
 # Evaluation artifact
 
-This directory is the canonical entry point for paper experiments. Historical development scripts outside this tree are implementation helpers, not artifact entry points.
+This directory contains the canonical evaluation entry points for Beacon. Generated workloads and results are intentionally excluded from Git.
 
-## Prerequisites
+## Cluster workflow
 
-The artifact expects the repository Rust/Go toolchains, Python 3, and `matplotlib` for figure generation. Final paper runs should use native Linux on the paper machine; WSL remains useful for development diagnostics but should not be the sole host-overhead claim.
-
-## Quick start
+Before a publication run:
 
 ```bash
-# Fast sanity run (small prefixes / one sample)
-PAPER_EVAL_PROFILE=smoke bash evaluation/experiments/run-all.sh
-
-# Normal local development run
-PAPER_EVAL_PROFILE=debug bash evaluation/experiments/run-all.sh
-
-# Publication run: full S1/S4 and five samples
-PAPER_EVAL_PROFILE=paper bash evaluation/experiments/run-all.sh
+bash evaluation/eurosys/cluster-preflight.sh
+PAPER_EVAL_SMOKE_RESET=1 bash evaluation/eurosys/run-cluster-smoke.sh
 ```
 
-Run one experiment by invoking its numbered script directly. Results go to `benchmark-results/paper-eval/` by default; set `PAPER_EVAL_RESULT_ROOT` to change it. Figures and the semantic-coverage CSV go to `evaluation/figures/`; regenerate them with:
+The full resume-safe cluster campaign defaults to three samples and automatically selects an affinity-aware worker sweep:
 
 ```bash
-# From the repository root; defaults to benchmark-results/paper-eval -> evaluation/figures
-python3 evaluation/plots/plot_all.py
-
-# If the campaign used a non-default result root, point the plotter at the same directory:
-PAPER_EVAL_RESULT_ROOT=/path/to/paper-eval python3 evaluation/plots/plot_all.py
-
-# Optional alternate figure destination:
-PAPER_EVAL_RESULT_ROOT=/path/to/paper-eval PAPER_EVAL_FIGURE_DIR=/path/to/figures python3 evaluation/plots/plot_all.py
+bash evaluation/eurosys/run-cluster-paper.sh
 ```
 
-`02_s4_headline.sh` skips until the reviewed S4 native execution bundle exists. The S4 post-collection pipeline lives under `tools/vegeta/`: audit frozen-corpus provenance, characterize the caches, inspect the transaction-level blocker-cluster/greedy coverage plan, review the seeded high-impact families, pass the S1-analogous scheduler-fidelity family freeze gates (conflict/median-block/integrity), freeze the family map with explicit review attestation, then run `evaluation/workloads/prepare_s4.sh`. Set `PAPER_EVAL_REQUIRE_S4=1` in the final artifact to make a missing bundle a hard failure.
+Run any stage independently by invoking its numbered script under `evaluation/experiments/`. All stages honor `PAPER_EVAL_RESULT_ROOT`, `PAPER_EVAL_WORKERS`, `PAPER_EVAL_FEATURE_WORKERS`, and the sample-count environment variables.
 
-## Workload preparation
+## Frozen external inputs
 
-```bash
-ETH_RPC_URL=... bash evaluation/workloads/collect_s1.sh
-bash evaluation/workloads/prepare_s1.sh
-bash evaluation/workloads/prepare_s3.sh
-ETH_RPC_URL=... bash evaluation/workloads/collect_s4.sh
-bash tools/vegeta/run-vegeta-s4-characterize.sh
-bash tools/vegeta/run-vegeta-s4-apply-first-batch.sh
-bash tools/vegeta/run-vegeta-s4-apply-second-batch.sh  # safe aliases + exact conflict-closure report
-bash tools/vegeta/run-vegeta-s4-apply-third-batch.sh   # reviewed token/pool conflict closure
-bash tools/vegeta/run-vegeta-s4-apply-fourth-batch.sh  # evidence-backed P12-P16 + exact before/after delta
-# if the structural conflict gate is still open, widen the planner and create the next fail-closed human review scaffold:
-bash tools/vegeta/run-vegeta-s4-plan-fifth-batch.sh
-# collect exact local evidence for the projected conflict-closure shortlist (analysis only; does not map anything):
-bash tools/vegeta/run-vegeta-s4-analyze-fifth-batch.sh
-# optional verified-source metadata enrichment (Sourcify; Etherscan fallback when ETHERSCAN_API_KEY is set):
-VEGETA_S4_FIFTH_FETCH_SOURCE=1 bash tools/vegeta/run-vegeta-s4-analyze-fifth-batch.sh
-# the checked-in reviewed subset is validated against the generated dossier; unsupported rows stay unresolved
-bash tools/vegeta/run-vegeta-s4-apply-fifth-batch.sh   # applies only evidence-supported rows; exact before/after delta
-bash tools/vegeta/run-vegeta-s4-review-check.sh        # S1-analogous family freeze: 95% conflict / 80% median-block / corpus integrity; storage is diagnostic
-VEGETA_S4_REVIEW_ACK=1 bash tools/vegeta/run-vegeta-s4-freeze-reviewed-map.sh
-bash evaluation/workloads/prepare_s4.sh                # default scheduler-fidelity profile + separately reported semantic-replay profile + Wasmd bundle
+The final cluster campaign expects the prepared S1, S3, and S4 Wasmd execution bundles plus exact S3 access traces. Synthetic MiniWarehouse, NativeMix, and ConflictLab inputs are generated locally by the experiment drivers.
+
+Minimum transferred data:
+
+```text
+benchmarks/corpora/vegeta-ethereum/s1/native-execution/
+benchmarks/corpora/vegeta-ethereum/s3/corpus.jsonl
+benchmarks/corpora/vegeta-ethereum/s3/native-plan/native-plan.jsonl
+benchmarks/corpora/vegeta-ethereum/s3/native-execution/
+benchmarks/corpora/vegeta-ethereum/s3-exact-sload-sstore/tx-traces/
+benchmarks/corpora/vegeta-ethereum/s4/native-plan/readiness.txt
+benchmarks/corpora/vegeta-ethereum/s4/native-execution/
 ```
 
-Native application and ConflictLab inputs are generated deterministically by the experiment scripts and need no network access.
+The source tree also contains preparation utilities under `evaluation/workloads/` and `tools/vegeta/` for reconstructing those frozen inputs when necessary. Characterization caches are preparation artifacts and are not required on the publication machine.
 
 ## Experiment map
 
-- `01_s1_headline.sh` -- S1-derived Wasmd headline, all five systems, with translated-workload parallelism bounds.
-- `02_s4_headline.sh` -- S4-derived Wasmd headline after the reviewed S4 native bundle is prepared.
-- `03_s3_breakdown.sh` -- 101-block phase/oracle dataset.
-- `04_native_apps.sh` -- MiniWarehouse uniform/hot and native CW20/CW721/AMM mix.
-- `05_conflictlab_upper_bound.sh` -- zero-conflict native Wasm upper bound.
-- `06_conflictlab_contention.sh` -- controlled conflict lanes, all five systems.
-- `07_conflictlab_prediction.sh` -- symbolic granularity and hidden-key prediction faults.
-- `08_conflictlab_adaptation.sh` -- workload-transition feedback/regime adaptation.
-- `09_s3_acg_ablation.sh` -- ACG implementation ablation.
-- `10_conflictlab_block_size.sh` -- block-size/break-even sweep.
-- `11_conflictlab_consensus.sh` -- cutoff and candidate/decided divergence.
-- `12_conflictlab_semantics.sh` -- range/bank/instantiate/stateful correctness coverage.
-- `13_conflictlab_compaction.sh` -- graph compaction/transitive-reduction scalability.
-- `14_consensus_window_sensitivity.sh` -- one S1-only postprocessing sweep used to justify the canonical consensus window; it does not rerun execution.
-
-See [`PAPER_PLAN.md`](PAPER_PLAN.md) for the claim-to-figure mapping and metric definitions. `evaluation/figures/INDEX.txt` is regenerated from whichever result sets are currently present; missing S4 simply means its figure is absent until the workload is ready.
+- `00_validate.sh` -- repository/evaluator validation.
+- `01_s1_headline.sh` -- S1-derived Wasmd headline.
+- `02_s4_headline.sh` -- S4-derived Wasmd headline.
+- `03_s3_breakdown.sh` -- S3 phase and exact-oracle analysis.
+- `04_native_apps.sh` -- MiniWarehouse and NativeMix.
+- `05_conflictlab_upper_bound.sh` -- zero-conflict scaling ceiling.
+- `06_conflictlab_contention.sh` -- controlled contention.
+- `07_conflictlab_prediction.sh` -- prediction quality and hidden dependencies.
+- `08_conflictlab_adaptation.sh` -- runtime feedback and regime changes.
+- `09_s3_acg_ablation.sh` -- implementation ablation.
+- `10_conflictlab_block_size.sh` -- block-size sweep.
+- `11_conflictlab_consensus.sh` -- candidate/final-order divergence.
+- `12_conflictlab_semantics.sh` -- semantic correctness coverage.
+- `13_conflictlab_compaction.sh` -- graph compaction scalability.
+- `14_consensus_window_sensitivity.sh` -- re-summarizes S1 across ordering windows.
+- `15_compute_sensitivity.sh` -- compute-intensity sensitivity.
+- `16_translation_fidelity.sh` -- source/native topology and cost fidelity.
+- `17_iavl_sensitivity.sh` -- state-backend sensitivity.
 
 ## Consensus-overlap reporting
 
-Normal paper experiments use one canonical external consensus window:
+The canonical design point is `C = 300 ms` unless explicitly overridden with `PAPER_EVAL_CONSENSUS_WINDOW_MS`. The evaluator reports:
 
 ```text
-C = 300 ms
-```
-
-Override only when reproducing an explicitly different design point:
-
-```bash
-PAPER_EVAL_CONSENSUS_WINDOW_MS=300 bash evaluation/experiments/01_s1_headline.sh
-```
-
-The single-node harness does not measure consensus latency. `300 ms` is a fixed low-latency WAN BFT design point chosen independently of ACG/Vegeta timings; it is not derived from a strategy's pre-consensus interval. For every strategy the artifact reports:
-
-```text
-tail(C)   = R + max(0, P-C)
-tail-x(C) = Serial_R / tail(C)
-commit(C) = max(C,P) + R
+tail(C)     = R + max(0, P-C)
+tail-x(C)   = Serial_R / tail(C)
+commit(C)   = max(C,P) + R
 commit-x(C) = Serial_commit(C) / commit(C)
 ```
 
-where `P` is eligible pre-consensus work and `R` is consensus-visible post-order work. If the evaluator must perform a canonical fallback to obtain the committed blockchain state, that fallback is charged to `R` while remaining separately reported in the raw diagnostics. `replay-x` remains the Vegeta-comparable metric. The fixed-window headline additionally reports pre-consensus completion coverage and overrun.
+`P` is eligible pre-consensus work and `R` is consensus-visible post-order work. Canonical fallback required to obtain committed state is charged to `R` while remaining separately visible in diagnostics.
+Experiment 14 sweeps the ordering window without rerunning execution; override its grid with `PAPER_EVAL_CONSENSUS_SWEEP_MS`.
 
-Only `14_consensus_window_sensitivity.sh` sweeps `C`. It re-summarizes the already collected S1 per-block `P/R` records and therefore does not multiply benchmark runtime. Its default grid is `0,50,100,150,200,250,300,400,500,750,1000 ms`; override with `PAPER_EVAL_CONSENSUS_SWEEP_MS`. Use that one figure to demonstrate that conclusions are not an artifact of the 300 ms choice.
+## Results and postprocessing
 
-## Reproducibility rules
+The consolidated plotting path is `evaluation/eurosys/plot_main.py`; the old per-figure plotting stack has been removed. To regenerate figures and machine-readable CSV tables from an existing result tree:
 
-Do not compare runs with different evaluator hashes, calibration values, IAVL settings or workload manifests. Each Wasmd campaign uses one calibration for every strategy in that campaign and verifies every non-Serial result against a Serial CommitID oracle. Keep the raw JSONL alongside summarized CSV/PDF outputs; the raw records contain the phase and safety counters needed for artifact review.
+```bash
+PAPER_EVAL_RESULT_ROOT=/path/to/result-root \
+  bash evaluation/eurosys/postprocess.sh
+```
 
-## Scope boundary
+Keep raw `records.jsonl`, `raw/`, `machine.json`, and allocation metadata with the result tree. Do not merge measurements from different Git revisions, evaluator calibrations, worker sets, or machine allocations.
 
-The artifact does **not** implement or claim an original-EVM reproduction of Vegeta S1/S4. S1/S4 provide real transaction provenance, but the evaluated workloads execute native Wasmd translations. The paper should use the names *S1-derived Wasmd* and *S4-derived Wasmd* and report the workload-parallelism diagnostics generated from the actual translated accesses. Vegeta's published S1 chain ratio is context only, not an asserted equivalence target.
-
-## EuroSys six-figure artifact bundle
-
-For the consolidated six-figure/two-table submission layout, use `evaluation/eurosys/run.sh` instead of the legacy `experiments/run-all.sh`.  It preserves experiments 01--14, adds compute-intensity and exact-S3 fidelity studies, captures per-strategy peak RSS and machine provenance, and writes the publication bundle to `benchmark-results/eurosys/<machine-tag>/paper/`.  See [`eurosys/README.md`](eurosys/README.md) for the local-six-core and Vegeta-class run commands.
+See [`eurosys/README.md`](eurosys/README.md) for cluster-specific details and [`PAPER_PLAN.md`](PAPER_PLAN.md) for the claim-to-experiment mapping.
