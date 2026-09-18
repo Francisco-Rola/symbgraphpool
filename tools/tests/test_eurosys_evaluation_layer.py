@@ -72,6 +72,21 @@ class EuroSysEvaluationLayerTests(unittest.TestCase):
         self.assertIn('contention[label].append((lanes, num(row, "commit_x")))',text)
         self.assertIn('axes[1].set_ylabel("Modeled commit speedup")',text)
 
+    def test_publication_layout_keeps_only_headline_double_column(self):
+        plot=(ROOT/'evaluation/eurosys/plot_main.py').read_text()
+        self.assertIn('PAPER_COLUMN_WIDTH_IN = 3.33',plot)
+        self.assertEqual(plot.count('plt.subplots(1, 3'),1)
+        self.assertNotIn('plt.subplots(1, 2',plot)
+        self.assertGreaterEqual(plot.count('stacked_figure(3'),4)
+        self.assertGreaterEqual(plot.count('stacked_figure(2'),3)
+
+        paper=(ROOT/'evaluation/eurosys/paper-text/evaluation.tex').read_text()
+        self.assertEqual(paper.count(r'\begin{figure*}[t]'),1)
+        self.assertEqual(paper.count(r'\begin{figure}[t]'),5)
+        self.assertNotIn('local campaign',paper.lower())
+        self.assertNotIn('six workers',paper.lower())
+        self.assertIn('[MW-0]',paper)
+
     def test_compute_sensitivity_summary_reads_scale_directories(self):
         with tempfile.TemporaryDirectory() as td:
             td=Path(td); root=td/'root'; out=td/'out'

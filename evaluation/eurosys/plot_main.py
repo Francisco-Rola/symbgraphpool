@@ -4,8 +4,10 @@
 The plotting layer intentionally uses a compact, minimalist visual language:
 normalized latency for the headline, sparse axes, direct annotations, shared
 legends, and consistent marker/line encodings that remain distinguishable in
-grayscale.  It consumes only frozen experiment artifacts and never mutates raw
-measurements.
+grayscale.  Figure 1 is a double-column headline; the remaining main and
+supplementary figures are single-column, vertically stacked panels sized for
+ACM two-column proceedings.  The script consumes only frozen experiment
+artifacts and never mutates raw measurements.
 """
 from __future__ import annotations
 
@@ -48,6 +50,9 @@ MARKERS = {
     "Rust-ACG": "D",
     "ACG-Oracle": "P",
 }
+PAPER_COLUMN_WIDTH_IN = 3.33
+STACKED_PANEL_HEIGHT_IN = 1.48
+
 LINESTYLES = {
     "BlockSTM": "-",
     "AriaFB": "--",
@@ -213,10 +218,23 @@ def strategy_legend(fig, *, labels=None, y=1.01, ncol=4):
     )
 
 
+def stacked_figure(panel_count, *, shared_legend=False):
+    """Create a single-column ACM figure with vertically stacked panels."""
+    legend_height = 0.44 if shared_legend else 0.0
+    fig, axes = plt.subplots(
+        panel_count,
+        1,
+        figsize=(PAPER_COLUMN_WIDTH_IN, panel_count * STACKED_PANEL_HEIGHT_IN + legend_height),
+        squeeze=False,
+    )
+    return fig, list(axes[:, 0])
+
+
 def save(fig, path, *, top=0.88, bottom=0.18):
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout(rect=(0.0, bottom, 1.0, top))
-    fig.savefig(path, bbox_inches="tight", pad_inches=0.03)
+    fig.align_ylabels()
+    fig.tight_layout(rect=(0.0, bottom, 1.0, top), h_pad=0.55)
+    fig.savefig(path, bbox_inches="tight", pad_inches=0.025)
     plt.close(fig)
 
 
@@ -423,7 +441,7 @@ def main():
     # Figure 2. Worker-count tradeoff and the distribution of per-block tail
     # latency, normalized by the matching Serial block.
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 3, figsize=(7.15, 2.25))
+    fig, axes = stacked_figure(3, shared_legend=True)
     for index, (ax, (name, rows, _)) in enumerate(zip(axes[:2], datasets)):
         for label in STRATEGIES:
             plot_summary_line(ax, selected(rows, label), "overlap_tail_x", label)
@@ -456,16 +474,16 @@ def main():
     ax.set_ylabel("CDF")
     panel_title(ax, "c", "Max-worker block distribution")
     clean_axis(ax, grid="x")
-    ax.legend(frameon=False, fontsize=6.0, loc="lower right")
-    strategy_legend(fig, y=1.02, ncol=4)
-    save(fig, out / "fig02-scalability-and-tail-distribution.pdf", top=0.84, bottom=0.24)
+    ax.legend(frameon=False, fontsize=6.1, loc="lower right", ncol=2)
+    strategy_legend(fig, y=0.995, ncol=2)
+    save(fig, out / "fig02-scalability-and-tail-distribution.pdf", top=0.91, bottom=0.07)
 
     # ------------------------------------------------------------------
     # Figure 3. Controlled contention and scaling ceiling.  NativeMix is kept
     # in the text because its single max-worker point is more legible there than
     # as a fourth small panel.
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 3, figsize=(7.15, 2.25))
+    fig, axes = stacked_figure(3, shared_legend=True)
     native = root / "04-native"
     hot = {label: [] for label in STRATEGIES}
     for directory in native.glob("miniwarehouse-hot*"):
@@ -489,7 +507,7 @@ def main():
                 **line_kwargs(label),
             )
     axes[0].axhline(1, color="#9CA3AF", linestyle="--", linewidth=0.8)
-    axes[0].set_xlabel("Hot-warehouse probability (%)")
+    axes[0].set_xlabel("Hot warehouse (%)")
     axes[0].set_ylabel("Tail($C$) speedup")
     panel_title(axes[0], "a", "Application contention")
     clean_axis(axes[0], grid="y")
@@ -548,16 +566,16 @@ def main():
             label="Ideal",
         )
     axes[2].set_xlabel("Workers")
-    axes[2].set_ylabel("Scaling vs own 1-worker run")
+    axes[2].set_ylabel("Scaling vs 1 worker")
     panel_title(axes[2], "c", "Zero-conflict ceiling")
     clean_axis(axes[2], grid="y")
-    strategy_legend(fig, y=1.02, ncol=4)
-    save(fig, out / "fig03-generality-contention-ceiling.pdf", top=0.84, bottom=0.24)
+    strategy_legend(fig, y=0.995, ncol=2)
+    save(fig, out / "fig03-generality-contention-ceiling.pdf", top=0.91, bottom=0.07)
 
     # ------------------------------------------------------------------
     # Figure 4. Cost decomposition, overhead, and block-size sensitivity.
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 3, figsize=(7.15, 2.25))
+    fig, axes = stacked_figure(3)
     records = [
         row
         for row in read_jsonl(root / "03-s3-breakdown/records.jsonl")
@@ -627,11 +645,11 @@ def main():
         ]
         mw = max_workers(econ)
         row = row_for(econ, "Rust-ACG", mw)
-        overhead[dataset]["Local work"] = 100.0 * (num(row, "local_elapsed_vs_serial") - 1.0)
+        overhead[dataset]["Execution work"] = 100.0 * (num(row, "local_elapsed_vs_serial") - 1.0)
         overhead[dataset]["Peak RSS"] = resource_overhead_pct(root, subdir, mw)
     positions = {"S1": 0, "S4": 1}
     for metric, marker, shade in [
-        ("Local work", "D", color("Rust-ACG")),
+        ("Execution work", "D", color("Rust-ACG")),
         ("Peak RSS", "o", "#6B7280"),
     ]:
         values = [overhead[d][metric] for d in ["S1", "S4"]]
@@ -656,7 +674,14 @@ def main():
     axes[1].axhline(0, color="#9CA3AF", linewidth=0.8)
     axes[1].set_xticks([0, 1], ["S1", "S4"])
     axes[1].set_ylabel("Overhead vs Serial (%)")
-    axes[1].set_ylim(-5.5, 13.5)
+    overhead_values = [
+        value
+        for dataset in ["S1", "S4"]
+        for value in overhead[dataset].values()
+        if math.isfinite(value)
+    ]
+    if overhead_values:
+        axes[1].set_ylim(min(-5.0, min(overhead_values) - 2.5), max(12.0, max(overhead_values) + 5.0))
     panel_title(axes[1], "b", "Resource overhead")
     clean_axis(axes[1], grid="y")
     axes[1].legend(frameon=False, fontsize=6.3, loc="upper left")
@@ -684,15 +709,18 @@ def main():
     axes[2].axhline(1, color="#9CA3AF", linestyle="--", linewidth=0.8)
     axes[2].set_xlabel("Transactions/block")
     axes[2].set_ylabel("Tail($C$) speedup")
+    block_speedups = [value for points in block_size.values() for _, value in points if value > 0]
+    if block_speedups:
+        axes[2].set_ylim(0.9, max(block_speedups) * 1.7)
     panel_title(axes[2], "c", "Block-size sensitivity")
     clean_axis(axes[2], grid="y")
-    strategy_legend(fig, y=1.02, ncol=4)
-    save(fig, out / "fig04-cost-and-overheads.pdf", top=0.84, bottom=0.24)
+    axes[2].legend(frameon=False, fontsize=6.0, ncol=2, loc="upper left")
+    save(fig, out / "fig04-cost-and-overheads.pdf", top=0.985, bottom=0.07)
 
     # ------------------------------------------------------------------
     # Figure 5. Prediction quality, oracle headroom, and recovery.
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 3, figsize=(7.15, 2.25))
+    fig, axes = stacked_figure(3)
     wide = read_csv(root / "07-prediction/prediction-granularity/aggregate/summary-wide.csv")
     quality = []
     for row in wide:
@@ -735,7 +763,7 @@ def main():
     axes[0].set_ylabel("Conflict prediction (%)")
     panel_title(axes[0], "a", "Symbolic granularity")
     clean_axis(axes[0], grid="y")
-    axes[0].legend(frameon=False, fontsize=6.3, loc="lower left")
+    axes[0].legend(frameon=False, fontsize=6.3, loc="lower left", ncol=2)
 
     s3_summary = read_csv(root / "03-s3-breakdown/summary/summary.csv")
     mw = max_workers(s3_summary)
@@ -815,16 +843,19 @@ def main():
             )
     axes[2].set_xlabel("Blocks after change")
     axes[2].set_ylabel("Replayed transactions")
+    recovery_values = [num(row, "mean") for row in recovery + adaptation]
+    if recovery_values:
+        axes[2].set_ylim(bottom=min(0.0, min(recovery_values)), top=max(recovery_values) * 1.25)
     panel_title(axes[2], "c", "Runtime recovery")
     clean_axis(axes[2], grid="y")
-    axes[2].legend(frameon=False, fontsize=6.1, loc="upper right")
-    save(fig, out / "fig05-prediction-and-adaptation.pdf", top=0.96, bottom=0.24)
+    axes[2].legend(frameon=False, fontsize=6.0, loc="upper right", ncol=1)
+    save(fig, out / "fig05-prediction-and-adaptation.pdf", top=0.985, bottom=0.07)
 
     # ------------------------------------------------------------------
     # Figure 6. Robustness to the available ordering window and to candidate /
     # final-set divergence.
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 2, figsize=(7.15, 2.3))
+    fig, axes = stacked_figure(2)
     consensus = read_csv(root / "14-consensus-window-sensitivity/summary/consensus-sweep.csv")
     mw = max_workers(consensus)
     for label in STRATEGIES:
@@ -841,6 +872,7 @@ def main():
     axes[0].set_ylabel("Modeled commit speedup")
     panel_title(axes[0], "a", "Ordering-window sensitivity")
     clean_axis(axes[0], grid="y")
+    axes[0].legend(frameon=False, fontsize=6.1, ncol=2, loc="best")
 
     divergence = metric_long(
         root / "11-consensus/aggregate/plot-long.csv",
@@ -879,16 +911,15 @@ def main():
     axes[1].set_ylabel("Throughput speedup")
     panel_title(axes[1], "b", "Candidate/final divergence")
     clean_axis(axes[1], grid="y")
-    axes[1].legend(frameon=False, fontsize=6.3, ncol=2, loc="lower center")
-    strategy_legend(fig, y=1.02, ncol=4)
-    save(fig, out / "fig06-consensus-robustness.pdf", top=0.82, bottom=0.23)
+    axes[1].legend(frameon=False, fontsize=6.1, ncol=2, loc="best")
+    save(fig, out / "fig06-consensus-robustness.pdf", top=0.985, bottom=0.09)
 
     # Supplements use the same visual language.
     compute = []
     for dataset in ["s1", "s4"]:
         compute += read_csv(root / f"15-compute-sensitivity/{dataset}/compute-sensitivity.csv")
     if compute:
-        fig, axes = plt.subplots(1, 2, figsize=(7.15, 2.25))
+        fig, axes = stacked_figure(2, shared_legend=True)
         for index, (ax, dataset) in enumerate(zip(axes, ["S1", "S4"])):
             rows = [row for row in compute if row.get("dataset") == dataset]
             for label in STRATEGIES:
@@ -909,12 +940,12 @@ def main():
                 ax.set_ylabel("Tail($C$) speedup")
             panel_title(ax, chr(ord("a") + index), dataset)
             clean_axis(ax, grid="y")
-        strategy_legend(fig, y=1.02, ncol=4)
-        save(fig, out / "supp-compute-sensitivity.pdf", top=0.82, bottom=0.24)
+        strategy_legend(fig, y=0.995, ncol=2)
+        save(fig, out / "supp-compute-sensitivity.pdf", top=0.88, bottom=0.09)
 
     cold = read_csv(root / "eurosys-summary/cold-start.csv")
     if cold:
-        fig, axes = plt.subplots(1, 2, figsize=(7.15, 2.25))
+        fig, axes = stacked_figure(2)
         for index, (ax, dataset) in enumerate(zip(axes, ["S1", "S4"])):
             rows = [row for row in cold if row.get("dataset") == dataset]
             ax.plot(
@@ -928,7 +959,7 @@ def main():
                 ax.set_ylabel("Rolling Tail($C$) speedup")
             panel_title(ax, chr(ord("a") + index), f"{dataset}: cold start")
             clean_axis(ax, grid="y")
-        save(fig, out / "supp-real-workload-cold-start.pdf", top=0.96, bottom=0.24)
+        save(fig, out / "supp-real-workload-cold-start.pdf", top=0.985, bottom=0.09)
 
     print(out)
 

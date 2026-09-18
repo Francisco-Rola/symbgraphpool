@@ -44,12 +44,15 @@ Each machine gets an independent result root under `benchmark-results/eurosys/<m
 
 ## Six main figures
 
+Figure 1 remains a double-column headline. Figures 2--6 are generated at ACM single-column width with vertically stacked panels; use `figure` + `\columnwidth` for those PDFs rather than `figure*` + `\textwidth`. The same single-column rule is used for supplementary figures.
+
+
 | Figure | Inputs | Intended claim |
 |---|---|---|
 | `fig01-real-workload-headline.pdf` | S1/S4 headline + canonical overlap metrics | Replay-only speedup is separated from Tail(C) and Commit(C); Vegeta is shown beside the system on the overlap-aware panels. |
 | `fig02-scalability-and-tail-distribution.pdf` | S1/S4 raw records | Worker-count tradeoff plus per-block Tail(C) CDFs. Multi-sample campaigns use the median Tail(C) for each block rather than selecting sample 0. |
 | `fig03-generality-contention-ceiling.pdf` | native apps, contention sweep, zero-conflict upper bound | MiniWarehouse shows Tail(C) under application contention; controlled ConflictLab contention compares modeled Commit(C) across all systems; the machine ceiling is read from the dedicated upper-bound report. |
-| `fig04-cost-and-overheads.pdf` | S3 phase records, S1/S4 economics, peak RSS, block-size sweep | Exclusive phase costs (without double-counting validation/replay inside reconciliation), local elapsed-work amplification, memory, and Tail(C) block-size sensitivity. |
+| `fig04-cost-and-overheads.pdf` | S3 phase records, S1/S4 economics, peak RSS, block-size sweep | Exclusive phase costs (without double-counting validation/replay inside reconciliation), executor elapsed-work amplification, memory, and Tail(C) block-size sensitivity. |
 | `fig05-prediction-and-adaptation.pdf` | S3 exact oracle + ConflictLab prediction/adaptation | Residual post-order oracle headroom, measured prediction precision only, hidden-key recovery, and cost-aware workload-regime adaptation. |
 | `fig06-consensus-robustness.pdf` | S1 ordering-window postprocessing + divergence grid | Ordering-window sensitivity plus four representative candidate/final divergence cases under the cost-aware policy. |
 
@@ -79,6 +82,11 @@ The 5,000-block S1/S4 headline remains five samples under `PAPER_EVAL_PROFILE=pa
 
 ## Plot interpretation notes
 
-The paper-facing plots use `Ours` rather than the internal `Rust-ACG` strategy label. Line styles and markers are intentionally distinct so the figures remain readable in grayscale. A local campaign with one repetition per configuration is annotated as such and suppresses meaningless zero-width confidence intervals; the annotation disappears automatically once the final multi-sample campaign is postprocessed.
+The paper-facing plots use `Ours` rather than the internal `Rust-ACG` strategy label. Line styles and markers are intentionally distinct so the figures remain readable in grayscale. Figure 1 uses the full ACM text width; all later main figures use the single-column stacked layout so labels and legends remain readable without consuming two-column floats throughout the evaluation.
 
 The main S1/S4 campaign currently uses compute scale 4. The compute-sensitivity supplement reports Tail(C) across the configured scale sweep and should be cited when explaining why the design point is not dependent on one synthetic compute setting. S1/S4 translated workloads remain scheduler/contention studies on native Wasmd, not EVM performance reproductions.
+
+
+## Paper-text snapshot
+
+`paper-text/evaluation.tex` is a cluster-ready manuscript snapshot matching the six-figure layout. It intentionally contains no development-machine or local-campaign wording. Replace its numerical measurements after the final campaign and revisit qualitative claims only if the final trends change. The three MiniWarehouse values are left as explicit `[MW-*]` slots until the corrected contention sweep completes. `paper-text/conclusion.tex` contains the corresponding short conclusion.

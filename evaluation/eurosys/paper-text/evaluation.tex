@@ -1,0 +1,167 @@
+% CLUSTER-READY DRAFT: replace numerical values with the final campaign measurements.
+% Revisit qualitative claims only if the final campaign changes the observed trends.
+
+\section{Evaluation}
+\label{sec:evaluation}
+
+We evaluate \system along six questions: (1) how much execution can be removed from the post-order critical path on realistic workloads; (2) how the system scales with additional execution workers; (3) how workload contention affects its benefit relative to existing parallel executors; (4) what overhead is introduced by graph construction, speculation, validation, and adaptation; (5) how prediction quality and runtime feedback affect performance; and (6) how sensitive the benefits are to the available execution window and differences between candidate and final transaction sets.
+
+\subsection{Experimental Methodology}
+
+\paragraph{Platform.}
+We evaluate the implementation from Section~\ref{sec:implementation} using Cosmos SDK v0.54.4 and Wasmd v0.70.3. All execution strategies use the same Wasmd/WasmVM contract path, state backend, transaction inputs, and execution-cost calibration. The final experiments run on \emph{[CPU]}, with \emph{[N]} physical cores and \emph{[RAM]} of memory, running \emph{[OS/kernel]}. We evaluate worker counts from one to the number of physical cores, using powers of two and the machine maximum. Each strategy executes in an isolated process. Peak resident memory is measured externally using GNU \texttt{time -v}, while worker utilization and idle time are obtained from runtime counters so that initialization is not attributed to scheduler execution.
+
+\begin{table}[t]
+\centering
+\caption{Evaluation workloads.}
+\label{tab:workloads}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\columnwidth}{@{}llX@{}}
+\toprule
+\textbf{Workload} & \textbf{Source} & \textbf{Primary use} \\
+\midrule
+S1/S4-derived & Vegeta & End-to-end performance; 5K blocks each \\
+S3-derived & Vegeta & Prediction and cost analysis; 101 blocks \\
+MiniWarehouse & Native & Controlled application contention \\
+NativeMix & Native & Mixed-contract execution \\
+ConflictLab & Native & Controlled conflicts and semantics \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\paragraph{Workloads.}
+Table~\ref{tab:workloads} summarizes the workloads used in the evaluation. We divide them into Ethereum-derived workloads translated to Wasmd and native CosmWasm workloads constructed for controlled experiments.
+
+Our primary end-to-end workloads are derived from the S1 and S4 datasets used in Vegeta~\cite{xu2025vegeta}. We preserve the original transaction provenance and application-level operation mix, but map the corresponding contract activity to native CosmWasm implementations executed through Wasmd/WasmVM. The resulting S1-derived and S4-derived workloads therefore preserve workload structure and contention behavior relevant to scheduling, while avoiding any claim that Wasmd reproduces the instruction costs or runtime behavior of the original EVM execution. We evaluate 5,000 blocks from each workload.
+
+S3-derived follows the same translation approach but additionally provides frozen exact-access traces for each transaction. We use its 101 blocks to measure phase costs and prediction quality and to construct an exact-access oracle that replaces symbolic predictions while retaining the same execution and validation machinery. This isolates the remaining headroom attributable to access prediction.
+
+We complement the translated traces with three native CosmWasm workloads. \emph{MiniWarehouse} is a TPC-C-inspired application in which the fraction of operations directed to a hot warehouse is configurable, providing a controlled multi-key contention workload rather than a TPC-C compliance benchmark. \emph{NativeMix} combines CW20 transfers, mintable CW721 operations, and AMM-style contract calls, exposing account-local, ownership-index, and shared-pool dependencies within the same block. Finally, \emph{ConflictLab} provides dependency patterns known by construction and is used to vary contention, inject prediction misses, change workload regimes, vary block size, and exercise range accesses, deletions, native token transfers, attached funds, and state-dependent storage accesses.
+
+\paragraph{Baselines.}
+We compare five execution strategies on the same Wasmd substrate. \emph{Serial} executes transactions directly in canonical order and provides both the performance and state-equivalence reference. \emph{BlockSTM} uses the Cosmos SDK Block-STM MVCC executor, representing optimistic parallel execution after the transaction order is available~\cite{gelashvili2023blockstm}. \emph{AriaFB} adapts Aria's deterministic batch execution~\cite{lu2020aria} to Wasmd: transactions first execute from a common snapshot, Rule-2 conflicts determine which results may be retained, and conflicting transactions enter a completion-driven dependency-DAG fallback. We retain a conservative safety replay when dynamic Wasmd accesses differ from the initial batch.
+
+\emph{Vegeta} is our Wasmd port of Vegeta's speculate-order-replay execution model~\cite{xu2025vegeta}. Its pre-order pass concretely executes transactions to discover accesses, constructs dependency chains and the replay DAG, and then executes every transaction again through its post-order replay path. The implementation includes Vegeta's dependency classes, Rule-2 replay batching, and access-change handling. Thus, Vegeta and \system receive the same opportunity to perform work before ordering, but only \system attempts to reuse the resulting state transition.
+
+For S3 we additionally report \emph{ACG-Oracle}, a diagnostic rather than a deployable baseline. It substitutes exact frozen access traces for symbolic predictions while retaining \system's execution, MVCC, and validation machinery. The gap between ACG-Oracle and \system therefore estimates headroom attributable to access prediction rather than to the execution substrate itself.
+
+\paragraph{Metrics.}
+Because \system intentionally moves work earlier, no single throughput metric captures both its execution cost and the amount of work removed from the critical path. We therefore report three complementary views. Let $P$ denote work eligible to execute before the final order is available and $R$ the work remaining afterward.
+
+First, we report \emph{replay throughput},
+\[
+    \mathrm{ReplayTPS} = \frac{N}{\sum R},
+\]
+and its speedup over Serial. This metric matches the post-order execution view used by Vegeta and enables direct comparison of the remaining replay cost. It intentionally does not charge pre-order work.
+
+Second, we report an overlap-aware execution tail for an externally supplied ordering window $C$:
+\[
+    \mathrm{Tail}(C) = R + \max(0, P-C).
+\]
+Only pre-order work that actually completes within $C$ is hidden. We use $C=300\,\mathrm{ms}$ as the fixed design point for the main figures and separately sweep the window from $0$ to $1\,\mathrm{s}$; the single-node harness does not measure or assume a particular consensus protocol.
+
+Finally, for completeness, we model proposal-to-commit execution time as
+\[
+    \mathrm{Commit}(C) = \max(C,P) + R.
+\]
+This metric includes the common ordering interval and therefore illustrates when execution improvements become hidden by the ordering protocol itself. We report speedups for both Tail and Commit relative to Serial at the same $C$.
+
+\subsection{End-to-End Performance}
+\label{sec:eval-headline}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig01-real-workload-headline.pdf}
+\caption{End-to-end results on the S1- and S4-derived workloads at the maximum worker count. All panels report latency normalized to Serial (100\%; lower is better). (a) Execution remaining after ordering, (b) overlap-aware execution tail for $C=300$\,ms, and (c) modeled proposal-to-commit latency including the ordering interval. Using one scale makes explicit the distinction between removing execution from the post-order critical path and reducing overall commit latency.}
+\label{fig:eval-headline}
+\end{figure*}
+
+Figure~\ref{fig:eval-headline} shows the primary result. On S1, \system achieves a $9.82\times$ speedup in execution remaining after ordering; on S4 the corresponding speedup is $23.62\times$. Because almost all speculative work completes within the 300\,ms overlap window, the overlap-aware Tail results are nearly identical at $9.80\times$ on S1 and $23.36\times$ on S4. Vegeta reaches only $1.31\times$ and $1.32\times$, respectively, because its pre-order execution discovers dependencies but its transaction results must still be replayed.
+
+The larger reduction in post-order execution translates into a smaller, but still measurable, improvement in modeled proposal-to-commit latency. At $C=300$\,ms, \system achieves $1.120\times$ speedup on S1 and $1.149\times$ on S4, compared with $1.029\times$ and $1.034\times$ for Vegeta. The difference between these views is intentional: once the ordering interval is included, execution that was already shorter than $C$ is hidden by the common ordering cost. We therefore use Tail to quantify execution removed from the post-order critical path and Commit to quantify the resulting end-to-end effect.
+
+These gains come primarily from reuse rather than from shifting a large amount of redundant computation earlier. \system reuses 96.26\% of S1 transactions and 97.03\% of S4 transactions, while only 3.74\% and 2.97\% require canonical re-execution. The corresponding execution-attempt amplification is only $1.037\times$ and $1.030\times$. Moreover, 99.98\% and 99.92\% of pre-execution completes within the 300\,ms window. Total executor elapsed work is $1.090\times$ Serial on S1 and $1.083\times$ on S4, indicating that the reduction in post-order latency is not obtained by performing several times more execution off the critical path.
+
+\subsection{Parallelism and Per-Block Behavior}
+\label{sec:eval-scaling}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig02-scalability-and-tail-distribution.pdf}
+\caption{Effect of worker count and variation across individual blocks. (a--b) Tail speedup as the number of workers increases on S1 and S4. (c) CDF of per-block Tail at the maximum worker count, normalized to the matching Serial block; solid and dashed lines denote S1 and S4.}
+\label{fig:eval-scaling}
+\end{figure}
+
+Figure~\ref{fig:eval-scaling} exposes an important distinction between execution parallelism and result reuse. For \system, Tail speedup is highest at low worker counts and decreases as additional workers are introduced. With fewer workers, speculative execution is more conservative and nearly all results remain reusable; increasing concurrency shortens pre-execution but exposes more relationships to concurrent speculation, increasing post-order validation and replay. Since pre-execution already fits within $C$ for almost all blocks, reducing $P$ further provides little additional Tail benefit. The resulting behavior is therefore a parallelism--reuse tradeoff rather than conventional monotonic scaling of the Tail metric.
+
+This behavior does not imply that the underlying executor fails to scale. The zero-conflict experiment in Figure~\ref{fig:eval-generality}(c) isolates execution from dependency effects and reaches $4.88\times$ scaling at the maximum worker count, compared with $5.29\times$ for BlockSTM. The per-block distributions in Figure~\ref{fig:eval-scaling}(c) further show that the aggregate result is not produced by a small set of unusually favorable blocks: at the maximum worker count, the \system distributions remain substantially to the left of Vegeta on both workloads.
+
+\subsection{Generality and Contention}
+\label{sec:eval-generality}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig03-generality-contention-ceiling.pdf}
+\caption{Generality and contention. (a) Tail speedup as MiniWarehouse concentrates operations on a hot warehouse. (b) Modeled Commit speedup as the number of independent ConflictLab lanes decreases. (c) Zero-conflict scaling relative to each executor's own one-worker run.}
+\label{fig:eval-generality}
+\end{figure}
+
+The native workloads separate the benefit of moving execution earlier from the amount of application parallelism available. On NativeMix, which combines CW20, CW721, and AMM-style operations, \system reaches $40.31\times$ Tail speedup and $1.214\times$ modeled Commit speedup. This demonstrates that the mechanism is not specific to the translated Ethereum workloads.
+
+MiniWarehouse identifies a clearer boundary. With uniformly distributed warehouse accesses, \system achieves \emph{[MW-0]}$\times$ Tail speedup. As operations concentrate on one warehouse, the available speculative parallelism falls: at 50\% hotness the benefit is approximately \emph{[MW-50]}$\times$, while at 99\% hotness it falls to \emph{[MW-99]}$\times$. In this regime, the cost of speculation approaches or exceeds the useful work that can be hidden before ordering. This is the expected failure mode of the architecture: when true dependencies dominate and little useful computation can overlap with ordering, speculation provides little or no latency advantage.
+
+ConflictLab isolates this effect from application semantics. At 384 independent lanes, modeled Commit speedup is $1.556\times$ for \system, compared with $1.394\times$ for BlockSTM, $1.358\times$ for Vegeta, and $1.254\times$ for AriaFB. With a single contended lane, \system remains at $1.541\times$, while BlockSTM, Vegeta, and AriaFB fall to $0.955\times$, $0.987\times$, and $0.658\times$, respectively. The reason is not that contention disappears: \system's measured pre-execution critical path increases from 87\,ms to 221\,ms as the lanes collapse from 384 to one. That dependency chain still fits within the 300\,ms overlap window, so most of its cost remains hidden; once the chain exceeds $C$, the same mechanism predicts that the benefit must erode.
+
+\subsection{Cost of Speculation and Validation}
+\label{sec:eval-overhead}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig04-cost-and-overheads.pdf}
+\caption{Implementation cost. (a) Exclusive S3 phase costs at the maximum worker count; reconciliation excludes validation and replay to avoid double counting. (b) Executor elapsed-work and peak-RSS overhead relative to Serial. (c) Tail speedup as block size increases.}
+\label{fig:eval-cost}
+\end{figure}
+
+Figure~\ref{fig:eval-cost}(a) shows that contract execution, rather than validation, remains the dominant cost. Across S3, speculative pre-execution accounts for 5351.8\,ms and graph planning for 599.6\,ms. By comparison, indexed validation requires only 6.8\,ms, replay execution 126.1\,ms, and the remaining reconciliation machinery 23.5\,ms. The small validation cost supports the design choice to record concrete accesses during execution and defer the safety decision until the canonical order is known.
+
+The additional work and memory required to obtain this overlap are modest. On S1 and S4, total executor elapsed work is $1.090\times$ and $1.083\times$ that of Serial. Peak RSS is 3.1\% lower than Serial on S1 and 6.3\% higher on S4. These measurements indicate that the block-local MVCC state and detached receipts do not require an order-of-magnitude increase in either computation or memory.
+
+Fixed planning and bookkeeping costs are most visible on small blocks, while sufficiently large blocks eventually exceed the available overlap window. Figure~\ref{fig:eval-cost}(c) shows that \system retains $4.65\times$ Tail speedup at 1,024 transactions per block, but the decline at the largest tested size reflects pre-execution beginning to spill beyond $C$. This behavior follows directly from the $\max(0,P-C)$ term in the Tail metric and identifies the regime in which increasing block size can no longer be hidden by the available ordering interval.
+
+\subsection{Prediction Quality and Adaptation}
+\label{sec:eval-prediction}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig05-prediction-and-adaptation.pdf}
+\caption{Prediction and adaptation. (a) Conflict precision and recall as symbolic profiles become coarser. (b) Residual post-order execution with exact accesses and with \system's predicted accesses on S3. (c) Replay immediately after an injected hidden dependency or workload regime change and during subsequent adaptation.}
+\label{fig:eval-prediction}
+\end{figure}
+
+Figure~\ref{fig:eval-prediction}(a) quantifies the effect of reducing symbolic precision. Fine-grained profiles achieve 91.1\% precision and 100.0\% recall. Resource-level profiles retain 99.9\% recall but reduce precision to 48.3\%, while profile-level prediction reaches 32.5\% precision with 100.0\% recall. The consistently high recall reflects the deliberately conservative role of the symbolic layer: additional predicted conflicts reduce available parallelism, while missed conflicts are handled by concrete validation and may require replay.
+
+The exact-access experiment shows how much residual execution is attributable to imperfect prediction. Replacing symbolic predictions with frozen concrete accesses reduces S3 post-order execution from 156\,ms to 33\,ms. The corresponding modeled Commit speedup, however, changes only from $1.269\times$ to $1.274\times$ because most of the additional speculative work is already hidden by the ordering interval. More accurate prediction can therefore substantially reduce replay without producing an equally large end-to-end improvement once ordering becomes the dominant component of commit latency.
+
+Runtime feedback repairs more severe misses quickly. Immediately after injecting a hidden-key dependency, the controlled workload causes 378 transactions to replay; after one feedback block this falls to zero. A low-to-hot workload transition similarly produces 460 initial replays and zero after one feedback block. These experiments isolate adaptation from the offline analyzer and show that a missing or stale symbolic relationship need not permanently degrade subsequent schedules.
+
+\subsection{Sensitivity to the Ordering Window}
+\label{sec:eval-window}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig06-consensus-robustness.pdf}
+\caption{Robustness to uncertainty around ordering. (a) Modeled Commit speedup as the available ordering window changes. (b) Performance when the candidate transaction set differs from the final sequence through reordering or tail replacement.}
+\label{fig:eval-robustness}
+\end{figure}
+
+Figure~\ref{fig:eval-robustness}(a) shows that \system requires an interval with which to overlap execution. At $C=0$, modeled Commit performance is $0.918\times$ Serial because the speculative work is exposed rather than hidden. The benefit rises to $1.345\times$ at a 100\,ms ordering window, before falling to $1.120\times$ at the 300\,ms design point and $1.036\times$ at 1\,s. The benefit is therefore largest when the ordering interval is long enough to hide useful speculation but not so long that ordering itself dominates total latency.
+
+The candidate-set experiment tests a separate source of uncertainty. Reordering transactions, replacing transactions near the tail of the candidate set, or combining both perturbs reuse but does not introduce a new correctness case: candidate-only transactions waste speculative work, while transactions introduced only in the final sequence have no receipt and execute normally. Across the tested divergence configurations, performance degrades continuously rather than collapsing when the candidate sequence differs from the final order.
+
+\subsection{Correctness and Translation Fidelity}
+\label{sec:eval-correctness}
+
+Correctness is checked independently of performance. All 210 controlled semantic runs reproduce their matched serial state, including point and range accesses, insertion and deletion within observed ranges, native bank transfers, attached funds, contract instantiation, and state-derived keys. The S1, S3, and S4 campaigns likewise reject any run whose final application state differs from the corresponding serial execution.
+
+Because S1--S4 originate from Ethereum traces but execute native CosmWasm translations, we quantify translation fidelity separately rather than treating the workloads as EVM reproductions. On S3, native contract-storage conflicts reproduce source storage conflicts with 91.66\% recall and 66.39\% precision. The hot-key-chain statistic differs by only 0.31\%, while the native conflict-DAG critical path is 76.84\% longer than the source topology. Native execution cost has a Spearman correlation of 0.48 with source opcode steps. These measurements indicate that the translation preserves much of the contention structure relevant to scheduling, particularly hot-key behavior, while introducing additional dependencies and different execution costs. We therefore use the translated workloads to evaluate scheduling and reuse under realistic transaction structure, not to claim reproduction of absolute EVM performance.

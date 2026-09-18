@@ -95,7 +95,7 @@ Main paper: Fig. 1 S1/S4 replay plus fixed-300ms overlap-aware headline; one sep
 
 ## EuroSys consolidated publication layout
 
-The artifact-facing `evaluation/eurosys/run.sh` consolidates the mechanism suite above into six main figures and two tables.  The older per-claim PDFs remain useful appendix diagnostics; they are no longer the proposed main-paper layout.
+The artifact-facing `evaluation/eurosys/run.sh` consolidates the mechanism suite above into six main figures and two tables. Figure 1 is the only double-column main figure; Figures 2--6 are single-column PDFs with vertically stacked panels. The older per-claim PDFs remain useful appendix diagnostics; they are no longer the proposed main-paper layout.
 
 | Main item | Evidence |
 |---|---|
@@ -103,7 +103,7 @@ The artifact-facing `evaluation/eurosys/run.sh` consolidates the mechanism suite
 | Fig. 1 -- Real-workload headline | S1/S4 replay speedup plus canonical 300-ms tail and modeled commit speedups |
 | Fig. 2 -- Scalability/distribution | S1/S4 worker scaling and per-block tail CDFs |
 | Fig. 3 -- Generality/contention | MiniWarehouse hotness sweep, NativeMix, ConflictLab lane sweep, zero-conflict ceiling |
-| Fig. 4 -- Cost of ACG | S3 phase breakdown, P+R local elapsed cost, isolated-process peak RSS, block-size break-even |
+| Fig. 4 -- Cost of ACG | S3 phase breakdown, P+R executor elapsed cost, isolated-process peak RSS, block-size break-even |
 | Fig. 5 -- Prediction/adaptation | exact-access oracle, precision/performance Pareto, prediction-fault recovery, regime adaptation |
 | Fig. 6 -- Consensus robustness | consensus-window sensitivity and candidate/decided divergence |
 | Table 2 -- Correctness/semantics | accepted non-point semantic matrix, including losing regimes rather than hiding them |
