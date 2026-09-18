@@ -28,7 +28,7 @@ DISPLAY = {
     "BlockSTM": "BlockSTM",
     "AriaFB": "AriaFB",
     "Vegeta": "Vegeta",
-    "Rust-ACG": "Ours",
+    "Rust-ACG": "Beacon",
     "ACG-Oracle": "Exact-access oracle",
 }
 
@@ -714,7 +714,18 @@ def main():
         axes[2].set_ylim(0.9, max(block_speedups) * 1.7)
     panel_title(axes[2], "c", "Block-size sensitivity")
     clean_axis(axes[2], grid="y")
-    axes[2].legend(frameon=False, fontsize=6.0, ncol=2, loc="upper left")
+    axes[2].legend(
+        frameon=False,
+        fontsize=5.8,
+        ncol=4,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.01),
+        handlelength=1.45,
+        columnspacing=0.65,
+        handletextpad=0.35,
+        borderaxespad=0.0,
+    )
+    axes[2].set_title("(c)  Block-size sensitivity", loc="left", pad=18, fontweight="semibold")
     save(fig, out / "fig04-cost-and-overheads.pdf", top=0.985, bottom=0.07)
 
     # ------------------------------------------------------------------
@@ -887,8 +898,8 @@ def main():
     wanted = [
         ("identical", "Identical", "#0F766E", "-"),
         ("reorder-20pct", "20% reorder", "#D97706", "--"),
-        ("tail-20pct", "20% tail change", "#7C3AED", "-."),
-        ("tail-reorder-10pct", "10% tail + reorder", "#6B7280", ":"),
+        ("tail-20pct", "20% tail", "#7C3AED", "-."),
+        ("tail-reorder-10pct", "10% tail+reorder", "#6B7280", ":"),
     ]
     for case, name, shade, linestyle in wanted:
         rows = sorted(
@@ -911,7 +922,18 @@ def main():
     axes[1].set_ylabel("Throughput speedup")
     panel_title(axes[1], "b", "Candidate/final divergence")
     clean_axis(axes[1], grid="y")
-    axes[1].legend(frameon=False, fontsize=6.1, ncol=2, loc="best")
+    axes[1].legend(
+        frameon=False,
+        fontsize=5.9,
+        ncol=2,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.01),
+        handlelength=1.55,
+        columnspacing=0.9,
+        handletextpad=0.4,
+        borderaxespad=0.0,
+    )
+    axes[1].set_title("(b)  Candidate/final divergence", loc="left", pad=30, fontweight="semibold")
     save(fig, out / "fig06-consensus-robustness.pdf", top=0.985, bottom=0.09)
 
     # Supplements use the same visual language.
